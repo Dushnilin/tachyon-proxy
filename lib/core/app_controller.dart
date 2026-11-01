@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
@@ -79,6 +80,16 @@ class AppController extends ChangeNotifier {
   int _consecutiveWatchdogFails = 0;
   String _lastNetType = '';
 
+  /// Версия приложения и состояние встроенного обновления ядра/APK.
+  static const String appVersion = '0.0.2';
+  bool _checkingUpdates = false;
+  bool _updatingApp = false;
+  double _updateProgress = 0.0;
+  String _updateStatusText = '';
+  String _installedCoreVersion = '';
+  String _latestCoreVersion = '';
+  String _latestAppVersion = '';
+
   AppSettings get settings => _settings;
   TunnelState get tunnel => _tunnel;
   bool get loading => _loading;
@@ -102,6 +113,20 @@ class AppController extends ChangeNotifier {
   String get desyncTestStatus => _desyncTestStatus;
   List<DesyncScanEntry> get desyncScanResults => _desyncScanResults;
   String get activeNetworkType => _lastNetType;
+  bool get checkingUpdates => _checkingUpdates;
+  bool get updatingApp => _updatingApp;
+  double get updateProgress => _updateProgress;
+  String get updateStatusText => _updateStatusText;
+  String get installedCoreVersion => _installedCoreVersion;
+  String get latestCoreVersion => _latestCoreVersion;
+  String get latestAppVersion => _latestAppVersion;
+  bool get hasCoreUpdate =>
+      _latestCoreVersion.isNotEmpty &&
+      _installedCoreVersion.isNotEmpty &&
+      _compareSemver(_latestCoreVersion, _installedCoreVersion) > 0;
+  bool get hasAppUpdate =>
+      _latestAppVersion.isNotEmpty &&
+      _compareSemver(_latestAppVersion, appVersion) > 0;
 
   int? pingOf(String id) => _pings[id];
   bool isPinging(String id) => _pingingIds.contains(id);
@@ -339,32 +364,91 @@ class AppController extends ChangeNotifier {
     await _update(_settings.copyWith(profiles: profiles, selectedProfileId: selected));
   }
 
-  /// Импортирует подписку: принимает ссылку или готовое содержимое.
+  /// Импортирует подписку или серверы: принимает ссылку, deep-link, QR-пейлоад или готовое содержимое.
   Future<int> importProfiles(String content) async {
-    final payload = content.trim();
-    // https-ссылка - подписка: её качает и обновляет само ядро.
-    if (payload.startsWith('http://') || payload.startsWith('https://')) {
-      await addSubscription(payload);
-      return _lastError.isEmpty ? -1 : 0;
+    var payload = content.trim();
+    if (payload.isEmpty) return 0;
+
+    // Распаковка клиентских deep-link обёрток (v2rayng://, clash://, sing-box://, hiddify://, sub://, tachyon://)
+    final unwrappedUrl = _unwrapSubscriptionDeepLink(payload);
+    if (unwrappedUrl != null) {
+      payload = unwrappedUrl;
     }
+
+    // http(s)-ссылка на подписку (не одиночный http://user:pass@host:port прокси)
+    if ((payload.startsWith('http://') || payload.startsWith('https://')) &&
+        !payload.contains('\n')) {
+      final uri = Uri.tryParse(payload);
+      final isDirectHttpProxy = uri != null &&
+          uri.userInfo.isNotEmpty &&
+          (uri.path.isEmpty || uri.path == '/') &&
+          uri.query.isEmpty;
+      final isTgMtproto = uri != null &&
+          (uri.host.toLowerCase() == 't.me' || uri.host.toLowerCase() == 'telegram.me') &&
+          uri.path == '/proxy';
+      if (!isDirectHttpProxy && !isTgMtproto) {
+        await addSubscription(payload);
+        return _lastError.isEmpty ? -1 : 0;
+      }
+    }
+
     final parser = LinkParser();
     final profiles = parser.parseSubscription(payload);
     if (profiles.isEmpty) {
-      _lastError = 'не удалось разобрать ни одной ссылки';
+      _lastError = 'Не удалось распознать ссылку или формат подписки';
       notifyListeners();
       return 0;
     }
-    final existing = _settings.profiles.map((p) => p.id).toSet();
-    final fresh = profiles.where((p) => !existing.contains(p.id)).toList();
+    _lastError = '';
+    final byId = {for (final p in _settings.profiles) p.id: p};
+    for (final p in profiles) {
+      byId[p.id] = p;
+    }
+    final merged = byId.values.toList();
     await _update(
       _settings.copyWith(
-        profiles: [..._settings.profiles, ...fresh],
-        selectedProfileId: _settings.selectedProfileId.isEmpty && fresh.isNotEmpty
-            ? fresh.first.id
-            : _settings.selectedProfileId,
+        profiles: merged,
+        selectedProfileId: profiles.length == 1
+            ? profiles.first.id
+            : (_settings.selectedProfileId.isEmpty ? profiles.first.id : _settings.selectedProfileId),
       ),
     );
-    return fresh.length;
+    return profiles.length;
+  }
+
+  String? _unwrapSubscriptionDeepLink(String raw) {
+    final lower = raw.toLowerCase();
+    if (lower.startsWith('sub://')) {
+      final body = raw.substring(6).split('#').first.trim();
+      try {
+        var b64 = body.replaceAll('-', '+').replaceAll('_', '/');
+        if (b64.length % 4 != 0) {
+          b64 = b64.padRight(b64.length + (4 - b64.length % 4), '=');
+        }
+        final decoded = utf8.decode(base64.decode(b64)).trim();
+        if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+          return decoded;
+        }
+      } catch (_) {}
+    }
+    if (lower.startsWith('v2rayng://') ||
+        lower.startsWith('clash://') ||
+        lower.startsWith('sing-box://') ||
+        lower.startsWith('hiddify://') ||
+        lower.startsWith('streisand://') ||
+        lower.startsWith('karing://') ||
+        lower.startsWith('tachyon://')) {
+      final uri = Uri.tryParse(raw);
+      final urlParam = uri?.queryParameters['url'] ?? uri?.queryParameters['config'];
+      if (urlParam != null && urlParam.isNotEmpty) {
+        return Uri.decodeComponent(urlParam).trim();
+      }
+      final idx = raw.indexOf('https://');
+      if (idx > 0) return raw.substring(idx).split('#').first.trim();
+      final idxHttp = raw.indexOf('http://');
+      if (idxHttp > 0) return raw.substring(idxHttp).split('#').first.trim();
+    }
+    return null;
   }
 
   /// Добавляет подписку: ядро качает её само, с железными заголовками.
@@ -412,74 +496,98 @@ class AppController extends ChangeNotifier {
 
       var hwid = _settings.hwid;
       if (hwid.isEmpty) {
-        hwid = 'e4d909c290d0fb1ca068ffaddf22cbd0';
+        final rng = Random.secure();
+        hwid = List.generate(16, (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
         _settings = _settings.copyWith(hwid: hwid);
         unawaited(_persist());
       }
 
-      var currentUrl = sub.url.trim();
-      HttpClientResponse? response;
-      for (var redirect = 0; redirect < 6; redirect++) {
-        final uri = Uri.tryParse(currentUrl);
-        if (uri == null) {
-          _lastError = 'Некорректная ссылка: $currentUrl';
-          notifyListeners();
-          return 0;
-        }
-        final request = await client.getUrl(uri);
-        request.headers.set('User-Agent', 'v2rayNG/1.8.5 (Linux; Android)');
-        request.headers.set('Accept', '*/*');
-        request.headers.set('Accept-Encoding', 'gzip, deflate');
-        request.headers.set('X-Hwid', hwid);
-        request.followRedirects = false;
-        response = await request.close();
-
-        if (response.statusCode >= 300 && response.statusCode < 400) {
-          final loc = response.headers.value(HttpHeaders.locationHeader);
-          await response.drain();
-          if (loc != null && loc.isNotEmpty) {
-            currentUrl = uri.resolve(loc).toString();
-            continue;
-          }
-        }
-        break;
-      }
-
-      if (response == null || response.statusCode != 200) {
-        final code = response?.statusCode ?? 0;
-        _lastError = 'Сервер вернул HTTP $code при загрузке подписки';
-        notifyListeners();
-        return 0;
-      }
-
-      var bytes = await response.fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk));
-
-      // Проверяем gzip magic 0x1f 0x8b
-      if (bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) {
-        try {
-          bytes = gzip.decode(bytes);
-        } catch (_) {}
-      }
-
-      String body;
-      try {
-        body = utf8.decode(bytes);
-      } catch (_) {
-        body = latin1.decode(bytes);
-      }
-
-      final trimmed = body.trim();
-      if (trimmed.toLowerCase().startsWith('<!doctype html') ||
-          trimmed.toLowerCase().startsWith('<html')) {
-        _lastError = 'Сервер вернул HTML-страницу вместо серверов (Cloudflare/капча/ошибка хостинга)';
-        notifyListeners();
-        return 0;
-      }
+      const userAgents = [
+        'v2rayNG/1.8.5 (Linux; Android)',
+        'Tachyon/0.0.2 (Android; compatible; sing-box/1.11; HiddifyNext)',
+        'Happ/1.6.0 (Android; compatible; sing-box; Mihomo)',
+      ];
 
       final parser = LinkParser();
-      final fresh = parser.parseSubscription(body, subscriptionId: subId);
-      if (fresh.isEmpty) {
-        _lastError = 'В ответе подписки не найдено распознаваемых серверов';
+      List<Profile> fresh = const [];
+      HttpClientResponse? response;
+      var lastStatusCode = 0;
+      var gotHtml = false;
+
+      for (final ua in userAgents) {
+        var currentUrl = sub.url.trim();
+        HttpClientResponse? attemptResp;
+        for (var redirect = 0; redirect < 6; redirect++) {
+          final uri = Uri.tryParse(currentUrl);
+          if (uri == null) {
+            _lastError = 'Некорректная ссылка: $currentUrl';
+            notifyListeners();
+            return 0;
+          }
+          final request = await client.getUrl(uri);
+          request.headers.set('User-Agent', ua);
+          request.headers.set('Accept', '*/*');
+          request.headers.set('Accept-Encoding', 'gzip, deflate');
+          request.headers.set('X-Hwid', hwid);
+          request.headers.set('x-device-os', 'Android');
+          request.followRedirects = false;
+          attemptResp = await request.close();
+
+          if (attemptResp.statusCode >= 300 && attemptResp.statusCode < 400) {
+            final loc = attemptResp.headers.value(HttpHeaders.locationHeader);
+            await attemptResp.drain();
+            if (loc != null && loc.isNotEmpty) {
+              currentUrl = uri.resolve(loc).toString();
+              continue;
+            }
+          }
+          break;
+        }
+
+        if (attemptResp == null) continue;
+        lastStatusCode = attemptResp.statusCode;
+        if (attemptResp.statusCode != 200) {
+          await attemptResp.drain();
+          continue;
+        }
+
+        var bytes = await attemptResp.fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk));
+        if (bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) {
+          try {
+            bytes = gzip.decode(bytes);
+          } catch (_) {}
+        }
+
+        String body;
+        try {
+          body = utf8.decode(bytes);
+        } catch (_) {
+          body = latin1.decode(bytes);
+        }
+
+        final trimmed = body.trim();
+        if (trimmed.toLowerCase().startsWith('<!doctype html') ||
+            trimmed.toLowerCase().startsWith('<html')) {
+          gotHtml = true;
+          continue;
+        }
+
+        final parsed = parser.parseSubscription(body, subscriptionId: subId);
+        if (parsed.isNotEmpty) {
+          fresh = parsed;
+          response = attemptResp;
+          break;
+        }
+      }
+
+      if (fresh.isEmpty || response == null) {
+        if (lastStatusCode != 200 && lastStatusCode != 0) {
+          _lastError = 'Сервер вернул HTTP $lastStatusCode при загрузке подписки';
+        } else if (gotHtml) {
+          _lastError = 'Сервер вернул HTML-страницу вместо серверов (Cloudflare/капча/ошибка хостинга)';
+        } else {
+          _lastError = 'В ответе подписки не найдено распознаваемых серверов';
+        }
         notifyListeners();
         return 0;
       }
@@ -1560,7 +1668,234 @@ class AppController extends ChangeNotifier {
   }
 
   /// Версия нативного ядра.
-  Future<String> coreVersion() => bridge.coreVersion();
+  Future<String> coreVersion() async {
+    final v = await bridge.coreVersion();
+    _installedCoreVersion = v.replaceFirst(RegExp(r'^v'), '').trim();
+    return v;
+  }
+
+  static int _compareSemver(String a, String b) {
+    final pa = a.replaceFirst(RegExp(r'^v'), '').split(RegExp(r'[.-]'));
+    final pb = b.replaceFirst(RegExp(r'^v'), '').split(RegExp(r'[.-]'));
+    final len = pa.length > pb.length ? pa.length : pb.length;
+    for (var i = 0; i < len; i++) {
+      final na = i < pa.length ? (int.tryParse(pa[i]) ?? 0) : 0;
+      final nb = i < pb.length ? (int.tryParse(pb[i]) ?? 0) : 0;
+      if (na != nb) return na.compareTo(nb);
+    }
+    return 0;
+  }
+
+  /// Проверяет наличие новых релизов `tachyon-core` и `tachyon-proxy` на GitHub.
+  Future<void> checkUpdates() async {
+    if (_checkingUpdates) return;
+    _checkingUpdates = true;
+    _updateStatusText = 'Проверка релизов на GitHub...';
+    notifyListeners();
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final currCore = await bridge.coreVersion();
+      _installedCoreVersion = currCore.replaceFirst(RegExp(r'^v'), '').trim();
+
+      // 1. Проверяем последний релиз ядра Dushnilin/tachyon-core
+      final coreReq = await client.getUrl(
+        Uri.parse('https://api.github.com/repos/Dushnilin/tachyon-core/releases/latest'),
+      );
+      coreReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+      coreReq.headers.set('Accept', 'application/vnd.github+json');
+      final coreResp = await coreReq.close();
+      if (coreResp.statusCode == 200) {
+        final body = await coreResp.transform(utf8.decoder).join();
+        final json = jsonDecode(body);
+        if (json is Map && json['tag_name'] != null) {
+          _latestCoreVersion = json['tag_name'].toString().replaceFirst(RegExp(r'^v'), '').trim();
+        }
+      } else {
+        await coreResp.drain();
+      }
+
+      // 2. Проверяем version.json или последний релиз Dushnilin/tachyon-proxy
+      final verReq = await client.getUrl(
+        Uri.parse('https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json'),
+      );
+      verReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+      final verResp = await verReq.close();
+      if (verResp.statusCode == 200) {
+        final body = await verResp.transform(utf8.decoder).join();
+        final json = jsonDecode(body);
+        if (json is Map) {
+          final av = (json['app_version'] ?? '').toString().replaceFirst(RegExp(r'^v'), '').trim();
+          final cv = (json['core_version'] ?? '').toString().replaceFirst(RegExp(r'^v'), '').trim();
+          if (av.isNotEmpty) _latestAppVersion = av;
+          if (cv.isNotEmpty &&
+              (_latestCoreVersion.isEmpty || _compareSemver(cv, _latestCoreVersion) > 0)) {
+            _latestCoreVersion = cv;
+          }
+        }
+      } else {
+        await verResp.drain();
+        final appReq = await client.getUrl(
+          Uri.parse('https://api.github.com/repos/Dushnilin/tachyon-proxy/releases/latest'),
+        );
+        appReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+        appReq.headers.set('Accept', 'application/vnd.github+json');
+        final appResp = await appReq.close();
+        if (appResp.statusCode == 200) {
+          final body = await appResp.transform(utf8.decoder).join();
+          final json = jsonDecode(body);
+          if (json is Map && json['tag_name'] != null) {
+            final tag = json['tag_name'].toString().replaceFirst(RegExp(r'^v'), '').trim();
+            if (tag != 'latest' && tag.isNotEmpty) {
+              _latestAppVersion = tag;
+            }
+          }
+        } else {
+          await appResp.drain();
+        }
+      }
+
+      if (_latestAppVersion.isEmpty) _latestAppVersion = appVersion;
+      if (_latestCoreVersion.isEmpty) _latestCoreVersion = _installedCoreVersion;
+
+      if (hasCoreUpdate || hasAppUpdate) {
+        _updateStatusText =
+            'Доступно обновление: Приложение v$_latestAppVersion · Ядро v$_latestCoreVersion';
+      } else {
+        _updateStatusText =
+            'Установлены актуальные версии (Приложение v$appVersion · Ядро v$_installedCoreVersion)';
+      }
+    } catch (e) {
+      _updateStatusText = 'Не удалось проверить обновления: $e';
+    } finally {
+      client.close(force: true);
+      _checkingUpdates = false;
+      notifyListeners();
+    }
+  }
+
+  /// Скачивает и устанавливает обновление движка (`libtachyon.so`) или всего приложения (`APK`)
+  /// прямо из интерфейса приложения.
+  Future<void> installUpdate({bool preferEngineOnly = false}) async {
+    if (_updatingApp) return;
+    _updatingApp = true;
+    _updateProgress = 0.02;
+    _updateStatusText = 'Определение архитектуры устройства...';
+    notifyListeners();
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      final abi = await bridge.deviceAbi();
+      final fDir = await bridge.filesDir();
+      if (fDir.isEmpty) {
+        _updateStatusText = 'Ошибка: каталог приложения недоступен';
+        return;
+      }
+      final updateDir = Directory('$fDir/update');
+      if (!updateDir.existsSync()) {
+        updateDir.createSync(recursive: true);
+      }
+
+      final abiSuffix = switch (abi) {
+        'armeabi-v7a' || 'armeabi' => 'armeabi-v7a',
+        'x86_64' => 'x86_64',
+        _ => 'arm64-v8a',
+      };
+
+      Future<bool> downloadFile(String url, File targetFile, String label) async {
+        _updateStatusText = '$label...';
+        _updateProgress = 0.05;
+        notifyListeners();
+
+        var currUrl = url;
+        HttpClientResponse? resp;
+        for (var i = 0; i < 6; i++) {
+          final req = await client.getUrl(Uri.parse(currUrl));
+          req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+          req.followRedirects = false;
+          resp = await req.close();
+          if (resp.statusCode >= 300 && resp.statusCode < 400) {
+            final loc = resp.headers.value(HttpHeaders.locationHeader);
+            await resp.drain();
+            if (loc != null && loc.isNotEmpty) {
+              currUrl = Uri.parse(currUrl).resolve(loc).toString();
+              continue;
+            }
+          }
+          break;
+        }
+        if (resp == null || resp.statusCode != 200) {
+          await resp?.drain();
+          return false;
+        }
+        final total = resp.contentLength;
+        var received = 0;
+        final sink = targetFile.openWrite();
+        await for (final chunk in resp) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (total > 0) {
+            _updateProgress = (received / total).clamp(0.05, 0.98);
+            final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+            final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
+            _updateStatusText = '$label ($mb / $totalMb МБ)';
+            notifyListeners();
+          }
+        }
+        await sink.flush();
+        await sink.close();
+        return targetFile.existsSync() && targetFile.lengthSync() > 500000;
+      }
+
+      if (preferEngineOnly) {
+        final soFile = File('${updateDir.path}/libtachyon.so');
+        final soUrl =
+            'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so';
+        final okSo = await downloadFile(soFile.existsSync() ? soUrl : soUrl, soFile, 'Скачивание движка ($abiSuffix)');
+        if (okSo) {
+          _updateStatusText = 'Применение нового ядра...';
+          _updateProgress = 0.99;
+          notifyListeners();
+          if (_tunnel.status.isActive) {
+            await bridge.stop();
+          }
+          final res = await bridge.installEngineSo(soFile.path);
+          if (res == 'ok') {
+            _updateStatusText = 'Движок обновлён — перезапуск...';
+            notifyListeners();
+            return;
+          }
+        }
+      }
+
+      // Скачиваем и запускаем установку свежего APK со встроенным ядром
+      const apkName = 'tachyon-update.apk';
+      final apkFile = File('${updateDir.path}/$apkName');
+      final apkUrl =
+          'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk';
+      final okApk = await downloadFile(apkUrl, apkFile, 'Скачивание обновления ($abiSuffix)');
+      if (!okApk) {
+        _updateStatusText = 'Не удалось скачать пакет обновления с GitHub Releases';
+        return;
+      }
+
+      _updateProgress = 1.0;
+      _updateStatusText = 'Запуск системного установщика Android...';
+      notifyListeners();
+      final res = await bridge.installApk(apkName);
+      if (res != 'ok') {
+        _updateStatusText = 'Ошибка установки: $res';
+      } else {
+        _updateStatusText = 'Подтвердите установку обновления в окне Android';
+      }
+    } catch (e) {
+      _updateStatusText = 'Ошибка обновления: $e';
+    } finally {
+      client.close(force: true);
+      _updatingApp = false;
+      notifyListeners();
+    }
+  }
 
   /// Список установленных приложений.
   Future<List<InstalledApp>> installedApps() => bridge.installedApps();

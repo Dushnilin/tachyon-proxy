@@ -381,15 +381,25 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
           ),
           const SizedBox(height: Space.xl),
-          const SectionLabel('О приложении'),
+          const SectionLabel('О приложении и обновления'),
           HairlineCard(
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                DetailRow(label: 'Ядро', value: _version.isEmpty ? '—' : _version),
+                DetailRow(
+                  label: 'Ядро tachyon-core',
+                  value: _version.isEmpty
+                      ? '—'
+                      : (controller.hasCoreUpdate
+                          ? '$_version → v${controller.latestCoreVersion}'
+                          : _version),
+                ),
                 const Hairline(),
                 DetailRow(
                   label: 'Приложение',
-                  value: 'Tachyon ${settings.mtu} MTU',
+                  value: controller.hasAppUpdate
+                      ? '${AppController.appVersion} → v${controller.latestAppVersion} (${settings.mtu} MTU)'
+                      : '${AppController.appVersion} (${settings.mtu} MTU)',
                 ),
                 const Hairline(),
                 const DetailRow(
@@ -400,6 +410,68 @@ class _SettingsTabState extends State<SettingsTab> {
                 const DetailRow(
                   label: 'Списки',
                   value: 'tachyon-lists',
+                ),
+                if (controller.updateStatusText.isNotEmpty) ...[
+                  const Hairline(),
+                  Padding(
+                    padding: const EdgeInsets.only(top: Space.sm),
+                    child: Text(
+                      controller.updateStatusText,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: (controller.hasCoreUpdate || controller.hasAppUpdate)
+                            ? tokens.accent
+                            : tokens.muted,
+                      ),
+                    ),
+                  ),
+                ],
+                if (controller.updatingApp) ...[
+                  const SizedBox(height: Space.sm),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: controller.updateProgress > 0 ? controller.updateProgress : null,
+                      minHeight: 6,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: Space.md),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: (controller.checkingUpdates || controller.updatingApp)
+                            ? null
+                            : () => controller.checkUpdates(),
+                        icon: controller.checkingUpdates
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.sync_rounded, size: 17),
+                        label: const Text('Проверить'),
+                      ),
+                    ),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: controller.updatingApp
+                            ? null
+                            : () => controller.installUpdate(
+                                  preferEngineOnly:
+                                      controller.hasCoreUpdate && !controller.hasAppUpdate,
+                                ),
+                        icon: const Icon(Icons.system_update_alt_rounded, size: 17),
+                        label: Text(
+                          (controller.hasCoreUpdate || controller.hasAppUpdate)
+                              ? 'Обновить'
+                              : 'Обновить ядро/APK',
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),

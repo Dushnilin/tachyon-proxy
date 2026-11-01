@@ -56,8 +56,21 @@ class Profile {
   /// Прочие поля аутбаунда sing-box как есть.
   final Map<String, dynamic> extra;
 
-  bool get isReality => publicKey.isNotEmpty;
+  bool get isReality =>
+      publicKey.isNotEmpty && type != 'wireguard' && type != 'masque';
+
+  bool get isAmneziaWg =>
+      type == 'wireguard' &&
+      ((extra['jc'] is num && (extra['jc'] as num) > 0) ||
+          (extra['i1']?.toString().isNotEmpty ?? false));
+
   bool get hasTls {
+    if (const {'wireguard', 'shadowsocks', 'socks', 'ssh', 'snell', 'mtproto', 'mieru'}.contains(type)) {
+      return false;
+    }
+    if (const {'hysteria2', 'hysteria', 'tuic', 'anytls', 'naive', 'shadowtls', 'masque', 'trusttunnel', 'openconnect', 'tewfai'}.contains(type)) {
+      return true;
+    }
     final sec = extra['security']?.toString().toLowerCase() ?? '';
     if (sec == 'none') return false;
     return isReality || sni.isNotEmpty || alpn.isNotEmpty || sec == 'tls' || sec == 'reality';
@@ -66,17 +79,58 @@ class Profile {
   /// Полное описание для бейджа: протокол, безопасность, flow, транспорт.
   String get fullTransportLabel {
     final parts = <String>[];
-    parts.add(type.toUpperCase());
+    if (isAmneziaWg) {
+      parts.add('AMNEZIAWG');
+    } else if (type == 'hysteria2') {
+      parts.add('HYSTERIA 2');
+    } else {
+      parts.add(type.toUpperCase());
+    }
+
+    if (type == 'wireguard' || type == 'masque') {
+      parts.add('UDP');
+      return parts.join(' · ');
+    }
+    if (type == 'hysteria2' || type == 'hysteria' || type == 'tuic') {
+      parts.add('QUIC');
+      return parts.join(' · ');
+    }
+    if (type == 'tewfai') {
+      parts.add(isReality ? 'Reality' : 'TLS');
+      final trList = extra['tewfai_transport'];
+      if (trList is List && trList.isNotEmpty) {
+        parts.add(trList.map((e) => e.toString().toUpperCase()).join('+'));
+      } else {
+        parts.add(transport.toUpperCase());
+      }
+      return parts.join(' · ');
+    }
+    if (type == 'mieru') {
+      final mtr = (extra['mieru_transport'] ?? 'TCP').toString().toUpperCase();
+      parts.add(mtr);
+      return parts.join(' · ');
+    }
+    if (type == 'shadowsocks') {
+      if (method.startsWith('2022-')) {
+        parts.add('SS-2022');
+      } else if (method.isNotEmpty) {
+        parts.add(method.toUpperCase());
+      }
+      return parts.join(' · ');
+    }
+
     final sec = extra['security']?.toString().toLowerCase() ?? '';
     if (isReality || sec == 'reality') {
       parts.add('Reality');
-    } else if (sec != 'none' && (sni.isNotEmpty || alpn.isNotEmpty || sec == 'tls')) {
+    } else if (hasTls) {
       parts.add('TLS');
     }
     if (flow.isNotEmpty) {
       parts.add(flow.replaceAll('xtls-rprx-', ''));
     }
-    final trFromExtra = (extra['transport'] as Map?)?['type']?.toString() ?? '';
+    final trFromExtra = (extra['transport'] is Map)
+        ? ((extra['transport'] as Map)['type']?.toString() ?? '')
+        : '';
     final effectiveTransport = (transport.isNotEmpty && transport != 'tcp')
         ? transport
         : (trFromExtra.isNotEmpty ? trFromExtra : (transport.isNotEmpty ? transport : 'tcp'));
@@ -84,13 +138,62 @@ class Profile {
     return parts.join(' · ');
   }
 
-  /// Собирает outbound для этого профиля.
+  /// Собирает канонический WireGuard/AmneziaWG эндпоинт для массива `endpoints` ядра.
+  Map<String, dynamic> toWireGuardEndpoint({String tag = 'proxy'}) {
+    final cleanExtra = Map<String, dynamic>.from(extra);
+    final privKey = (cleanExtra.remove('private_key') ?? password).toString();
+    final pubKey = (cleanExtra.remove('peer_public_key') ??
+            cleanExtra.remove('public_key') ??
+            publicKey)
+        .toString();
+    final psk = cleanExtra.remove('pre_shared_key')?.toString() ?? '';
+    final reserved = cleanExtra.remove('reserved');
+    final localAddr = cleanExtra.remove('local_address') ?? cleanExtra.remove('address');
+    final addrs = localAddr is List && localAddr.isNotEmpty
+        ? localAddr.map((e) => e.toString()).toList()
+        : <String>['10.0.0.2/32'];
+    cleanExtra
+      ..remove('tls')
+      ..remove('transport')
+      ..remove('security')
+      ..remove('pcs')
+      ..remove('certificate_sha256')
+      ..remove('chain_outbounds');
+    return {
+      'type': 'wireguard',
+      'tag': tag,
+      'address': addrs,
+      'private_key': privKey,
+      'peers': [
+        {
+          'address': server,
+          'port': port,
+          'public_key': pubKey,
+          if (psk.isNotEmpty) 'pre_shared_key': psk,
+          'allowed_ips': ['0.0.0.0/0', '::/0'],
+          'reserved': ?reserved,
+        },
+      ],
+      ...cleanExtra,
+    };
+  }
+
+  /// Собирает канонический outbound `tachyon-core` для этого профиля.
   ///
   /// `tag` переопределяется, когда `proxy` занят группой подписки.
   Map<String, dynamic> toOutbound({String tag = 'proxy'}) {
+    if (type == 'wireguard') {
+      return toWireGuardEndpoint(tag: tag);
+    }
     final cleanExtra = Map<String, dynamic>.from(extra);
     final security = cleanExtra.remove('security')?.toString().toLowerCase() ?? '';
+    final vmessSecurity = cleanExtra.remove('vmess_security')?.toString() ?? '';
     final fp = cleanExtra.remove('fp')?.toString() ?? '';
+    final pq = cleanExtra.remove('pq') == true;
+    cleanExtra
+      ..remove('pcs')
+      ..remove('chain_outbounds');
+    final certSha256 = cleanExtra.remove('certificate_sha256');
     if (cleanExtra['transport'] is Map) {
       final tr = cleanExtra['transport'] as Map;
       final trType = tr['type']?.toString().toLowerCase();
@@ -98,6 +201,55 @@ class Profile {
         cleanExtra['transport'] = normalizeXhttpTransport(Map<String, dynamic>.from(tr));
       }
     }
+
+    Map<String, dynamic> buildTlsObject({
+      bool forceEnabled = false,
+      bool allowInsecureFlag = true,
+    }) {
+      final existingTls = cleanExtra.remove('tls');
+      final tls = existingTls is Map
+          ? Map<String, dynamic>.from(existingTls)
+          : <String, dynamic>{};
+      tls['enabled'] = true;
+      if (sni.isNotEmpty) {
+        tls['server_name'] = sni;
+      } else if (!tls.containsKey('server_name') &&
+          server.isNotEmpty &&
+          (forceEnabled || cleanExtra['transport'] != null)) {
+        tls['server_name'] = server;
+      }
+      if (alpn.isNotEmpty) tls['alpn'] = alpn;
+      if (allowInsecure && allowInsecureFlag) tls['insecure'] = true;
+      if (certSha256 is List && certSha256.isNotEmpty) {
+        tls['certificate_sha256'] = certSha256;
+      }
+      if (pq) tls['pq'] = true;
+      if (fp.isNotEmpty) {
+        tls['utls'] = {'enabled': true, 'fingerprint': fp};
+      } else if (isReality && !tls.containsKey('utls')) {
+        tls['utls'] = {'enabled': true, 'fingerprint': 'chrome'};
+      }
+      if (isReality) {
+        tls['reality'] = {
+          'enabled': true,
+          'public_key': publicKey,
+          if (shortId.isNotEmpty) 'short_id': shortId,
+          if (pq) 'support_x25519mlkem768': true,
+        };
+      }
+      return tls;
+    }
+
+    final shouldUseTls = security != 'none' &&
+        (isReality ||
+            security == 'tls' ||
+            security == 'reality' ||
+            security == 'xtls' ||
+            sni.isNotEmpty ||
+            alpn.isNotEmpty ||
+            allowInsecure ||
+            certSha256 != null ||
+            cleanExtra['tls'] is Map);
 
     switch (type) {
       case 'vless':
@@ -108,76 +260,266 @@ class Profile {
           'server_port': port,
           'uuid': uuid,
         };
-        final useTls = security != 'none' &&
-            (isReality ||
-                security == 'tls' ||
-                security == 'reality' ||
-                security == 'xtls' ||
-                sni.isNotEmpty ||
-                alpn.isNotEmpty ||
-                allowInsecure ||
-                cleanExtra['transport'] == null);
-        if (useTls) {
-          final tls = <String, dynamic>{'enabled': true};
-          if (sni.isNotEmpty) {
-            tls['server_name'] = sni;
-          } else if (server.isNotEmpty && cleanExtra['transport'] != null) {
-            tls['server_name'] = server;
-          }
-          if (alpn.isNotEmpty) tls['alpn'] = alpn;
-          if (allowInsecure) tls['insecure'] = true;
-          if (fp.isNotEmpty) {
-            tls['utls'] = {'enabled': true, 'fingerprint': fp};
-          } else if (isReality) {
-            tls['utls'] = {'enabled': true, 'fingerprint': 'chrome'};
-          }
-          if (isReality) {
-            tls['reality'] = {
-              'enabled': true,
-              'public_key': publicKey,
-              'short_id': shortId,
-            };
-          }
-          outbound['tls'] = tls;
+        if (shouldUseTls || (security != 'none' && cleanExtra['transport'] == null)) {
+          outbound['tls'] = buildTlsObject();
         }
         if (flow.isNotEmpty) outbound['flow'] = flow;
         return outbound..addAll(cleanExtra);
+
+      case 'vmess':
+        final outbound = <String, dynamic>{
+          'type': 'vmess',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'uuid': uuid,
+          'security': vmessSecurity.isNotEmpty ? vmessSecurity : 'auto',
+        };
+        if (shouldUseTls) {
+          outbound['tls'] = buildTlsObject();
+        }
+        return outbound..addAll(cleanExtra);
+
+      case 'trojan':
+        final outbound = <String, dynamic>{
+          'type': 'trojan',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'password': password,
+        };
+        if (security != 'none') {
+          outbound['tls'] = buildTlsObject(forceEnabled: true);
+        }
+        return outbound..addAll(cleanExtra);
+
       case 'shadowsocks':
         return {
           'type': 'shadowsocks',
           'tag': tag,
           'server': server,
           'server_port': port,
-          'method': method,
+          'method': method.isEmpty ? 'aes-256-gcm' : method,
           'password': password,
         }..addAll(cleanExtra);
+
+      case 'hysteria2':
+        final rawObfs = cleanExtra.remove('obfs');
+        final obfsPw = cleanExtra.remove('obfs-password')?.toString() ?? '';
+        Map<String, dynamic>? obfsObj;
+        if (rawObfs is Map) {
+          obfsObj = Map<String, dynamic>.from(rawObfs);
+        } else if (rawObfs is String && rawObfs.isNotEmpty && rawObfs != 'none') {
+          obfsObj = {'type': rawObfs, 'password': obfsPw};
+        }
+        return {
+          'type': 'hysteria2',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'password': password,
+          'obfs': ?obfsObj,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'hysteria':
+        return {
+          'type': 'hysteria',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty && !cleanExtra.containsKey('auth_str'))
+            'auth_str': password,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'tuic':
+        return {
+          'type': 'tuic',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'uuid': uuid,
+          'password': password,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'anytls':
+        return {
+          'type': 'anytls',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'password': password,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'naive':
+        return {
+          'type': 'naive',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty) 'password': password,
+          'tls': buildTlsObject(forceEnabled: true, allowInsecureFlag: false),
+        }..addAll(cleanExtra);
+
+      case 'snell':
+        final psk = (cleanExtra.remove('psk') ?? password).toString();
+        final rawVer = (cleanExtra.remove('version') as num?)?.toInt() ?? 4;
+        final ver = (rawVer == 4 || rawVer == 6) ? rawVer : 4;
+        cleanExtra.remove('tls');
+        cleanExtra.remove('obfs');
+        return {
+          'type': 'snell',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'psk': psk,
+          'version': ver,
+        }..addAll(cleanExtra);
+
+      case 'shadowtls':
+        return {
+          'type': 'shadowtls',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'version': (cleanExtra.remove('version') as num?)?.toInt() ?? 3,
+          'password': password,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'fptn':
+        cleanExtra.remove('tls');
+        if (cleanExtra.containsKey('token')) {
+          return {
+            'type': 'fptn',
+            'tag': tag,
+            'token': cleanExtra['token'],
+          };
+        }
+        return {
+          'type': 'fptn',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty) 'password': password,
+        }..addAll(cleanExtra);
+
+      case 'socks':
+        cleanExtra.remove('tls');
+        return {
+          'type': 'socks',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'version': (cleanExtra.remove('version') ?? '5').toString(),
+          if (password.isNotEmpty) 'password': password,
+        }..addAll(cleanExtra);
+
+      case 'http':
+        final outbound = <String, dynamic>{
+          'type': 'http',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty) 'password': password,
+        };
+        if (shouldUseTls) outbound['tls'] = buildTlsObject(forceEnabled: true);
+        return outbound..addAll(cleanExtra);
+
+      case 'ssh':
+        cleanExtra.remove('tls');
+        return {
+          'type': 'ssh',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty) 'password': password,
+        }..addAll(cleanExtra);
+
+      case 'mtproto':
+        cleanExtra.remove('tls');
+        final mtTr = cleanExtra.remove('mtproto_transport')?.toString() ?? '';
+        return {
+          'type': 'mtproto',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'secret': (cleanExtra.remove('secret') ?? password).toString(),
+          if (mtTr.isNotEmpty) 'transport': mtTr,
+          if (sni.isNotEmpty) 'tls': {'enabled': true, 'server_name': sni},
+        }..addAll(cleanExtra);
+
+      case 'mieru':
+        cleanExtra.remove('tls');
+        final mieruTr = (cleanExtra.remove('mieru_transport') ?? 'TCP').toString().toUpperCase();
+        final hasPortRanges = cleanExtra['server_ports'] is List &&
+            (cleanExtra['server_ports'] as List).isNotEmpty;
+        return {
+          'type': 'mieru',
+          'tag': tag,
+          'server': server,
+          if (!hasPortRanges) 'server_port': port,
+          'transport': mieruTr == 'UDP' ? 'UDP' : 'TCP',
+          if (password.isNotEmpty) 'password': password,
+        }..addAll(cleanExtra);
+
+      case 'tewfai':
+        final tewfaiTr = cleanExtra.remove('tewfai_transport');
+        return {
+          'type': 'tewfai',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (uuid.isNotEmpty) 'uuid': uuid,
+          if (password.isNotEmpty) 'password': password,
+          'transport': ?tewfaiTr,
+          if (security != 'none') 'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'masque':
+        final privKey = (cleanExtra.remove('private_key') ?? password).toString();
+        final pubKey = (cleanExtra.remove('public_key') ??
+                cleanExtra.remove('peer_public_key') ??
+                publicKey)
+            .toString();
+        final outbound = <String, dynamic>{
+          'type': 'masque',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (privKey.isNotEmpty) 'private_key': privKey,
+          if (pubKey.isNotEmpty) 'public_key': pubKey,
+        };
+        if (shouldUseTls || cleanExtra['profile'] == 'standard') {
+          outbound['tls'] = buildTlsObject(forceEnabled: true);
+        }
+        return outbound..addAll(cleanExtra);
+
+      case 'trusttunnel':
+      case 'openconnect':
+        return {
+          'type': type,
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (password.isNotEmpty) 'password': password,
+          'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
       default:
-        // Остальные типы движка собираются из типа, адреса и `extra`.
-        // TLS-поля модели (sni/alpn/insecure/reality) прикладываются сами,
-        // если тип их ожидает и они заполнены.
         final outbound = <String, dynamic>{
           'type': type,
           'tag': tag,
           'server': server,
           'server_port': port,
+          if (uuid.isNotEmpty) 'uuid': uuid,
+          if (password.isNotEmpty) 'password': password,
         };
-        if (security != 'none' &&
-            (sni.isNotEmpty || alpn.isNotEmpty || allowInsecure || isReality)) {
-          final tls = <String, dynamic>{'enabled': true};
-          if (sni.isNotEmpty) tls['server_name'] = sni;
-          if (alpn.isNotEmpty) tls['alpn'] = alpn;
-          if (allowInsecure) tls['insecure'] = true;
-          if (fp.isNotEmpty) {
-            tls['utls'] = {'enabled': true, 'fingerprint': fp};
-          }
-          if (isReality) {
-            tls['reality'] = {
-              'enabled': true,
-              'public_key': publicKey,
-              'short_id': shortId,
-            };
-          }
-          outbound['tls'] = tls;
+        if (shouldUseTls) {
+          outbound['tls'] = buildTlsObject();
         }
         return outbound..addAll(cleanExtra);
     }
@@ -214,7 +556,9 @@ class Profile {
       }
     }
     final savedTransport = (json['transport'] as String?) ?? '';
-    final trFromExtra = (rawExtra['transport'] as Map?)?['type']?.toString() ?? '';
+    final trFromExtra = (rawExtra['transport'] is Map)
+        ? ((rawExtra['transport'] as Map)['type']?.toString() ?? '')
+        : '';
     final effectiveTransport = (savedTransport.isNotEmpty && savedTransport != 'tcp')
         ? savedTransport
         : (trFromExtra.isNotEmpty ? trFromExtra : 'tcp');
@@ -242,16 +586,46 @@ class Profile {
     );
   }
 
-  /// Собирает стандартную ссылку (`vless://`, `trojan://`, `ss://`, `hy2://`, `tuic://`, `anytls://`, `socks5://`)
+  /// Собирает стандартную ссылку (`vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`,
+  /// `tuic://`, `wg://`, `anytls://`, `naive+https://`, `snell://`, `socks5://`)
   /// или JSON-строку для экспорта и генерации QR-кода.
   String toShareUri() {
     final encodedName = Uri.encodeComponent(name.isNotEmpty ? name : '$server:$port');
+    final hostFmt = server.contains(':') && !server.startsWith('[') ? '[$server]' : server;
+    final trMap = extra['transport'] is Map
+        ? Map<String, dynamic>.from(extra['transport'] as Map)
+        : null;
+    final net = (trMap?['type']?.toString() ?? transport).toLowerCase();
+
+    void appendTransportParams(Map<String, String> params) {
+      params['type'] = net.isEmpty ? 'tcp' : net;
+      if (trMap == null) return;
+      if (trMap['path'] != null && trMap['path'].toString().isNotEmpty) {
+        params['path'] = trMap['path'].toString();
+      }
+      if (trMap['host'] != null) {
+        final h = trMap['host'];
+        params['host'] = h is List ? h.join(',') : h.toString();
+      } else if (trMap['headers'] is Map && (trMap['headers'] as Map)['Host'] != null) {
+        params['host'] = (trMap['headers'] as Map)['Host'].toString();
+      }
+      if (trMap['mode'] != null && trMap['mode'].toString().isNotEmpty) {
+        params['mode'] = trMap['mode'].toString();
+      }
+      if (trMap['service_name'] != null && trMap['service_name'].toString().isNotEmpty) {
+        params['serviceName'] = trMap['service_name'].toString();
+      }
+    }
+
     switch (type) {
       case 'vless':
         final params = <String, String>{};
-        final trMap = extra['transport'] is Map ? Map<String, dynamic>.from(extra['transport'] as Map) : null;
-        final net = (trMap?['type']?.toString() ?? transport).toLowerCase();
-        params['type'] = net.isEmpty ? 'tcp' : net;
+        if (extra['encryption'] != null && extra['encryption'].toString().isNotEmpty) {
+          params['encryption'] = extra['encryption'].toString();
+        } else {
+          params['encryption'] = 'none';
+        }
+        appendTransportParams(params);
         final sec = extra['security']?.toString().toLowerCase() ?? '';
         if (isReality || sec == 'reality') {
           params['security'] = 'reality';
@@ -272,63 +646,205 @@ class Profile {
         }
         if (alpn.isNotEmpty) params['alpn'] = alpn.join(',');
         if (allowInsecure) params['allowInsecure'] = '1';
-        if (trMap != null) {
-          if (trMap['path'] != null && trMap['path'].toString().isNotEmpty) {
-            params['path'] = trMap['path'].toString();
-          }
-          if (trMap['host'] != null && trMap['host'].toString().isNotEmpty) {
-            params['host'] = trMap['host'].toString();
-          }
-          if (trMap['mode'] != null && trMap['mode'].toString().isNotEmpty) {
-            params['mode'] = trMap['mode'].toString();
-          }
-          if (trMap['service_name'] != null && trMap['service_name'].toString().isNotEmpty) {
-            params['serviceName'] = trMap['service_name'].toString();
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'vless://$uuid@$hostFmt:$port?$q#$encodedName';
+
+      case 'vmess':
+        final v2 = <String, dynamic>{
+          'v': '2',
+          'ps': name.isNotEmpty ? name : '$server:$port',
+          'add': server,
+          'port': port.toString(),
+          'id': uuid,
+          'aid': (extra['alter_id'] ?? 0).toString(),
+          'scy': (extra['vmess_security'] ?? 'auto').toString(),
+          'net': net.isEmpty ? 'tcp' : net,
+          'type': 'none',
+          'host': (trMap?['host'] ?? '').toString(),
+          'path': (trMap?['path'] ?? trMap?['service_name'] ?? '').toString(),
+          'tls': hasTls ? 'tls' : '',
+          if (sni.isNotEmpty) 'sni': sni,
+          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
+          if (extra['fp'] != null) 'fp': extra['fp'].toString(),
+        };
+        final encoded = base64.encode(utf8.encode(jsonEncode(v2)));
+        return 'vmess://$encoded';
+
+      case 'trojan':
+        final params = <String, String>{};
+        appendTransportParams(params);
+        if (isReality) {
+          params['security'] = 'reality';
+          if (publicKey.isNotEmpty) params['pbk'] = publicKey;
+          if (shortId.isNotEmpty) params['sid'] = shortId;
+        }
+        if (sni.isNotEmpty) params['sni'] = sni;
+        if (alpn.isNotEmpty) params['alpn'] = alpn.join(',');
+        if (allowInsecure) params['allowInsecure'] = '1';
+        if (extra['fp'] != null && extra['fp'].toString().isNotEmpty) {
+          params['fp'] = extra['fp'].toString();
+        }
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'trojan://${Uri.encodeComponent(password)}@$hostFmt:$port?$q#$encodedName';
+
+      case 'shadowsocks':
+        final creds = base64Url
+            .encode(utf8.encode('${method.isEmpty ? "aes-256-gcm" : method}:$password'))
+            .replaceAll('=', '');
+        final params = <String, String>{
+          if (extra['udp_over_tcp'] == true) 'uot': '1',
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'ss://$creds@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'hysteria2':
+        final obfsMap = extra['obfs'] is Map ? extra['obfs'] as Map : null;
+        final obfsType = obfsMap != null ? obfsMap['type']?.toString() : extra['obfs']?.toString();
+        final obfsPw = obfsMap != null
+            ? obfsMap['password']?.toString()
+            : extra['obfs-password']?.toString();
+        final params = <String, String>{
+          if (sni.isNotEmpty) 'sni': sni,
+          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
+          if (allowInsecure) 'insecure': '1',
+          if (obfsType != null && obfsType.isNotEmpty) 'obfs': obfsType,
+          if (obfsPw != null && obfsPw.isNotEmpty) 'obfs-password': obfsPw,
+          if (extra['server_ports'] is List && (extra['server_ports'] as List).isNotEmpty)
+            'mport': (extra['server_ports'] as List).join(','),
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'hy2://${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'tuic':
+        final params = <String, String>{
+          if (sni.isNotEmpty) 'sni': sni,
+          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
+          if (allowInsecure) 'allowInsecure': '1',
+          if (extra['congestion_control'] != null)
+            'congestion_control': extra['congestion_control'].toString(),
+          if (extra['udp_relay_mode'] != null)
+            'udp_relay_mode': extra['udp_relay_mode'].toString(),
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'tuic://$uuid:${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'wireguard':
+        final privKey = (extra['private_key'] ?? password).toString();
+        final pubKey = (extra['peer_public_key'] ?? publicKey).toString();
+        final addrs = extra['local_address'] is List
+            ? (extra['local_address'] as List).join(',')
+            : '10.0.0.2/32';
+        final params = <String, String>{
+          'publickey': pubKey,
+          'address': addrs,
+          if (extra['pre_shared_key'] != null) 'psk': extra['pre_shared_key'].toString(),
+          if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+        };
+        for (final k in ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1']) {
+          if (extra[k] != null && extra[k].toString().isNotEmpty) {
+            params[k] = extra[k].toString();
           }
         }
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
             .join('&');
-        return 'vless://$uuid@$server:$port?$q#$encodedName';
-      case 'trojan':
-        final params = <String, String>{
-          'type': transport.isEmpty ? 'tcp' : transport,
-          if (sni.isNotEmpty) 'sni': sni,
-          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
-          if (allowInsecure) 'allowInsecure': '1',
-        };
-        final q = params.entries
-            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
-            .join('&');
-        return 'trojan://${Uri.encodeComponent(password)}@$server:$port?$q#$encodedName';
-      case 'shadowsocks':
-        final creds = base64Url.encode(utf8.encode('${method.isEmpty ? "aes-256-gcm" : method}:$password'));
-        return 'ss://$creds@$server:$port#$encodedName';
-      case 'hysteria2':
+        final scheme = isAmneziaWg ? 'amneziawg' : 'wg';
+        return '$scheme://${Uri.encodeComponent(privKey)}@$hostFmt:$port?$q#$encodedName';
+
+      case 'anytls':
         final params = <String, String>{
           if (sni.isNotEmpty) 'sni': sni,
           if (allowInsecure) 'insecure': '1',
-          if (extra['obfs'] != null) 'obfs': extra['obfs'].toString(),
-          if (extra['obfs-password'] != null) 'obfs-password': extra['obfs-password'].toString(),
+          if (isReality) 'security': 'reality',
+          if (publicKey.isNotEmpty) 'pbk': publicKey,
+          if (shortId.isNotEmpty) 'sid': shortId,
         };
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
             .join('&');
-        return 'hysteria2://${Uri.encodeComponent(password)}@$server:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
-      case 'tuic':
+        return 'anytls://${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'naive':
+        final scheme = extra['quic'] == true ? 'naive+quic' : 'naive+https';
+        final user = (extra['username'] ?? '').toString();
+        return '$scheme://${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@$hostFmt:$port#$encodedName';
+
+      case 'snell':
+        final psk = (extra['psk'] ?? password).toString();
+        final ver = (extra['version'] ?? 5).toString();
+        return 'snell://${Uri.encodeComponent(psk)}@$hostFmt:$port?version=$ver#$encodedName';
+
+      case 'socks':
+        final user = (extra['username'] ?? '').toString();
+        final auth = user.isNotEmpty
+            ? '${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@'
+            : '';
+        return 'socks5://$auth$hostFmt:$port#$encodedName';
+
+      case 'http':
+        final user = (extra['username'] ?? '').toString();
+        final auth = user.isNotEmpty
+            ? '${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@'
+            : '';
+        final scheme = hasTls ? 'https' : 'http';
+        return '$scheme://$auth$hostFmt:$port#$encodedName';
+
+      case 'ssh':
+        final user = (extra['user'] ?? 'root').toString();
+        final auth = password.isNotEmpty
+            ? '${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@'
+            : '${Uri.encodeComponent(user)}@';
+        return 'ssh://$auth$hostFmt:$port#$encodedName';
+
+      case 'tewfai':
+        final trList = extra['tewfai_transport'];
+        final trStr = trList is List ? trList.join(',') : transport;
         final params = <String, String>{
           if (sni.isNotEmpty) 'sni': sni,
-          if (allowInsecure) 'allowInsecure': '1',
-          if (extra['congestion_control'] != null)
-            'congestion_control': extra['congestion_control'].toString(),
+          if (allowInsecure) 'insecure': '1',
+          if (extra['pcs'] != null) 'pcs': extra['pcs'].toString(),
+          if (trStr.isNotEmpty) 'transport': trStr,
+          if (extra['inner_cipher'] != null) 'inner_cipher': extra['inner_cipher'].toString(),
+          if (extra['morph_profile'] != null) 'morph_profile': extra['morph_profile'].toString(),
         };
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
             .join('&');
-        return 'tuic://$uuid:${Uri.encodeComponent(password)}@$server:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
-      case 'anytls':
-        final q = sni.isNotEmpty ? '?sni=${Uri.encodeQueryComponent(sni)}' : '';
-        return 'anytls://${Uri.encodeComponent(password)}@$server:$port$q#$encodedName';
+        return 'tewfai://$uuid:${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'mieru':
+        final user = (extra['username'] ?? '').toString();
+        final mtr = (extra['mieru_transport'] ?? 'TCP').toString().toUpperCase();
+        final portRanges = extra['server_ports'] is List
+            ? (extra['server_ports'] as List).join(',')
+            : '$port';
+        final params = <String, String>{
+          'port': portRanges,
+          'protocol': mtr,
+          'profile': name.isNotEmpty ? name : '$server:$port',
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'mierus://${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@$hostFmt?$q';
+
+      case 'mtproto':
+        return 'https://t.me/proxy?server=${Uri.encodeQueryComponent(server)}&port=$port&secret=${Uri.encodeQueryComponent(password)}#$encodedName';
+
+      case 'shadowtls':
+        final ver = (extra['version'] ?? 3).toString();
+        return 'shadowtls://${Uri.encodeComponent(password)}@$hostFmt:$port?sni=${Uri.encodeQueryComponent(sni.isNotEmpty ? sni : server)}&version=$ver#$encodedName';
+
       default:
         return jsonEncode(toOutbound(tag: name.isNotEmpty ? name : type));
     }
@@ -968,6 +1484,7 @@ class RuntimeConfig {
     final hasProxy = hasStatic || enabledSubs.isNotEmpty;
 
     final dedicatedOutbounds = <String, Map<String, dynamic>>{};
+    final dedicatedEndpoints = <String, Map<String, dynamic>>{};
 
     String resolveOutbound(String raw) {
       final target = raw.isEmpty ? 'proxy' : raw;
@@ -976,7 +1493,11 @@ class RuntimeConfig {
         for (final p in extraProfiles) {
           if (p.id == profId && p.server.isNotEmpty) {
             final tag = 'srv-${p.id}';
-            dedicatedOutbounds.putIfAbsent(tag, () => p.toOutbound(tag: tag));
+            if (p.type == 'wireguard') {
+              dedicatedEndpoints.putIfAbsent(tag, () => p.toWireGuardEndpoint(tag: tag));
+            } else {
+              dedicatedOutbounds.putIfAbsent(tag, () => p.toOutbound(tag: tag));
+            }
             return tag;
           }
         }
@@ -1183,6 +1704,9 @@ class RuntimeConfig {
         detourProfile!.server.isNotEmpty &&
         detourProfile!.id != profile.id;
 
+    final isMainWg = hasStatic && profile.type == 'wireguard';
+    final isDetourWg = hasDetour && detourProfile!.type == 'wireguard';
+
     Map<String, dynamic> buildMainProfileOutbound({String tag = 'proxy'}) {
       final out = profile.toOutbound(tag: tag);
       if (hasDetour) {
@@ -1191,8 +1715,49 @@ class RuntimeConfig {
       return out;
     }
 
+    Map<String, dynamic> buildMainProfileEndpoint({String tag = 'proxy'}) {
+      final ep = profile.toWireGuardEndpoint(tag: tag);
+      if (hasDetour) {
+        ep['detour'] = 'detour-proxy';
+      }
+      return ep;
+    }
+
+    final chainOutbounds = <Map<String, dynamic>>[];
+    final chainEndpoints = <Map<String, dynamic>>[];
+    if (hasStatic && !hasDetour && profile.extra['chain_outbounds'] is List) {
+      for (final rawHop in profile.extra['chain_outbounds'] as List) {
+        if (rawHop is! Map) continue;
+        final hop = Map<String, dynamic>.from(rawHop);
+        if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
+          if (!hop.containsKey('peers') && hop['server'] != null) {
+            hop['address'] = hop.remove('local_address') ?? ['10.0.0.2/32'];
+            hop['peers'] = [
+              {
+                'address': hop.remove('server'),
+                'port': hop.remove('server_port') ?? 51820,
+                'public_key': hop.remove('peer_public_key') ?? '',
+                'allowed_ips': ['0.0.0.0/0', '::/0'],
+              },
+            ];
+          }
+          chainEndpoints.add(hop);
+        } else {
+          chainOutbounds.add(hop);
+        }
+      }
+    }
+
+    final endpoints = <Map<String, dynamic>>[
+      if (subTags.isEmpty && isMainWg) buildMainProfileEndpoint(),
+      if (subTags.isNotEmpty && isMainWg) buildMainProfileEndpoint(tag: 'profile'),
+      if (isDetourWg) detourProfile!.toWireGuardEndpoint(tag: 'detour-proxy'),
+      ...chainEndpoints,
+      ...dedicatedEndpoints.values,
+    ];
+
     final outbounds = <Map<String, dynamic>>[
-      if (subTags.isEmpty && hasStatic) buildMainProfileOutbound(),
+      if (subTags.isEmpty && hasStatic && !isMainWg) buildMainProfileOutbound(),
       if (subTags.isNotEmpty)
         {
           'type': 'selector',
@@ -1203,8 +1768,9 @@ class RuntimeConfig {
           ],
           'default': hasStatic ? 'profile' : subTags.first,
         },
-      if (subTags.isNotEmpty && hasStatic) buildMainProfileOutbound(tag: 'profile'),
-      if (hasDetour) detourProfile!.toOutbound(tag: 'detour-proxy'),
+      if (subTags.isNotEmpty && hasStatic && !isMainWg) buildMainProfileOutbound(tag: 'profile'),
+      if (hasDetour && !isDetourWg) detourProfile!.toOutbound(tag: 'detour-proxy'),
+      ...chainOutbounds,
       ...dedicatedOutbounds.values,
       {'type': 'direct', 'tag': 'direct'},
       {'type': 'block', 'tag': 'block'},
@@ -1267,6 +1833,7 @@ class RuntimeConfig {
           },
       ],
       'outbounds': outbounds,
+      if (endpoints.isNotEmpty) 'endpoints': endpoints,
       if (subEntries.isNotEmpty)
         'subscriptions': [
           for (final entry in subEntries)

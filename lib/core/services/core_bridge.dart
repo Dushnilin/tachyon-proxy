@@ -262,6 +262,35 @@ class CoreBridge {
     }
   }
 
+  /// Основная архитектура процессора устройства (`arm64-v8a`, `armeabi-v7a`, `x86_64`).
+  Future<String> deviceAbi() async {
+    try {
+      return await _channel.invokeMethod<String>('deviceAbi') ?? 'arm64-v8a';
+    } on PlatformException {
+      return 'arm64-v8a';
+    }
+  }
+
+  /// Горячая установка скачанного `libtachyon.so` с перезапуском процесса (либо `"requires_apk"`).
+  Future<String> installEngineSo(String path) async {
+    try {
+      return await _channel.invokeMethod<String>('installEngineSo', {'path': path}) ??
+          'requires_apk';
+    } on PlatformException {
+      return 'requires_apk';
+    }
+  }
+
+  /// Запуск системного установщика Android для скачанного APK в `filesDir/update/<fileName>`.
+  Future<String> installApk(String fileName) async {
+    try {
+      return await _channel.invokeMethod<String>('installApk', {'fileName': fileName}) ??
+          'error';
+    } on PlatformException catch (e) {
+      return 'error: ${e.message}';
+    }
+  }
+
   /// Установленные приложения — пул для правил «разрешено/запрещено».
   Future<List<InstalledApp>> installedApps() async {
     try {

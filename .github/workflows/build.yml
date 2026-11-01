@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build & Auto-Sync Android APK
 
 on:
   push:
@@ -6,7 +6,17 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  schedule:
+    # Каждые 3 часа проверяем, не вышел ли новый релиз ядра Dushnilin/tachyon-core
+    - cron: '0 */3 * * *'
+  repository_dispatch:
+    types: [core-updated]
   workflow_dispatch:
+    inputs:
+      force_rebuild_core:
+        description: 'Принудительно пересобрать libtachyon.so из tachyon-core-src'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -17,73 +27,206 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout tachyon-proxy
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tachyon-core version & decide whether to run
+        id: core_check
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || github.token }}
+        run: |
+          current_core=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
+          latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null || echo "v${current_core}")
+          latest_core="${latest_tag#v}"
+          app_ver=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f1 | tr -d '\r')
+          echo "current_core=${current_core}" >> "$GITHUB_OUTPUT"
+          echo "latest_core=${latest_core}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${latest_tag}" >> "$GITHUB_OUTPUT"
+          echo "app_ver=${app_ver}" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$current_core" = "$latest_core" ]; then
+            echo "Ядро уже актуально (${current_core}), пропускаем плановую сборку."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            if [ "$current_core" != "$latest_core" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+              echo "rebuild_core=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Checkout tachyon-core-src (when core updated)
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: Dushnilin/tachyon-core-src
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          ref: ${{ steps.core_check.outputs.latest_tag }}
+          path: .core-src
+
+      - name: Install Rust toolchain for Android NDK (when core updated)
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Compile libtachyon.so for all Android ABIs (when core updated)
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        run: |
+          latest_core="${{ steps.core_check.outputs.latest_core }}"
+          sed -i "s/^version = \".*\"/version = \"${latest_core}\"/" native/core-ffi/Cargo.toml
+
+          mkdir -p .core-src/core-ffi
+          cp -r native/core-ffi/src .core-src/core-ffi/
+          cp native/core-ffi/Cargo.toml .core-src/core-ffi/Cargo.toml
+          sed -i 's/members = \[/members = [\n    "core-ffi",/' .core-src/Cargo.toml
+          sed -i 's/panic = "abort"/panic = "unwind"/g' .core-src/Cargo.toml
+
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            ndk=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -n 1)
+          fi
+          bin_dir="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export AR="$bin_dir/llvm-ar"
+          export CARGO_PROFILE_RELEASE_LTO="off"
+          export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="16"
+
+          build_abi() {
+            local triple="$1"
+            local abi="$2"
+            local clang="$bin_dir/$3"
+            local extra_flags="$4"
+            local upper=$(echo "$triple" | tr 'a-z-' 'A-Z_')
+            local lower=$(echo "$triple" | tr '-' '_')
+            export "CARGO_TARGET_${upper}_LINKER=$clang"
+            export "CARGO_TARGET_${upper}_AR=$bin_dir/llvm-ar"
+            export "CC_${lower}=$clang"
+            export "AR_${lower}=$bin_dir/llvm-ar"
+            export RUSTFLAGS="$extra_flags -C link-arg=-Wl,-z,max-page-size=16384"
+            cargo build --release --target "$triple" -p core-ffi --manifest-path .core-src/Cargo.toml
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp ".core-src/target/$triple/release/libtachyon.so" "android/app/src/main/jniLibs/$abi/libtachyon.so"
+          }
+
+          build_abi "aarch64-linux-android" "arm64-v8a" "aarch64-linux-android26-clang" "--cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon"
+          build_abi "armv7-linux-androideabi" "armeabi-v7a" "armv7a-linux-androideabi26-clang" ""
+          build_abi "x86_64-linux-android" "x86_64" "x86_64-linux-android26-clang" "-C target-cpu=x86-64"
+          rm -rf .core-src
+
+      - name: Commit updated libtachyon.so to main
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/core-ffi/Cargo.toml android/app/src/main/jniLibs/
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(core): автообновление ядра tachyon-core до v${{ steps.core_check.outputs.latest_core }}"
+            git push origin HEAD:main
+          fi
 
       - name: Set up JDK 21
+        if: steps.core_check.outputs.skip != 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Set up Flutter
+        if: steps.core_check.outputs.skip != 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
 
       - name: Install dependencies
+        if: steps.core_check.outputs.skip != 'true'
         run: flutter pub get
 
       - name: Analyze Dart code
+        if: steps.core_check.outputs.skip != 'true'
         run: flutter analyze
 
       - name: Run unit tests
+        if: steps.core_check.outputs.skip != 'true'
         run: flutter test
 
       - name: Build per-ABI release APKs
+        if: steps.core_check.outputs.skip != 'true'
         run: flutter build apk --release --split-per-abi
 
       - name: Build universal release APK
+        if: steps.core_check.outputs.skip != 'true'
         run: flutter build apk --release
 
-      - name: Prepare release artifacts
+      - name: Prepare release artifacts (APKs + .so + version.json)
+        if: steps.core_check.outputs.skip != 'true'
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/tachyon-proxy-arm64-v8a.apk
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/tachyon-proxy-armeabi-v7a.apk
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/tachyon-proxy-x86_64.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-universal.apk
-          cd dist && sha256sum *.apk > SHA256SUMS.txt
+          cp android/app/src/main/jniLibs/arm64-v8a/libtachyon.so dist/libtachyon-arm64-v8a.so
+          cp android/app/src/main/jniLibs/armeabi-v7a/libtachyon.so dist/libtachyon-armeabi-v7a.so
+          cp android/app/src/main/jniLibs/x86_64/libtachyon.so dist/libtachyon-x86_64.so
+
+          core_ver=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
+          app_ver="${{ steps.core_check.outputs.app_ver }}"
+          cat > dist/version.json <<EOF
+          {
+            "app_version": "${app_ver}",
+            "core_version": "${core_ver}",
+            "commit": "${GITHUB_SHA}",
+            "apk_arm64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-arm64-v8a.apk",
+            "apk_armv7": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-armeabi-v7a.apk",
+            "apk_x86_64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-x86_64.apk",
+            "so_arm64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-arm64-v8a.so",
+            "so_armv7": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-armeabi-v7a.so",
+            "so_x86_64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-x86_64.so"
+          }
+          EOF
+
+          cd dist && sha256sum *.apk *.so version.json > SHA256SUMS.txt
 
       - name: Upload APK artifacts
+        if: steps.core_check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: tachyon-proxy-apks
           path: dist/*
           if-no-files-found: error
 
-      - name: Publish rolling release (main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Publish rolling release (latest)
+        if: steps.core_check.outputs.skip != 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "Tachyon Proxy — Latest Build"
+          name: "Tachyon Proxy v${{ steps.core_check.outputs.app_ver }} (Core v${{ steps.core_check.outputs.latest_core }}) — Latest"
           body: |
-            Автоматическая сборка из ветки `main` (${{ github.sha }}).
+            Автоматическая сборка **Tachyon Proxy v${{ steps.core_check.outputs.app_ver }}** со встроенным ядром **`tachyon-core v${{ steps.core_check.outputs.latest_core }}`** (${{ github.sha }}).
 
+            ### 📦 Установочные пакеты Android (APK)
             - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных Android-устройств (64-bit ARM)
             - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и ТВ-приставок
             - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
             - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
+
+            ### ⚡ Модули движка для встроенного обновления (`libtachyon-*.so`)
+            - **`libtachyon-arm64-v8a.so`**, **`libtachyon-armeabi-v7a.so`**, **`libtachyon-x86_64.so`**, **`version.json`**
           files: dist/*
           prerelease: false
-          make_latest: true
+          make_latest: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Publish tagged release (v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.core_check.outputs.skip != 'true' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: "⚡ Tachyon Proxy ${{ github.ref_name }} (Core v${{ steps.core_check.outputs.latest_core }})"
           generate_release_notes: true
           files: dist/*
           make_latest: true

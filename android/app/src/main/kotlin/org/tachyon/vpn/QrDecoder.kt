@@ -9,9 +9,11 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Автономный декодер QR-кодов стандарта ISO/IEC 18004 (версии 1..25, уровни коррекции L/M/Q/H).
- * Не требует сторонних библиотек: включает адаптивную бинаризацию, поиск маркеров 1:1:3:1:1,
- * перспективное преобразование, деинтерливинг блоков и декодер Рида-Соломона над GF(256).
+ * Автономный декодер QR-кодов стандарта ISO/IEC 18004 (версии 1..40, уровни коррекции L/M/Q/H).
+ * Не требует сторонних библиотек: включает многомасштабную адаптивную бинаризацию,
+ * поиск поисковых (1:1:3:1:1) и выравнивающих (1:1:1) маркеров, 8-параметрическую
+ * проективную гомографию (исправление перспективных искажений под углом),
+ * BCH-декодирование формата/версии и декодер Рида-Соломона над GF(256).
  */
 object QrDecoder {
 
@@ -34,9 +36,39 @@ object QrDecoder {
 
     fun decodeLuminance(lum: ByteArray, width: Int, height: Int): String? {
         if (width < 21 || height < 21) return null
-        val matrix = binarizeAdaptive(lum, width, height)
-        return decodeMatrix(matrix, width, height)
-            ?: decodeMatrix(invertMatrix(matrix), width, height)
+
+        // 1. Полный кадр в исходной ориентации
+        decodeSinglePlane(lum, width, height)?.let { return it }
+
+        // 2. Повёрнутый на 90° кадр (для датчиков камеры в портретном режиме и повёрнутых мониторов)
+        val rotated = rotate90(lum, width, height)
+        return decodeSinglePlane(rotated, height, width)
+    }
+
+    private fun decodeSinglePlane(lum: ByteArray, width: Int, height: Int): String? {
+        val integral = buildIntegral(lum, width, height)
+        for (winDiv in intArrayOf(8, 12, 16)) {
+            for (bias in intArrayOf(6, 3, 0, 8)) {
+                val matrix = binarizeFromIntegral(lum, integral, width, height, winDiv, bias)
+                decodeMatrix(matrix, width, height)?.let { return it }
+                if (winDiv == 8 && bias == 6) {
+                    decodeMatrix(invertMatrix(matrix), width, height)?.let { return it }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun rotate90(src: ByteArray, width: Int, height: Int): ByteArray {
+        val dst = ByteArray(width * height)
+        for (y in 0 until height) {
+            val rowOff = y * width
+            val dstCol = height - 1 - y
+            for (x in 0 until width) {
+                dst[x * height + dstCol] = src[rowOff + x]
+            }
+        }
+        return dst
     }
 
     private fun invertMatrix(src: Array<BooleanArray>): Array<BooleanArray> {
@@ -45,10 +77,9 @@ object QrDecoder {
         }
     }
 
-    private fun binarizeAdaptive(lum: ByteArray, width: Int, height: Int): Array<BooleanArray> {
-        // Интегральное изображение для мгновенного локального порога
-        val integral = IntArray((width + 1) * (height + 1))
+    private fun buildIntegral(lum: ByteArray, width: Int, height: Int): IntArray {
         val stride = width + 1
+        val integral = IntArray(stride * (height + 1))
         for (y in 0 until height) {
             var rowSum = 0
             val srcOff = y * width
@@ -59,7 +90,19 @@ object QrDecoder {
                 integral[dstOff + x + 1] = integral[prevOff + x + 1] + rowSum
             }
         }
-        val win = max(15, min(width, height) / 8)
+        return integral
+    }
+
+    private fun binarizeFromIntegral(
+        lum: ByteArray,
+        integral: IntArray,
+        width: Int,
+        height: Int,
+        winDiv: Int,
+        bias: Int,
+    ): Array<BooleanArray> {
+        val stride = width + 1
+        val win = max(13, min(width, height) / winDiv)
         val half = win / 2
         val out = Array(height) { BooleanArray(width) }
         for (y in 0 until height) {
@@ -67,16 +110,18 @@ object QrDecoder {
             val y1 = min(height - 1, y + half)
             val row = out[y]
             val srcOff = y * width
+            val r0Off = y0 * stride
+            val r1Off = (y1 + 1) * stride
             for (x in 0 until width) {
                 val x0 = max(0, x - half)
                 val x1 = min(width - 1, x + half)
                 val count = (x1 - x0 + 1) * (y1 - y0 + 1)
-                val sum = integral[(y1 + 1) * stride + (x1 + 1)] -
-                    integral[y0 * stride + (x1 + 1)] -
-                    integral[(y1 + 1) * stride + x0] +
-                    integral[y0 * stride + x0]
+                val sum = integral[r1Off + x1 + 1] -
+                    integral[r0Off + x1 + 1] -
+                    integral[r1Off + x0] +
+                    integral[r0Off + x0]
                 val v = lum[srcOff + x].toInt() and 0xFF
-                row[x] = v * count <= sum - count * 5
+                row[x] = v * count <= sum - count * bias
             }
         }
         return out
@@ -93,8 +138,12 @@ object QrDecoder {
         val centers = findFinderPatterns(img, width, height)
         if (centers.size < 3) return null
 
-        // Пробуем лучшие тройки поисковых маркеров
-        val top = centers.sortedByDescending { it.count }.take(6)
+        val top = centers.filter { it.count >= 2 }
+            .ifEmpty { centers }
+            .sortedByDescending { it.count * it.moduleSize }
+            .take(8)
+        if (top.size < 3) return null
+
         for (i in 0 until top.size - 2) {
             for (j in i + 1 until top.size - 1) {
                 for (k in j + 1 until top.size) {
@@ -114,7 +163,7 @@ object QrDecoder {
     ): List<FinderCenter> {
         val centers = mutableListOf<FinderCenter>()
         val state = IntArray(5)
-        val step = max(1, height / 240)
+        val step = max(1, height / 320)
 
         for (y in 0 until height step step) {
             state.fill(0)
@@ -155,15 +204,16 @@ object QrDecoder {
     private fun foundRatio(s: IntArray): Boolean {
         var total = 0
         for (i in 0..4) {
-            if (s[i] == 0) return false
-            total += s[i]
+            val v = s[i]
+            if (v == 0) return false
+            total += v
         }
         if (total < 7) return false
         val module = total / 7.0f
-        val maxVar = module * 0.65f
+        val maxVar = module * 0.72f
         return abs(module - s[0]) < maxVar &&
             abs(module - s[1]) < maxVar &&
-            abs(3f * module - s[2]) < 3f * maxVar &&
+            abs(3.0f * module - s[2]) < 3.0f * maxVar &&
             abs(module - s[3]) < maxVar &&
             abs(module - s[4]) < maxVar
     }
@@ -188,7 +238,7 @@ object QrDecoder {
         for (c in centers) {
             val dx = abs(refinedX - c.x)
             val dy = abs(centerY - c.y)
-            if (dx <= max(mod, c.moduleSize) * 1.5f && dy <= max(mod, c.moduleSize) * 1.5f) {
+            if (dx <= max(mod, c.moduleSize) * 1.6f && dy <= max(mod, c.moduleSize) * 1.6f) {
                 val n = c.count + 1
                 c.x = (c.x * c.count + refinedX) / n
                 c.y = (c.y * c.count + centerY) / n
@@ -281,7 +331,7 @@ object QrDecoder {
         if (s[4] > maxCount) return Float.NaN
 
         val total = s[0] + s[1] + s[2] + s[3] + s[4]
-        if (5 * abs(total - origTotal) >= origTotal) return Float.NaN
+        if (5 * abs(total - origTotal) >= 2 * origTotal) return Float.NaN
         return if (foundRatio(s)) (x - s[4] - s[3] - s[2] / 2.0f) else Float.NaN
     }
 
@@ -296,6 +346,10 @@ object QrDecoder {
         b: FinderCenter,
         c: FinderCenter,
     ): Array<FinderCenter>? {
+        val maxMod = max(a.moduleSize, max(b.moduleSize, c.moduleSize))
+        val minMod = min(a.moduleSize, min(b.moduleSize, c.moduleSize))
+        if (maxMod > minMod * 2.2f) return null
+
         val dab = dist(a, b)
         val dbc = dist(b, c)
         val dac = dist(a, c)
@@ -311,8 +365,8 @@ object QrDecoder {
         }
         val d1 = dist(topLeft, p1)
         val d2 = dist(topLeft, p2)
-        if (d1 < 10f || d2 < 10f) return null
-        if (abs(d1 - d2) > max(d1, d2) * 0.35f) return null
+        if (d1 < 12f || d2 < 12f) return null
+        if (abs(d1 - d2) > max(d1, d2) * 0.55f) return null
 
         val cross = (p1.x - topLeft.x) * (p2.y - topLeft.y) - (p1.y - topLeft.y) * (p2.x - topLeft.x)
         if (cross < 0f) {
@@ -320,6 +374,90 @@ object QrDecoder {
         }
         // topLeft, topRight (p1), bottomLeft (p2)
         return arrayOf(topLeft, p1, p2)
+    }
+
+    /**
+     * Ищет выравнивающий маркер (Alignment Pattern 1:1:1 с внешней чёрной рамкой 5x5)
+     * в правом нижнем углу и возвращает субпиксельные координаты лучшего центра.
+     */
+    private fun findAlignRing(
+        img: Array<BooleanArray>,
+        width: Int,
+        height: Int,
+        estX: Float,
+        estY: Float,
+        modSize: Float,
+    ): Pair<Float, Float>? {
+        val rad = max(10, (modSize * 4.5f).toInt())
+        val maxC = max(3, (modSize * 2.2f).toInt())
+        var bestScore = -1f
+        var bestX = estX
+        var bestY = estY
+        val yMin = max(5, estY.toInt() - rad)
+        val yMax = min(height - 6, estY.toInt() + rad)
+        val xMin = max(5, estX.toInt() - rad)
+        val xMax = min(width - 6, estX.toInt() + rad)
+
+        for (y in yMin..yMax) {
+            val row = img[y]
+            for (x in xMin..xMax) {
+                if (!row[x]) continue
+                val sh = measureAlignAxis(img, width, height, x, y, 1, 0, maxC) ?: continue
+                val sv = measureAlignAxis(img, width, height, x, y, 0, 1, maxC) ?: continue
+                val dx = x - estX
+                val dy = y - estY
+                val err = abs(sh[0] - modSize) + abs(sh[1] - modSize) + abs(sh[2] - modSize) +
+                    abs(sv[0] - modSize) + abs(sv[1] - modSize) + abs(sv[2] - modSize) +
+                    sqrt(dx * dx + dy * dy) * 0.25f
+                val score = 1000f - err
+                if (score > bestScore) {
+                    bestScore = score
+                    bestX = x + (sh[4] - sh[3]) / 2.0f
+                    bestY = y + (sv[4] - sv[3]) / 2.0f
+                }
+            }
+        }
+        return if (bestScore > 0f) (bestX to bestY) else null
+    }
+
+    private fun measureAlignAxis(
+        img: Array<BooleanArray>,
+        width: Int,
+        height: Int,
+        cx: Int,
+        cy: Int,
+        dx: Int,
+        dy: Int,
+        maxC: Int,
+    ): IntArray? {
+        var neg = 0
+        var w1 = 0
+        var pos = 0
+        var w2 = 0
+        var x = cx
+        var y = cy
+        while (x in 0 until width && y in 0 until height && img[y][x] && neg <= maxC) {
+            neg++; x -= dx; y -= dy
+        }
+        if (neg > maxC || x !in 0 until width || y !in 0 until height) return null
+        while (x in 0 until width && y in 0 until height && !img[y][x] && w1 <= maxC) {
+            w1++; x -= dx; y -= dy
+        }
+        if (w1 == 0 || w1 > maxC || x !in 0 until width || y !in 0 until height || !img[y][x]) return null
+
+        x = cx + dx
+        y = cy + dy
+        while (x in 0 until width && y in 0 until height && img[y][x] && pos <= maxC) {
+            pos++; x += dx; y += dy
+        }
+        if (pos > maxC || x !in 0 until width || y !in 0 until height) return null
+        while (x in 0 until width && y in 0 until height && !img[y][x] && w2 <= maxC) {
+            w2++; x += dx; y += dy
+        }
+        if (w2 == 0 || w2 > maxC || x !in 0 until width || y !in 0 until height || !img[y][x]) return null
+
+        val c1 = neg + pos
+        return intArrayOf(w1, c1, w2, neg - 1, pos)
     }
 
     private fun sampleAndDecode(
@@ -331,24 +469,43 @@ object QrDecoder {
         bl: FinderCenter,
     ): String? {
         val modSize = (tl.moduleSize + tr.moduleSize + bl.moduleSize) / 3.0f
-        if (modSize <= 0.5f) return null
+        if (modSize <= 0.4f) return null
         val dTop = dist(tl, tr)
         val dLeft = dist(tl, bl)
         val estDim = (((dTop + dLeft) / (2.0f * modSize)).roundToInt() + 7)
         val baseVer = ((estDim - 17) + 2) / 4
 
-        for (verDelta in intArrayOf(0, -1, 1, -2, 2)) {
-            val ver = baseVer + verDelta
-            if (ver < 1 || ver > 25) continue
+        val tried = BooleanArray(41)
+        val candidates = mutableListOf<Int>()
+        for (verDelta in intArrayOf(0, -1, 1, -2, 2, -3, 3, -4, 4)) {
+            val v = baseVer + verDelta
+            if (v in 1..40 && !tried[v]) {
+                tried[v] = true
+                candidates.add(v)
+            }
+        }
+        for (v in 1..15) {
+            if (!tried[v]) {
+                tried[v] = true
+                candidates.add(v)
+            }
+        }
+
+        for (ver in candidates) {
             val dim = 17 + 4 * ver
-            val grid = sampleGrid(img, width, height, dim, tl, tr, bl, ver) ?: continue
-            val text = decodeQrGrid(grid, dim, ver)
-            if (text != null) return text
+            if (ver >= 2) {
+                val pGrid = sampleGridPerspective(img, width, height, dim, tl, tr, bl)
+                if (pGrid != null) {
+                    decodeQrGrid(pGrid, dim, ver)?.let { return it }
+                }
+            }
+            val aGrid = sampleGridAffine(img, width, height, dim, tl, tr, bl)
+            decodeQrGrid(aGrid, dim, ver)?.let { return it }
         }
         return null
     }
 
-    private fun sampleGrid(
+    private fun sampleGridAffine(
         img: Array<BooleanArray>,
         width: Int,
         height: Int,
@@ -356,8 +513,7 @@ object QrDecoder {
         tl: FinderCenter,
         tr: FinderCenter,
         bl: FinderCenter,
-        ver: Int,
-    ): Array<BooleanArray>? {
+    ): Array<BooleanArray> {
         val span = (dim - 7).toFloat()
         val ux = (tr.x - tl.x) / span
         val uy = (tr.y - tl.y) / span
@@ -379,6 +535,112 @@ object QrDecoder {
         return grid
     }
 
+    /**
+     * Сэмплирует матрицу QR-кода с использованием 8-параметрической проективной
+     * гомографии (4 контрольные точки: 3 Finder + 1 Alignment в правом нижнем углу).
+     */
+    private fun sampleGridPerspective(
+        img: Array<BooleanArray>,
+        width: Int,
+        height: Int,
+        dim: Int,
+        tl: FinderCenter,
+        tr: FinderCenter,
+        bl: FinderCenter,
+    ): Array<BooleanArray>? {
+        val span = (dim - 7).toFloat()
+        val ux = (tr.x - tl.x) / span
+        val uy = (tr.y - tl.y) / span
+        val vx = (bl.x - tl.x) / span
+        val vy = (bl.y - tl.y) / span
+
+        val alignMod = dim - 6.5f - 3.5f
+        val estX = tl.x + alignMod * ux + alignMod * vx
+        val estY = tl.y + alignMod * uy + alignMod * vy
+        val modSize = (dist(tl, tr) + dist(tl, bl)) / (2.0f * span)
+        val align = findAlignRing(img, width, height, estX, estY, modSize) ?: return null
+
+        val srcMax = dim - 3.5f
+        val h = solveHomography(
+            3.5f, 3.5f, tl.x, tl.y,
+            srcMax, 3.5f, tr.x, tr.y,
+            dim - 6.5f, dim - 6.5f, align.first, align.second,
+            3.5f, srcMax, bl.x, bl.y,
+        ) ?: return null
+
+        val grid = Array(dim) { BooleanArray(dim) }
+        for (r in 0 until dim) {
+            val v = r + 0.5f
+            for (c in 0 until dim) {
+                val u = c + 0.5f
+                val den = h[6] * u + h[7] * v + 1.0f
+                if (abs(den) < 1e-6f) continue
+                val px = ((h[0] * u + h[1] * v + h[2]) / den).roundToInt()
+                val py = ((h[3] * u + h[4] * v + h[5]) / den).roundToInt()
+                if (px in 0 until width && py in 0 until height) {
+                    grid[r][c] = img[py][px]
+                }
+            }
+        }
+        return grid
+    }
+
+    /**
+     * Решает систему 8 линейных уравнений для проективной матрицы H (3x3, h22 = 1),
+     * переводящей 4 точки (u_i, v_i) в (x_i, y_i).
+     */
+    private fun solveHomography(
+        u0: Float, v0: Float, x0: Float, y0: Float,
+        u1: Float, v1: Float, x1: Float, y1: Float,
+        u2: Float, v2: Float, x2: Float, y2: Float,
+        u3: Float, v3: Float, x3: Float, y3: Float,
+    ): FloatArray? {
+        val us = floatArrayOf(u0, u1, u2, u3)
+        val vs = floatArrayOf(v0, v1, v2, v3)
+        val xs = floatArrayOf(x0, x1, x2, x3)
+        val ys = floatArrayOf(y0, y1, y2, y3)
+
+        val a = Array(8) { DoubleArray(9) }
+        for (i in 0..3) {
+            val u = us[i].toDouble()
+            val v = vs[i].toDouble()
+            val x = xs[i].toDouble()
+            val y = ys[i].toDouble()
+            val r0 = i * 2
+            val r1 = r0 + 1
+            a[r0][0] = u; a[r0][1] = v; a[r0][2] = 1.0
+            a[r0][6] = -u * x; a[r0][7] = -v * x; a[r0][8] = x
+
+            a[r1][3] = u; a[r1][4] = v; a[r1][5] = 1.0
+            a[r1][6] = -u * y; a[r1][7] = -v * y; a[r1][8] = y
+        }
+
+        for (col in 0 until 8) {
+            var pivot = col
+            var maxVal = abs(a[col][col])
+            for (row in col + 1 until 8) {
+                val v = abs(a[row][col])
+                if (v > maxVal) {
+                    maxVal = v
+                    pivot = row
+                }
+            }
+            if (maxVal < 1e-9) return null
+            if (pivot != col) {
+                val tmp = a[col]; a[col] = a[pivot]; a[pivot] = tmp
+            }
+            val div = a[col][col]
+            for (j in col..8) a[col][j] /= div
+            for (row in 0 until 8) {
+                if (row == col) continue
+                val factor = a[row][col]
+                if (factor == 0.0) continue
+                for (j in col..8) a[row][j] -= factor * a[col][j]
+            }
+        }
+        return FloatArray(8) { i -> a[i][8].toFloat() }
+    }
+
     private fun decodeQrGrid(grid: Array<BooleanArray>, dim: Int, ver: Int): String? {
         val fmt = readFormatInfo(grid, dim) ?: return null
         val ecLevel = (fmt shr 3) and 0x03 // 1=L, 0=M, 3=Q, 2=H
@@ -398,16 +660,18 @@ object QrDecoder {
     )
 
     private fun readFormatInfo(grid: Array<BooleanArray>, dim: Int): Int? {
+        // Копия 1 вокруг левого верхнего Finder: бит 0 в (8,0) .. бит 14 в (0,8)
         var bits1 = 0
-        for (i in 0..5) bits1 = (bits1 shl 1) or if (grid[8][i]) 1 else 0
-        bits1 = (bits1 shl 1) or if (grid[8][7]) 1 else 0
-        bits1 = (bits1 shl 1) or if (grid[8][8]) 1 else 0
-        bits1 = (bits1 shl 1) or if (grid[7][8]) 1 else 0
-        for (i in 5 downTo 0) bits1 = (bits1 shl 1) or if (grid[i][8]) 1 else 0
+        for (i in 0..5) if (grid[8][i]) bits1 = bits1 or (1 shl i)
+        if (grid[8][7]) bits1 = bits1 or (1 shl 6)
+        if (grid[8][8]) bits1 = bits1 or (1 shl 7)
+        if (grid[7][8]) bits1 = bits1 or (1 shl 8)
+        for (i in 9..14) if (grid[14 - i][8]) bits1 = bits1 or (1 shl i)
 
+        // Копия 2: биты 0..7 в строке 8 (справа налево), биты 8..14 в столбце 8 (снизу вверх)
         var bits2 = 0
-        for (i in dim - 1 downTo dim - 7) bits2 = (bits2 shl 1) or if (grid[i][8]) 1 else 0
-        for (i in dim - 8 until dim) bits2 = (bits2 shl 1) or if (grid[8][i]) 1 else 0
+        for (i in 0..7) if (grid[8][dim - 1 - i]) bits2 = bits2 or (1 shl i)
+        for (i in 8..14) if (grid[dim - 15 + i][8]) bits2 = bits2 or (1 shl i)
 
         var bestData = -1
         var bestDist = 4
@@ -452,6 +716,21 @@ object QrDecoder {
         intArrayOf(6, 30, 54, 78, 102),
         intArrayOf(6, 28, 54, 80, 106),
         intArrayOf(6, 32, 58, 84, 110),
+        intArrayOf(6, 30, 58, 86, 114),
+        intArrayOf(6, 34, 62, 90, 118),
+        intArrayOf(6, 26, 50, 74, 98, 122),
+        intArrayOf(6, 30, 54, 78, 102, 126),
+        intArrayOf(6, 26, 52, 78, 104, 130),
+        intArrayOf(6, 30, 56, 82, 108, 134),
+        intArrayOf(6, 34, 60, 86, 112, 138),
+        intArrayOf(6, 30, 58, 86, 114, 142),
+        intArrayOf(6, 34, 62, 90, 118, 146),
+        intArrayOf(6, 30, 54, 78, 102, 126, 150),
+        intArrayOf(6, 24, 50, 76, 102, 128, 154),
+        intArrayOf(6, 28, 54, 80, 106, 132, 158),
+        intArrayOf(6, 32, 58, 84, 110, 136, 162),
+        intArrayOf(6, 26, 54, 82, 110, 138, 166),
+        intArrayOf(6, 30, 58, 86, 114, 142, 170),
     )
 
     private fun buildFunctionMask(dim: Int, ver: Int): Array<BooleanArray> {
@@ -470,7 +749,7 @@ object QrDecoder {
             f[6][i] = true
             f[i][6] = true
         }
-        if (ver in 2..25) {
+        if (ver in 2..40) {
             val pos = ALIGN_POS[ver]
             for (r in pos) {
                 for (c in pos) {
@@ -557,6 +836,11 @@ object QrDecoder {
         (18 to 1) to intArrayOf(30, 5, 120, 1, 121),
         (19 to 1) to intArrayOf(28, 3, 113, 4, 114),
         (20 to 1) to intArrayOf(28, 3, 107, 5, 108),
+        (21 to 1) to intArrayOf(28, 4, 116, 4, 117),
+        (22 to 1) to intArrayOf(28, 2, 111, 7, 112),
+        (23 to 1) to intArrayOf(30, 4, 121, 5, 122),
+        (24 to 1) to intArrayOf(30, 6, 117, 4, 118),
+        (25 to 1) to intArrayOf(26, 8, 106, 4, 107),
         // Level M (ecLevel = 0)
         (1 to 0) to intArrayOf(10, 1, 16, 0, 0),
         (2 to 0) to intArrayOf(16, 1, 28, 0, 0),
@@ -578,6 +862,11 @@ object QrDecoder {
         (18 to 0) to intArrayOf(26, 9, 43, 4, 44),
         (19 to 0) to intArrayOf(26, 3, 44, 11, 45),
         (20 to 0) to intArrayOf(26, 3, 41, 13, 42),
+        (21 to 0) to intArrayOf(26, 17, 42, 0, 0),
+        (22 to 0) to intArrayOf(28, 17, 46, 0, 0),
+        (23 to 0) to intArrayOf(28, 4, 47, 14, 48),
+        (24 to 0) to intArrayOf(28, 6, 45, 14, 46),
+        (25 to 0) to intArrayOf(28, 8, 47, 13, 48),
         // Level Q (ecLevel = 3)
         (1 to 3) to intArrayOf(13, 1, 13, 0, 0),
         (2 to 3) to intArrayOf(22, 1, 22, 0, 0),
@@ -591,6 +880,14 @@ object QrDecoder {
         (10 to 3) to intArrayOf(24, 6, 19, 2, 20),
         (11 to 3) to intArrayOf(28, 4, 22, 4, 23),
         (12 to 3) to intArrayOf(26, 4, 20, 6, 21),
+        (13 to 3) to intArrayOf(24, 8, 20, 4, 21),
+        (14 to 3) to intArrayOf(20, 11, 16, 5, 17),
+        (15 to 3) to intArrayOf(30, 5, 24, 7, 25),
+        (16 to 3) to intArrayOf(24, 15, 19, 2, 20),
+        (17 to 3) to intArrayOf(28, 1, 22, 15, 23),
+        (18 to 3) to intArrayOf(28, 17, 22, 1, 23),
+        (19 to 3) to intArrayOf(26, 17, 21, 4, 22),
+        (20 to 3) to intArrayOf(30, 15, 24, 5, 25),
         // Level H (ecLevel = 2)
         (1 to 2) to intArrayOf(17, 1, 9, 0, 0),
         (2 to 2) to intArrayOf(28, 1, 16, 0, 0),
@@ -602,6 +899,16 @@ object QrDecoder {
         (8 to 2) to intArrayOf(26, 4, 14, 2, 15),
         (9 to 2) to intArrayOf(24, 4, 12, 4, 13),
         (10 to 2) to intArrayOf(28, 6, 15, 2, 16),
+        (11 to 2) to intArrayOf(24, 3, 12, 8, 13),
+        (12 to 2) to intArrayOf(28, 7, 14, 4, 15),
+        (13 to 2) to intArrayOf(22, 12, 11, 4, 12),
+        (14 to 2) to intArrayOf(24, 11, 12, 5, 13),
+        (15 to 2) to intArrayOf(24, 11, 12, 7, 13),
+        (16 to 2) to intArrayOf(30, 3, 15, 13, 16),
+        (17 to 2) to intArrayOf(28, 2, 14, 17, 15),
+        (18 to 2) to intArrayOf(28, 2, 14, 19, 15),
+        (19 to 2) to intArrayOf(26, 9, 13, 16, 14),
+        (20 to 2) to intArrayOf(28, 15, 15, 10, 16),
     )
 
     private fun correctErrors(raw: IntArray, ver: Int, ecLevel: Int): ByteArray? {

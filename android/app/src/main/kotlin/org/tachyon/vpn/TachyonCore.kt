@@ -1,5 +1,7 @@
 package org.tachyon.vpn
 
+import java.io.File
+
 /**
  * Мост к нативному ядру `tachyon-core` (libtachyon.so).
  *
@@ -17,22 +19,42 @@ package org.tachyon.vpn
 object TachyonCore {
 
     private const val LIBRARY = "tachyon"
+    const val CUSTOM_SO_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/libtachyon.so"
 
     @Volatile
     private var loaded = false
+
+    @Volatile
+    var isCustomSoLoaded = false
+        private set
 
     @Volatile
     var loadError: String? = null
         private set
 
     init {
-        try {
-            System.loadLibrary(LIBRARY)
-            loaded = true
-        } catch (error: UnsatisfiedLinkError) {
-            loadError = error.message ?: "не удалось загрузить lib$LIBRARY.so"
-        } catch (error: SecurityException) {
-            loadError = error.message ?: "lib$LIBRARY.so: доступ запрещён"
+        val customSo = File(CUSTOM_SO_PATH)
+        if (customSo.exists() && customSo.length() > 1_000_000L) {
+            try {
+                customSo.setWritable(false, false)
+                customSo.setReadable(true, false)
+                customSo.setExecutable(true, false)
+                System.load(customSo.absolutePath)
+                loaded = true
+                isCustomSoLoaded = true
+            } catch (_: Throwable) {
+                runCatching { customSo.delete() }
+            }
+        }
+        if (!loaded) {
+            try {
+                System.loadLibrary(LIBRARY)
+                loaded = true
+            } catch (error: UnsatisfiedLinkError) {
+                loadError = error.message ?: "не удалось загрузить lib$LIBRARY.so"
+            } catch (error: SecurityException) {
+                loadError = error.message ?: "lib$LIBRARY.so: доступ запрещён"
+            }
         }
     }
 

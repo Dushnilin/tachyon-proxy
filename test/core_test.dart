@@ -264,10 +264,10 @@ void main() {
   });
 
   group('протоколы движка', () {
-    test('hysteria2-ссылка разбирается с obfs', () {
+    test('hysteria2-ссылка разбирается с obfs в канонический объект tachyon-core', () {
       final profile = const LinkParser().parse(
         'hysteria2://pass@hy.example:8443?sni=cdn.example&obfs=salamander'
-        '&obfs-password=ob123#HY2',
+        '&obfs-password=ob123&mport=20000-30000#HY2',
       );
       expect(profile, isNotNull);
       expect(profile!.type, 'hysteria2');
@@ -275,8 +275,81 @@ void main() {
       expect(profile.port, 8443);
       expect(profile.password, 'pass');
       expect(profile.sni, 'cdn.example');
-      expect(profile.extra['obfs'], 'salamander');
-      expect(profile.extra['obfs-password'], 'ob123');
+      expect(profile.extra['obfs'], {'type': 'salamander', 'password': 'ob123'});
+      expect(profile.extra['server_ports'], ['20000:30000']);
+      final out = profile.toOutbound();
+      expect(out['obfs'], {'type': 'salamander', 'password': 'ob123'});
+      expect((out['tls'] as Map)['enabled'], isTrue);
+    });
+
+    test('wireguard и amneziawg URI и .conf INI разбираются со всеми полями AWG', () {
+      final awg = const LinkParser().parse(
+        'amneziawg://privKey123@198.51.100.10:51820'
+        '?publickey=pubKey456&address=10.8.0.2/32&mtu=1380'
+        '&jc=4&jmin=40&jmax=70&s1=15&s2=25&h1=100-200&h2=300#AWG-Server',
+      );
+      expect(awg, isNotNull);
+      expect(awg!.type, 'wireguard');
+      expect(awg.isAmneziaWg, isTrue);
+      expect(awg.fullTransportLabel, 'AMNEZIAWG · UDP');
+      final out = awg.toOutbound();
+      expect(out['private_key'], 'privKey123');
+      expect((out['peers'] as List).first['public_key'], 'pubKey456');
+      expect(out['jc'], 4);
+      expect(out['jmin'], 40);
+      expect(out['jmax'], 70);
+      expect(out['h1'], '100-200');
+      expect(out['h2'], 300);
+
+      const conf = '''
+# Frankfurt AWG
+[Interface]
+PrivateKey = privConfKey
+Address = 10.66.66.2/32
+MTU = 1400
+Jc = 5
+Jmin = 50
+Jmax = 1000
+
+[Peer]
+PublicKey = pubConfKey
+Endpoint = 203.0.113.5:51820
+''';
+      final fromConf = const LinkParser().parseSubscription(conf);
+      expect(fromConf.length, 1);
+      expect(fromConf.first.name, 'Frankfurt AWG');
+      expect(fromConf.first.extra['jc'], 5);
+    });
+
+    test('naive+quic, snell, shadowtls, mtproto и Clash YAML разбираются', () {
+      final naive = const LinkParser().parse('naive+quic://u1:p1@n.example:443#NaiveQ');
+      expect(naive, isNotNull);
+      expect(naive!.type, 'naive');
+      expect(naive.extra['quic'], isTrue);
+      expect(naive.extra['username'], 'u1');
+
+      final snell = const LinkParser().parse('snell://pskSecret@sn.example:8443?version=5#Snell5');
+      expect(snell, isNotNull);
+      expect(snell!.type, 'snell');
+      expect(snell.toOutbound()['psk'], 'pskSecret');
+
+      const clashYaml = '''
+proxies:
+  - {name: "NL-VLESS", type: vless, server: nl.example.com, port: 443, uuid: "u-123", tls: true, servername: nl.example.com, network: ws, ws-opts: {path: "/ws"}}
+  - name: "DE-HY2"
+    type: hysteria2
+    server: de.example.com
+    port: 443
+    password: secret
+    obfs: salamander
+    obfs-password: obpw
+''';
+      final clashProfiles = const LinkParser().parseSubscription(clashYaml);
+      expect(clashProfiles.length, 2);
+      expect(clashProfiles[0].name, 'NL-VLESS');
+      expect(clashProfiles[0].transport, 'ws');
+      expect(clashProfiles[1].type, 'hysteria2');
+      expect(clashProfiles[1].extra['obfs'], {'type': 'salamander', 'password': 'obpw'});
     });
 
     test('hy2:// — то же самое, что hysteria2://', () {
@@ -439,6 +512,80 @@ void main() {
       );
       expect(ytSetRule['action'], 'route');
       expect(ytSetRule['outbound'], 'desync');
+    });
+
+    test('массив полных конфигураций Xray с цепочкой dialerProxy разбирается в профиль с detour', () {
+      const xrayArrayJson = '''
+[
+  {
+    "remarks": "🇩🇪 Germany Chain #1",
+    "inbounds": [{"port": 10808, "protocol": "socks"}],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {
+          "vnext": [
+            {
+              "address": "198.51.100.77",
+              "port": 443,
+              "users": [{"id": "11111111-2222-3333-4444-555555555555", "encryption": "none", "flow": "xtls-rprx-vision"}]
+            }
+          ]
+        },
+        "streamSettings": {
+          "network": "tcp",
+          "security": "reality",
+          "realitySettings": {
+            "serverName": "www.microsoft.com",
+            "fingerprint": "chrome",
+            "publicKey": "pbk123",
+            "shortId": "abcd"
+          },
+          "sockopt": {
+            "dialerProxy": "warp-out"
+          }
+        }
+      },
+      {
+        "tag": "warp-out",
+        "protocol": "socks",
+        "settings": {
+          "servers": [
+            {"address": "127.0.0.1", "port": 40000}
+          ]
+        }
+      },
+      {
+        "tag": "direct",
+        "protocol": "freedom"
+      }
+    ]
+  }
+]
+''';
+      final profiles = const LinkParser().parseSubscription(xrayArrayJson);
+      expect(profiles, hasLength(1));
+      final p = profiles.first;
+      expect(p.name, '🇩🇪 Germany Chain #1');
+      expect(p.type, 'vless');
+      expect(p.server, '198.51.100.77');
+      expect(p.extra['detour'], 'chain-1-warp-out');
+
+      final cfg = RuntimeConfig(
+        profile: p,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+      ).toJson();
+      final outbounds = (cfg['outbounds'] as List).cast<Map<String, dynamic>>();
+      final mainOut = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      final chainOut = outbounds.firstWhere((o) => o['tag'] == 'chain-1-warp-out');
+      expect(mainOut['detour'], 'chain-1-warp-out');
+      expect(mainOut.containsKey('chain_outbounds'), isFalse);
+      expect(chainOut['type'], 'socks');
+      expect(chainOut['server'], '127.0.0.1');
+      expect(chainOut['server_port'], 40000);
     });
   });
 }

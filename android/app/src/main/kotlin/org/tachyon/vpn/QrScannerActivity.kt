@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
@@ -22,8 +23,10 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.Size
+import android.os.Looper
+import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -33,20 +36,27 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 /**
- * Экран сканирования QR-кода: живое превью Camera2 с видоискателем и выбор изображения из галереи.
+ * Экран сканирования QR-кода: живое превью Camera2 с автофокусом, фонариком,
+ * двойным контуром распознавания (YUV ImageReader 1280x720 + TextureView Bitmap)
+ * и выбором изображения с QR-кодом из галереи.
  */
 class QrScannerActivity : Activity() {
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
+    private var previewRequestBuilder: CaptureRequest.Builder? = null
     private var imageReader: ImageReader? = null
     private var bgThread: HandlerThread? = null
     private var bgHandler: Handler? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var textureView: TextureView
+    private var torchEnabled = false
     private val decoding = AtomicBoolean(false)
     private val finished = AtomicBoolean(false)
+    private var lastTextureScanMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,28 +88,45 @@ class QrScannerActivity : Activity() {
             ),
         )
 
-        // Верхняя панель с заголовком и кнопкой закрытия
+        // Верхняя панель с заголовком, фонариком и кнопкой закрытия
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(48, 84, 48, 32)
+            setPadding(40, 84, 40, 28)
+            setBackgroundColor(Color.parseColor("#990B0B0D"))
         }
         val title = TextView(this).apply {
-            text = "Наведите камеру на QR-код подписки или сервера"
+            text = "Наведите камеру на QR-код"
             setTextColor(Color.parseColor("#F2F2F3"))
             textSize = 15f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val torchBtn = Button(this).apply {
+            text = "Фонарик"
+            setTextColor(Color.parseColor("#B9A8FF"))
+            setBackgroundColor(Color.parseColor("#1E1E24"))
+            setOnClickListener {
+                torchEnabled = !torchEnabled
+                applyTorchState()
+                text = if (torchEnabled) "Фонарик: ВКЛ" else "Фонарик"
+            }
         }
         val closeBtn = Button(this).apply {
             text = "Закрыть"
             setTextColor(Color.parseColor("#F2F2F3"))
             setBackgroundColor(Color.parseColor("#26262B"))
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = 16 }
+            layoutParams = lp
             setOnClickListener {
                 setResult(RESULT_CANCELED)
                 finish()
             }
         }
         topBar.addView(title)
+        topBar.addView(torchBtn)
         topBar.addView(closeBtn)
         root.addView(
             topBar,
@@ -140,6 +167,18 @@ class QrScannerActivity : Activity() {
         } else {
             setupCameraPreview()
         }
+    }
+
+    private fun applyTorchState() {
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        try {
+            builder.set(
+                CaptureRequest.FLASH_MODE,
+                if (torchEnabled) CaptureRequest.FLASH_MODE_TORCH else CaptureRequest.FLASH_MODE_OFF,
+            )
+            session.setRepeatingRequest(builder.build(), null, bgHandler)
+        } catch (_: Throwable) {}
     }
 
     private fun openGalleryPicker() {
@@ -191,7 +230,9 @@ class QrScannerActivity : Activity() {
                         bmp.recycle()
                     }
                 }
-            } catch (_: Throwable) {}
+            } catch (e: Throwable) {
+                Log.e(TAG, "decodeUri failed", e)
+            }
             runOnUiThread {
                 if (!decoded.isNullOrBlank()) {
                     deliverSuccess(decoded!!)
@@ -208,6 +249,10 @@ class QrScannerActivity : Activity() {
 
     private fun deliverSuccess(text: String) {
         if (!finished.compareAndSet(false, true)) return
+        Log.i(TAG, "QR успешно распознан (${text.length} симв.)")
+        runCatching {
+            window.decorView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        }
         val out = Intent().putExtra(EXTRA_QR_RESULT, text)
         setResult(RESULT_OK, out)
         finish()
@@ -215,16 +260,71 @@ class QrScannerActivity : Activity() {
 
     private fun setupCameraPreview() {
         startBgThread()
-        if (textureView.isAvailable) {
-            openCamera()
-        } else {
-            textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) = openCamera()
-                override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) = Unit
-                override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean = true
-                override fun onSurfaceTextureUpdated(s: SurfaceTexture) = Unit
+        textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) {
+                configureTransform(w, h)
+                openCamera()
+            }
+
+            override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {
+                configureTransform(w, h)
+            }
+
+            override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean = true
+
+            override fun onSurfaceTextureUpdated(s: SurfaceTexture) {
+                // Дополнительный контур: раз в 180 мс берём отрендеренный кадр прямо с TextureView,
+                // если фоновый декодер свободен. Это гарантирует работу даже на устройствах с нестандартным YUV stride.
+                val now = System.currentTimeMillis()
+                if (now - lastTextureScanMs < 180 || finished.get()) return
+                if (!decoding.compareAndSet(false, true)) return
+                lastTextureScanMs = now
+
+                val w = textureView.width
+                val h = textureView.height
+                if (w < 64 || h < 64) {
+                    decoding.set(false)
+                    return
+                }
+                val bmpW = if (w <= h) 720 else 1280
+                val bmpH = if (w <= h) 1280 else 720
+                val bmp = runCatching { textureView.getBitmap(bmpW, bmpH) }.getOrNull()
+                if (bmp == null) {
+                    decoding.set(false)
+                    return
+                }
+                bgHandler?.post {
+                    try {
+                        val res = QrDecoder.decode(bmp)
+                        if (!res.isNullOrBlank()) {
+                            mainHandler.post { deliverSuccess(res) }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        bmp.recycle()
+                        decoding.set(false)
+                    }
+                }
             }
         }
+        if (textureView.isAvailable) {
+            configureTransform(textureView.width, textureView.height)
+            openCamera()
+        }
+    }
+
+    private fun configureTransform(viewWidth: Int, viewHeight: Int) {
+        if (viewWidth <= 0 || viewHeight <= 0) return
+        // Камера отдаёт поток 1280x720 (в портретной ориентации — 720x1280).
+        // Масштабируем с сохранением пропорций (CenterCrop), чтобы QR-код не сплющивало!
+        val previewW = 720f
+        val previewH = 1280f
+        val scaleX = viewWidth / previewW
+        val scaleY = viewHeight / previewH
+        val maxScale = max(scaleX, scaleY)
+        val matrix = Matrix()
+        matrix.setScale(maxScale / scaleX, maxScale / scaleY, viewWidth / 2f, viewHeight / 2f)
+        textureView.setTransform(matrix)
     }
 
     private fun openCamera() {
@@ -235,10 +335,10 @@ class QrScannerActivity : Activity() {
             chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
         } ?: mgr.cameraIdList.firstOrNull() ?: return
 
-        imageReader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 2).apply {
+        imageReader = ImageReader.newInstance(1280, 720, ImageFormat.YUV_420_888, 2).apply {
             setOnImageAvailableListener({ reader ->
                 val img = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                if (!decoding.compareAndSet(false, true)) {
+                if (finished.get() || !decoding.compareAndSet(false, true)) {
                     img.close()
                     return@setOnImageAvailableListener
                 }
@@ -246,22 +346,36 @@ class QrScannerActivity : Activity() {
                     val plane = img.planes[0]
                     val buf = plane.buffer
                     val rowStride = plane.rowStride
+                    val pixelStride = plane.pixelStride
                     val w = img.width
                     val h = img.height
                     val lum = ByteArray(w * h)
-                    if (rowStride == w) {
+                    if (pixelStride == 1 && rowStride == w) {
                         buf.get(lum, 0, w * h)
                     } else {
+                        val rowBuf = ByteArray(rowStride)
                         for (r in 0 until h) {
                             buf.position(r * rowStride)
-                            buf.get(lum, r * w, w)
+                            val toRead = minOf(rowStride, buf.remaining())
+                            buf.get(rowBuf, 0, toRead)
+                            if (pixelStride == 1) {
+                                System.arraycopy(rowBuf, 0, lum, r * w, w)
+                            } else {
+                                for (c in 0 until w) {
+                                    val idx = c * pixelStride
+                                    if (idx < toRead) {
+                                        lum[r * w + c] = rowBuf[idx]
+                                    }
+                                }
+                            }
                         }
                     }
                     val res = QrDecoder.decodeLuminance(lum, w, h)
                     if (!res.isNullOrBlank()) {
-                        runOnUiThread { deliverSuccess(res) }
+                        mainHandler.post { deliverSuccess(res) }
                     }
-                } catch (_: Throwable) {
+                } catch (e: Throwable) {
+                    Log.w(TAG, "YUV decode error", e)
                 } finally {
                     img.close()
                     decoding.set(false)
@@ -286,30 +400,67 @@ class QrScannerActivity : Activity() {
                     cameraDevice = null
                 }
             }, bgHandler)
-        } catch (_: Throwable) {}
+        } catch (e: Throwable) {
+            Log.e(TAG, "openCamera failed", e)
+        }
     }
 
     private fun startPreviewSession(camera: CameraDevice) {
         val st = textureView.surfaceTexture ?: return
         st.setDefaultBufferSize(1280, 720)
         val previewSurface = Surface(st)
-        val readerSurface = imageReader?.surface ?: return
+        val readerSurface = imageReader?.surface
 
         try {
             val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(previewSurface)
-                addTarget(readerSurface)
+                if (readerSurface != null) addTarget(readerSurface)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            }
+            previewRequestBuilder = req
+            val targets = if (readerSurface != null) {
+                listOf(previewSurface, readerSurface)
+            } else {
+                listOf(previewSurface)
             }
             @Suppress("DEPRECATION")
             camera.createCaptureSession(
-                listOf(previewSurface, readerSurface),
+                targets,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
                         try {
                             session.setRepeatingRequest(req.build(), null, bgHandler)
                         } catch (_: Throwable) {}
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        // Если двойной поток не поддерживается драйвером — запускаем только на TextureView
+                        if (readerSurface != null) {
+                            startSingleSurfaceSession(camera, previewSurface)
+                        }
+                    }
+                },
+                bgHandler,
+            )
+        } catch (_: Throwable) {}
+    }
+
+    private fun startSingleSurfaceSession(camera: CameraDevice, previewSurface: Surface) {
+        try {
+            val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(previewSurface)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+            previewRequestBuilder = req
+            @Suppress("DEPRECATION")
+            camera.createCaptureSession(
+                listOf(previewSurface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        captureSession = session
+                        runCatching { session.setRepeatingRequest(req.build(), null, bgHandler) }
                     }
 
                     override fun onConfigureFailed(session: CameraCaptureSession) = Unit
@@ -353,17 +504,32 @@ class QrScannerActivity : Activity() {
             strokeWidth = 6f
         }
 
+        private val scrimPaint = Paint().apply {
+            color = Color.parseColor("#66000000")
+            style = Paint.Style.FILL
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val side = (width.coerceAtMost(height) * 0.66f)
+            val side = (width.coerceAtMost(height) * 0.68f)
             val left = (width - side) / 2f
             val top = (height - side) / 2f
-            val rect = RectF(left, top, left + side, top + side)
+            val right = left + side
+            val bottom = top + side
+
+            // Затенение вокруг рамки видоискателя
+            canvas.drawRect(0f, 0f, width.toFloat(), top, scrimPaint)
+            canvas.drawRect(0f, bottom, width.toFloat(), height.toFloat(), scrimPaint)
+            canvas.drawRect(0f, top, left, bottom, scrimPaint)
+            canvas.drawRect(right, top, width.toFloat(), bottom, scrimPaint)
+
+            val rect = RectF(left, top, right, bottom)
             canvas.drawRoundRect(rect, 36f, 36f, borderPaint)
         }
     }
 
     companion object {
+        private const val TAG = "TachyonQr"
         const val EXTRA_GALLERY_ONLY = "org.tachyon.vpn.extra.GALLERY_ONLY"
         const val EXTRA_QR_RESULT = "org.tachyon.vpn.extra.QR_RESULT"
         private const val REQ_CAMERA = 5001

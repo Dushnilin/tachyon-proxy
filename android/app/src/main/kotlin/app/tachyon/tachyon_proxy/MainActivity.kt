@@ -190,6 +190,9 @@ class MainActivity : FlutterFragmentActivity() {
                     "scanQr" -> handleScanQr(call, result)
                     "networkInfo" -> result.success(currentNetworkType())
                     "filesDir" -> result.success(filesDir.absolutePath)
+                    "deviceAbi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
+                    "installEngineSo" -> handleInstallEngineSo(call, result)
+                    "installApk" -> handleInstallApk(call, result)
                     else -> result.notImplemented()
                 }
             }
@@ -408,6 +411,122 @@ class MainActivity : FlutterFragmentActivity() {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
             else -> "other"
+        }
+    }
+
+    /**
+     * Пробует установить обновлённый бинарник движка `libtachyon.so` в `code_cache/engine`.
+     * Если SELinux текущей версии Android блокирует `dlopen` из директории данных приложения,
+     * возвращает `"requires_apk"`, чтобы приложение автоматически запустило обновление через APK.
+     */
+    private fun handleInstallEngineSo(call: MethodCall, result: MethodChannel.Result) {
+        val srcPath = call.argument<String>("path")
+        if (srcPath.isNullOrBlank()) {
+            result.success("error: пустой путь к файлу")
+            return
+        }
+        Thread({
+            try {
+                val srcFile = File(srcPath)
+                if (!srcFile.exists() || srcFile.length() < 1_000_000L) {
+                    runOnUiThread { result.success("error: файл ядра повреждён или не найден") }
+                    return@Thread
+                }
+                val engineDir = File(codeCacheDir, "engine")
+                engineDir.mkdirs()
+                val targetSo = File(engineDir, "libtachyon.so")
+                if (targetSo.exists()) {
+                    targetSo.setWritable(true, true)
+                    targetSo.delete()
+                }
+                srcFile.copyTo(targetSo, overwrite = true)
+                srcFile.delete()
+                targetSo.setWritable(false, false)
+                targetSo.setReadable(true, false)
+                targetSo.setExecutable(true, false)
+
+                // Проверяем, разрешает ли SELinux прошивки dlopen из code_cache
+                val probeSo = File(engineDir, "libtachyon_probe.so")
+                if (probeSo.exists()) {
+                    probeSo.setWritable(true, true)
+                    probeSo.delete()
+                }
+                targetSo.copyTo(probeSo, overwrite = true)
+                probeSo.setWritable(false, false)
+                probeSo.setReadable(true, false)
+                probeSo.setExecutable(true, false)
+
+                var dlopenAllowed = false
+                try {
+                    System.load(probeSo.absolutePath)
+                    dlopenAllowed = true
+                } catch (e: Throwable) {
+                    val msg = e.message.orEmpty()
+                    if (msg.contains("already opened") || msg.contains("already loaded")) {
+                        dlopenAllowed = true
+                    }
+                } finally {
+                    runCatching {
+                        probeSo.setWritable(true, true)
+                        probeSo.delete()
+                    }
+                }
+
+                if (!dlopenAllowed) {
+                    runCatching {
+                        targetSo.setWritable(true, true)
+                        targetSo.delete()
+                    }
+                    runOnUiThread { result.success("requires_apk") }
+                    return@Thread
+                }
+
+                runOnUiThread {
+                    result.success("ok")
+                    // Перезапускаем процесс приложения, чтобы TachyonCore загрузил новый .so с нуля
+                    window.decorView.postDelayed({
+                        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        }
+                        if (launchIntent != null) {
+                            startActivity(launchIntent)
+                        }
+                        Runtime.getRuntime().exit(0)
+                    }, 400)
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { result.success("requires_apk") }
+            }
+        }, "tachyon-install-so").start()
+    }
+
+    /** Запускает системный установщик пакетов Android для обновления APK. */
+    private fun handleInstallApk(call: MethodCall, result: MethodChannel.Result) {
+        val fileName = call.argument<String>("fileName") ?: "tachyon-update.apk"
+        try {
+            val apkFile = File(File(filesDir, "update"), fileName)
+            if (!apkFile.exists()) {
+                result.success("error: APK не найден (${apkFile.absolutePath})")
+                return
+            }
+            if (!packageManager.canRequestPackageInstalls()) {
+                val permIntent = Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    android.net.Uri.parse("package:$packageName"),
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(permIntent)
+            }
+            val uri = android.net.Uri.parse("content://${org.tachyon.vpn.ApkFileProvider.AUTHORITY}/$fileName")
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(installIntent)
+            result.success("ok")
+        } catch (e: Throwable) {
+            result.success("error: ${e.message}")
         }
     }
 

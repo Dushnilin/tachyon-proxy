@@ -41,6 +41,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     private var eventSink: EventChannel.EventSink? = null
     private var pendingCmd: String? = null
+    private var pendingDeepLink: String? = null
 
     /** Запрос, ждущий разрешения на VPN. */
     private var pendingStart: PendingStart? = null
@@ -123,6 +124,9 @@ class MainActivity : FlutterFragmentActivity() {
                 pendingCmd = cmd
             }
         }
+        extractIncomingLink(intent)?.let { link ->
+            pendingDeepLink = link
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -146,6 +150,29 @@ class MainActivity : FlutterFragmentActivity() {
                 pendingCmd = cmd
             }
         }
+        extractIncomingLink(intent)?.let { link ->
+            val sink = eventSink
+            if (sink != null) {
+                runOnUiThread { sink.success(mapOf("type" to "deeplink", "url" to link)) }
+            } else {
+                pendingDeepLink = link
+            }
+        }
+    }
+
+    private fun extractIncomingLink(intent: Intent?): String? {
+        if (intent == null) return null
+        when (intent.action) {
+            Intent.ACTION_VIEW -> {
+                val data = intent.dataString?.trim()
+                if (!data.isNullOrEmpty()) return data
+            }
+            Intent.ACTION_SEND -> {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+                if (!text.isNullOrEmpty()) return text
+            }
+        }
+        return null
     }
 
     private fun dumpDiagnostics() {
@@ -177,6 +204,8 @@ class MainActivity : FlutterFragmentActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "check" -> handleCheck(call, result)
+                    "fetchSubscription" -> handleFetchSubscription(call, result)
+                    "parseSubscription" -> handleParseSubscription(call, result)
                     "start" -> handleStart(call, result)
                     "stop" -> handleStop(result)
                     "status" -> result.success(currentStatus())
@@ -193,6 +222,11 @@ class MainActivity : FlutterFragmentActivity() {
                     "deviceAbi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
                     "installEngineSo" -> handleInstallEngineSo(call, result)
                     "installApk" -> handleInstallApk(call, result)
+                    "consumeLaunchLink" -> {
+                        val link = pendingDeepLink
+                        pendingDeepLink = null
+                        result.success(link)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -207,6 +241,10 @@ class MainActivity : FlutterFragmentActivity() {
                         pendingCmd?.let { cmd ->
                             pendingCmd = null
                             runOnUiThread { events?.success(mapOf("type" to "cmd", "cmd" to cmd)) }
+                        }
+                        pendingDeepLink?.let { link ->
+                            pendingDeepLink = null
+                            runOnUiThread { events?.success(mapOf("type" to "deeplink", "url" to link)) }
                         }
                     }
 
@@ -237,6 +275,40 @@ class MainActivity : FlutterFragmentActivity() {
                 .getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
             runOnUiThread { result.success(response) }
         }, "tachyon-check").start()
+    }
+
+    /** Адаптивная загрузка подписки напрямую через движок tachyon-core. */
+    private fun handleFetchSubscription(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url").orEmpty()
+        val customUa = call.argument<String>("customUa").orEmpty()
+        val sendHwid = call.argument<Boolean>("sendHwid") ?: true
+        val customHwid = call.argument<String>("customHwid").orEmpty()
+        val insecure = call.argument<Boolean>("insecure") ?: false
+        if (url.isBlank()) {
+            result.success("""{"ok":false,"error":"пустой URL"}""")
+            return
+        }
+        Thread({
+            val response = runCatching {
+                TachyonCore.fetchSubscription(url, customUa, sendHwid, customHwid, insecure)
+            }.getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
+            runOnUiThread { result.success(response) }
+        }, "tachyon-sub-fetch").start()
+    }
+
+    /** Разбор любого текста/JSON/YAML подписки напрямую через движок tachyon-core. */
+    private fun handleParseSubscription(call: MethodCall, result: MethodChannel.Result) {
+        val payload = call.argument<String>("payload").orEmpty()
+        if (payload.isBlank()) {
+            result.success("""{"ok":false,"error":"пустой ответ"}""")
+            return
+        }
+        Thread({
+            val response = runCatching {
+                TachyonCore.parseSubscription(payload)
+            }.getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
+            runOnUiThread { result.success(response) }
+        }, "tachyon-sub-parse").start()
     }
 
     /**

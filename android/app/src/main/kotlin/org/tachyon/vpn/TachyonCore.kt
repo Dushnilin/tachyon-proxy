@@ -73,6 +73,14 @@ object TachyonCore {
     }
 
     external fun check(config: String): String?
+    external fun fetchSubscription(
+        url: String,
+        customUa: String,
+        sendHwid: Boolean,
+        customHwid: String,
+        insecure: Boolean,
+    ): String?
+    external fun parseSubscription(payload: String): String?
     external fun start(config: String, tunFd: Int, protectPath: String, logPath: String): Int
     external fun stop(): Int
     external fun lastError(): String?

@@ -71,6 +71,7 @@ class AppSettings {
     this.smartFailover = true,
     this.detourProfileId = '',
     this.perNetworkDesync = false,
+    this.proxyTlsFragment = false,
   });
 
   final List<Profile> profiles;
@@ -136,6 +137,9 @@ class AppSettings {
   /// Автовыбор разного рецепта Desync для Wi-Fi и мобильной сети.
   final bool perNetworkDesync;
 
+  /// Дробить TLS ClientHello до прокси-сервера (record_fragment) против глушилок LTE.
+  final bool proxyTlsFragment;
+
   Profile? get detourProfile {
     if (detourProfileId.isEmpty) return null;
     for (final p in profiles) {
@@ -145,6 +149,27 @@ class AppSettings {
   }
 
   Profile? get selectedProfile {
+    if (selectedProfileId.startsWith('auto:')) {
+      final subId = selectedProfileId.substring(5);
+      SubscriptionEntry? sub;
+      for (final s in subscriptions) {
+        if (s.id == subId) {
+          sub = s;
+          break;
+        }
+      }
+      final subLabel = (sub != null && sub.name.isNotEmpty)
+          ? sub.name
+          : (sub != null ? (Uri.tryParse(sub.url)?.host ?? 'подписка') : 'все серверы');
+      return Profile(
+        id: selectedProfileId,
+        name: '⚡ Автовыбор ($subLabel)',
+        type: 'urltest',
+        server: sub?.url ?? 'auto',
+        port: 443,
+        subscriptionId: subId == 'all' ? '' : subId,
+      );
+    }
     if (profiles.isEmpty) return null;
     for (final profile in profiles) {
       if (profile.id == selectedProfileId) return profile;
@@ -177,6 +202,7 @@ class AppSettings {
     bool? smartFailover,
     String? detourProfileId,
     bool? perNetworkDesync,
+    bool? proxyTlsFragment,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -203,6 +229,7 @@ class AppSettings {
       smartFailover: smartFailover ?? this.smartFailover,
       detourProfileId: detourProfileId ?? this.detourProfileId,
       perNetworkDesync: perNetworkDesync ?? this.perNetworkDesync,
+      proxyTlsFragment: proxyTlsFragment ?? this.proxyTlsFragment,
     );
   }
 
@@ -232,6 +259,7 @@ class AppSettings {
         'smartFailover': smartFailover,
         'detourProfileId': detourProfileId,
         'perNetworkDesync': perNetworkDesync,
+        'proxyTlsFragment': proxyTlsFragment,
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -288,6 +316,7 @@ class AppSettings {
       smartFailover: json['smartFailover'] != false,
       detourProfileId: (json['detourProfileId'] as String?) ?? '',
       perNetworkDesync: json['perNetworkDesync'] == true,
+      proxyTlsFragment: json['proxyTlsFragment'] == true,
     );
   }
 }

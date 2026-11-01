@@ -94,7 +94,7 @@ class TachyonAppWidget : AppWidgetProvider() {
 
             views.setTextViewText(
                 R.id.widget_status,
-                if (connected) "TACHYON · ПОДКЛЮЧЕНО" else "TACHYON · ОТКЛЮЧЕНО",
+                if (connected) "⚡ TACHYON · ПОДКЛЮЧЕНО" else "⚡ TACHYON · ОТКЛЮЧЕНО",
             )
             views.setTextColor(
                 R.id.widget_status,

@@ -177,7 +177,7 @@ class Hairline extends StatelessWidget {
   }
 }
 
-/// Центрированный логотип приложения: разрежённые капитель и точка-акцент.
+/// Центрированный логотип приложения: молния-акцент и разрежённые капитель.
 class Wordmark extends StatelessWidget {
   const Wordmark({super.key, this.subtitle});
 
@@ -193,15 +193,12 @@ class Wordmark extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Container(
-              width: 7,
-              height: 7,
-              decoration: BoxDecoration(
-                color: tokens.accent,
-                shape: BoxShape.circle,
-              ),
+            Icon(
+              Icons.bolt_rounded,
+              size: 20,
+              color: tokens.accent,
             ),
-            const SizedBox(width: Space.sm + 2),
+            const SizedBox(width: Space.xs + 2),
             Text(
               'TACHYON',
               style: TextStyle(

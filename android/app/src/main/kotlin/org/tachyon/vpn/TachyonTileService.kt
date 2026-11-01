@@ -1,11 +1,13 @@
 package org.tachyon.vpn
 
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import app.tachyon.tachyon_proxy.MainActivity
+import app.tachyon.tachyon_proxy.R
 import java.io.File
 
 /**
@@ -64,6 +66,7 @@ class TachyonTileService : TileService() {
 
     private fun updateTileState() {
         val tile = qsTile ?: return
+        tile.icon = Icon.createWithResource(this, R.drawable.ic_tachyon_bolt)
         when (TunnelStateHolder.state) {
             TunnelStateHolder.State.Running -> {
                 tile.state = Tile.STATE_ACTIVE

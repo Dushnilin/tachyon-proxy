@@ -650,8 +650,12 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       TextField(
                         controller: address,
                         decoration: InputDecoration(
-                          labelText: 'Адрес и порт',
-                          hintText: type == 'wireguard' ? 'engage.cloudflareclient.com:2408' : 'example.com:443',
+                          labelText: edit == null
+                              ? 'Адрес:порт или ссылка https:// подписки'
+                              : 'Адрес и порт',
+                          hintText: type == 'wireguard'
+                              ? 'engage.cloudflareclient.com:2408'
+                              : 'https://... или example.com:443',
                         ),
                       ),
                       const SizedBox(height: Space.sm),
@@ -975,6 +979,34 @@ class _ProfilesTabState extends State<ProfilesTab> {
                 FilledButton(
                   onPressed: () async {
                     final host = address.text.trim();
+                    final hostLower = host.toLowerCase();
+                    if (edit == null &&
+                        (hostLower.startsWith('https://') ||
+                            hostLower.startsWith('http://') ||
+                            hostLower.startsWith('vless://') ||
+                            hostLower.startsWith('vmess://') ||
+                            hostLower.startsWith('trojan://') ||
+                            hostLower.startsWith('ss://') ||
+                            hostLower.startsWith('hy2://') ||
+                            hostLower.startsWith('hysteria2://') ||
+                            hostLower.startsWith('tuic://') ||
+                            hostLower.startsWith('wg://') ||
+                            hostLower.startsWith('amneziawg://'))) {
+                      Navigator.of(dialogContext).pop();
+                      final added = await controller.importProfiles(host);
+                      if (!context.mounted) return;
+                      final msg = switch (added) {
+                        -1 => 'Подписка по ссылке добавлена — серверы загружены',
+                        0 => controller.lastError.isNotEmpty
+                            ? controller.lastError
+                            : 'Не удалось загрузить серверы по ссылке',
+                        _ => 'Добавлено серверов: $added',
+                      };
+                      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                        SnackBar(content: Text(msg)),
+                      );
+                      return;
+                    }
                     final separator = host.lastIndexOf(':');
                     final server =
                         separator > 0 ? host.substring(0, separator) : host;
@@ -1665,6 +1697,51 @@ class _CollapsibleSubCard extends StatelessWidget {
           if (!isCollapsed) ...[
             if (profiles.isNotEmpty) ...[
               const Divider(height: Space.sm),
+              HairlineCard(
+                onTap: () => onSelectProfile('auto:${sub.id}'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.md,
+                  vertical: Space.sm,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.bolt_rounded,
+                      size: 18,
+                      color: selectedId == 'auto:${sub.id}'
+                          ? tokens.accent
+                          : tokens.muted,
+                    ),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Автовыбор (лучший сервер)',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  color: selectedId == 'auto:${sub.id}'
+                                      ? tokens.accent
+                                      : tokens.ink,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'URLTest · автоматическое переключение по минимальному пингу',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  fontSize: 11,
+                                  color: tokens.faint,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
               for (final p in profiles) ...[
                 _ProfileTile(
                   profile: p,

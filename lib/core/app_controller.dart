@@ -48,6 +48,9 @@ class AppController extends ChangeNotifier {
   /// Текст последней ошибки действия (импорт, скачивание, запуск).
   String _lastError = '';
 
+  /// Уведомление об автоматическом импорте по внешней ссылке / «Поделиться».
+  String _lastImportNotice = '';
+
   /// Журнал ядра.
   List<String> _logs = const [];
 
@@ -81,7 +84,7 @@ class AppController extends ChangeNotifier {
   String _lastNetType = '';
 
   /// Версия приложения и состояние встроенного обновления ядра/APK.
-  static const String appVersion = '0.0.2';
+  static const String appVersion = '0.0.3';
   bool _checkingUpdates = false;
   bool _updatingApp = false;
   double _updateProgress = 0.0;
@@ -98,6 +101,12 @@ class AppController extends ChangeNotifier {
   List<DnsResult> get dnsResults => _dnsResults;
   bool get dnsBenchmarkRunning => _dnsBenchmarkRunning;
   String get lastError => _lastError;
+  String? consumeImportNotice() {
+    if (_lastImportNotice.isEmpty) return null;
+    final msg = _lastImportNotice;
+    _lastImportNotice = '';
+    return msg;
+  }
   List<String> get logs => _logs;
   Map<String, int> get pings => _pings;
   Set<String> get pingingIds => _pingingIds;
@@ -208,7 +217,8 @@ class AppController extends ChangeNotifier {
           ? _settings.subscriptions.first.id
           : '';
       final deduped = _dedupProfiles(_settings.profiles, defaultSubId: defaultSubId);
-      final selectedExists = deduped.any((p) => p.id == _settings.selectedProfileId);
+      final selectedExists = _settings.selectedProfileId.startsWith('auto:') ||
+          deduped.any((p) => p.id == _settings.selectedProfileId);
       _settings = _settings.copyWith(
         profiles: deduped,
         selectedProfileId: selectedExists
@@ -236,10 +246,32 @@ class AppController extends ChangeNotifier {
 
     bridge.onState = _applyNativeState;
     bridge.onCommand = _handleExternalCommand;
+    bridge.onDeepLink = (url) => unawaited(_handleIncomingDeepLink(url));
     bridge.listen();
+
+    unawaited(() async {
+      final launchLink = await bridge.consumeLaunchLink();
+      if (launchLink != null && launchLink.trim().isNotEmpty) {
+        await _handleIncomingDeepLink(launchLink);
+      }
+    }());
 
     // Фоновое обновление: подписки без серверов, список устарел или резолверы ещё не проверены.
     unawaited(_refreshStale());
+  }
+
+  Future<void> _handleIncomingDeepLink(String raw) async {
+    final clean = raw.trim();
+    if (clean.isEmpty) return;
+    final added = await importProfiles(clean);
+    if (added == -1) {
+      _lastImportNotice = 'Подписка https:// успешно добавлена и загружена';
+    } else if (added > 0) {
+      _lastImportNotice = 'Импортировано профилей по ссылке: $added';
+    } else if (_lastError.isNotEmpty) {
+      _lastImportNotice = _lastError;
+    }
+    notifyListeners();
   }
 
   /// Обновляет устаревшие списки и, если нужно, резолверы.
@@ -369,10 +401,39 @@ class AppController extends ChangeNotifier {
     var payload = content.trim();
     if (payload.isEmpty) return 0;
 
-    // Распаковка клиентских deep-link обёрток (v2rayng://, clash://, sing-box://, hiddify://, sub://, tachyon://)
+    // Распаковка клиентских deep-link обёрток (v2raytun://, happ://, v2rayng://, clash://, sing-box://, hiddify://, sub://, tachyon://)
     final unwrappedUrl = _unwrapSubscriptionDeepLink(payload);
-    if (unwrappedUrl != null) {
+    if (unwrappedUrl != null && unwrappedUrl.isNotEmpty) {
       payload = unwrappedUrl;
+    }
+
+    // Если пользователь скопировал сообщение из Telegram-бота целиком («Ваша подписка: https://...»),
+    // извлекаем https:// ссылку, если в тексте нет прямых URI серверов (vless://, hy2:// и т.д.).
+    if (!payload.startsWith('http://') && !payload.startsWith('https://')) {
+      final hasDirectProxyScheme = RegExp(
+        r'\b(vless|vmess|trojan|ss|shadowsocks|hy2|hysteria2?|tuic|wg|wireguard|amneziawg|awg|anytls|naive\+https|naive\+quic|snell|shadowtls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|socks5?|ssh|mtproto|tg)://',
+        caseSensitive: false,
+      ).hasMatch(payload);
+      if (!hasDirectProxyScheme) {
+        final deepMatch = RegExp(
+          r'(v2raytun|happ|hiddify|sing-box|clash|v2rayng|streisand|karing|flclash|sub|tachyon)://[^\s"<>]+',
+          caseSensitive: false,
+        ).firstMatch(payload);
+        if (deepMatch != null) {
+          final inner = _unwrapSubscriptionDeepLink(deepMatch.group(0)!);
+          if (inner != null && inner.isNotEmpty) {
+            payload = inner;
+          }
+        } else {
+          final httpMatch = RegExp(
+            r'https?://[^\s"<>]+',
+            caseSensitive: false,
+          ).firstMatch(payload);
+          if (httpMatch != null) {
+            payload = httpMatch.group(0)!.replaceAll(RegExp(r'[.,;)\]]+$'), '');
+          }
+        }
+      }
     }
 
     // http(s)-ссылка на подписку (не одиночный http://user:pass@host:port прокси)
@@ -393,7 +454,19 @@ class AppController extends ChangeNotifier {
     }
 
     final parser = LinkParser();
-    final profiles = parser.parseSubscription(payload);
+    List<Profile> profiles = const [];
+    final nativeParsed = await bridge.parseSubscription(payload);
+    if (nativeParsed != null &&
+        nativeParsed['ok'] == true &&
+        nativeParsed['nodes'] is List) {
+      profiles = parser.parseEngineNodes(
+        nativeParsed['nodes'] as List,
+        (nativeParsed['primary_tags'] as List?) ?? const [],
+      );
+    }
+    if (profiles.isEmpty) {
+      profiles = parser.parseSubscription(payload);
+    }
     if (profiles.isEmpty) {
       _lastError = 'Не удалось распознать ссылку или формат подписки';
       notifyListeners();
@@ -417,9 +490,13 @@ class AppController extends ChangeNotifier {
   }
 
   String? _unwrapSubscriptionDeepLink(String raw) {
-    final lower = raw.toLowerCase();
+    final trimmed = raw.trim();
+    final lower = trimmed.toLowerCase();
     if (lower.startsWith('sub://')) {
-      final body = raw.substring(6).split('#').first.trim();
+      final body = trimmed.substring(6).split('#').first.trim();
+      if (body.startsWith('http://') || body.startsWith('https://')) {
+        return body;
+      }
       try {
         var b64 = body.replaceAll('-', '+').replaceAll('_', '/');
         if (b64.length % 4 != 0) {
@@ -431,29 +508,101 @@ class AppController extends ChangeNotifier {
         }
       } catch (_) {}
     }
-    if (lower.startsWith('v2rayng://') ||
+    if (lower.startsWith('happ://crypt')) {
+      final slashIdx = trimmed.indexOf('/', 'happ://crypt'.length);
+      if (slashIdx > 0 && slashIdx + 1 < trimmed.length) {
+        final body = trimmed.substring(slashIdx + 1).split('#').first.trim();
+        try {
+          var b64 = body.replaceAll('-', '+').replaceAll('_', '/');
+          if (b64.length % 4 != 0) {
+            b64 = b64.padRight(b64.length + (4 - b64.length % 4), '=');
+          }
+          final decoded = utf8.decode(base64.decode(b64)).trim();
+          if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+            return decoded;
+          }
+        } catch (_) {}
+      }
+    }
+    if (lower.startsWith('v2raytun://') ||
+        lower.startsWith('happ://') ||
+        lower.startsWith('v2rayng://') ||
         lower.startsWith('clash://') ||
+        lower.startsWith('clashmeta://') ||
+        lower.startsWith('flclash://') ||
         lower.startsWith('sing-box://') ||
         lower.startsWith('hiddify://') ||
         lower.startsWith('streisand://') ||
         lower.startsWith('karing://') ||
         lower.startsWith('tachyon://')) {
-      final uri = Uri.tryParse(raw);
-      final urlParam = uri?.queryParameters['url'] ?? uri?.queryParameters['config'];
+      final uri = Uri.tryParse(trimmed);
+      final urlParam = uri?.queryParameters['url'] ??
+          uri?.queryParameters['config'] ??
+          uri?.queryParameters['sub'];
       if (urlParam != null && urlParam.isNotEmpty) {
         return Uri.decodeComponent(urlParam).trim();
       }
-      final idx = raw.indexOf('https://');
-      if (idx > 0) return raw.substring(idx).split('#').first.trim();
-      final idxHttp = raw.indexOf('http://');
-      if (idxHttp > 0) return raw.substring(idxHttp).split('#').first.trim();
+      final idx = trimmed.indexOf('https://');
+      if (idx > 0) {
+        final tail = trimmed.substring(idx).split('#').first.trim();
+        return tail.contains('%3A%2F%2F') || tail.contains('%2F')
+            ? Uri.decodeComponent(tail)
+            : tail;
+      }
+      final idxHttp = trimmed.indexOf('http://');
+      if (idxHttp > 0) {
+        final tail = trimmed.substring(idxHttp).split('#').first.trim();
+        return tail.contains('%3A%2F%2F') || tail.contains('%2F')
+            ? Uri.decodeComponent(tail)
+            : tail;
+      }
     }
     return null;
   }
 
+  /// Извлекает ссылку на подписку или прямые URI серверов из HTML-лендинга личного кабинета
+  /// (Marzban, Remnawave, 3x-ui, PasarGuard, Hiddify).
+  (String? subUrl, List<Profile> profiles) _extractFromHtmlLanding(
+    String html,
+    String subId,
+    LinkParser parser,
+  ) {
+    // 1. Проверяем, нет ли в HTML зашитых deep-link кнопок (v2raytun://import/https://..., happ://add/https://..., sing-box://...)
+    final deepLinks = RegExp(
+      r"""(v2raytun|happ|hiddify|sing-box|clash|v2rayng|streisand|karing)://[^\s"'<>]+""",
+      caseSensitive: false,
+    ).allMatches(html);
+    for (final m in deepLinks) {
+      final unwrapped = _unwrapSubscriptionDeepLink(m.group(0)!);
+      if (unwrapped != null &&
+          (unwrapped.startsWith('https://') || unwrapped.startsWith('http://'))) {
+        return (unwrapped, const []);
+      }
+    }
+
+    // 2. Проверяем прямые URI протоколов (vless://, hy2://, trojan://, ss://, vmess:// и др.) внутри HTML
+    final directMatches = RegExp(
+      r"""(vless|vmess|trojan|ss|hy2|hysteria2|tuic|amneziawg|awg|wg|anytls|tewfai)://[^\s"'<>\\]+""",
+      caseSensitive: false,
+    ).allMatches(html);
+    if (directMatches.isNotEmpty) {
+      final joined = directMatches.map((m) => m.group(0)!).join('\n');
+      final parsed = parser.parseSubscription(joined, subscriptionId: subId);
+      if (parsed.isNotEmpty) {
+        return (null, parsed);
+      }
+    }
+
+    return (null, const []);
+  }
+
   /// Добавляет подписку: ядро качает её само, с железными заголовками.
   Future<void> addSubscription(String url) async {
-    final clean = url.trim();
+    var clean = url.trim();
+    final unwrapped = _unwrapSubscriptionDeepLink(clean);
+    if (unwrapped != null && unwrapped.isNotEmpty) {
+      clean = unwrapped;
+    }
     if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
       _lastError = 'подписка должна быть http(s)-ссылкой';
       notifyListeners();
@@ -504,8 +653,10 @@ class AppController extends ChangeNotifier {
 
       const userAgents = [
         'v2rayNG/1.8.5 (Linux; Android)',
-        'Tachyon/0.0.2 (Android; compatible; sing-box/1.11; HiddifyNext)',
+        'Tachyon/0.0.3 (Android; compatible; sing-box/1.11; HiddifyNext)',
         'Happ/1.6.0 (Android; compatible; sing-box; Mihomo)',
+        'v2rayTun/1.8.20 (Android)',
+        'ClashMetaForAndroid/2.11.2.Meta',
       ];
 
       final parser = LinkParser();
@@ -513,9 +664,32 @@ class AppController extends ChangeNotifier {
       HttpClientResponse? response;
       var lastStatusCode = 0;
       var gotHtml = false;
+      var targetSubUrl = sub.url.trim();
+      Map<String, dynamic>? nativeUserInfo;
 
-      for (final ua in userAgents) {
-        var currentUrl = sub.url.trim();
+      // 1. Сначала пробуем адаптивную загрузку и разбор напрямую через нативный движок tachyon-core
+      final nativeRes = await bridge.fetchSubscription(
+        targetSubUrl,
+        sendHwid: true,
+        customHwid: hwid,
+        insecure: true,
+      );
+      if (nativeRes != null &&
+          nativeRes['ok'] == true &&
+          nativeRes['nodes'] is List) {
+        fresh = parser.parseEngineNodes(
+          nativeRes['nodes'] as List,
+          (nativeRes['primary_tags'] as List?) ?? const [],
+          subscriptionId: subId,
+        );
+        if (nativeRes['user_info'] is Map) {
+          nativeUserInfo = Map<String, dynamic>.from(nativeRes['user_info'] as Map);
+        }
+      }
+
+      // 2. Фоллбэк: если провайдер отдал HTML-лендинг или кастомную схему роутера
+      for (final ua in fresh.isNotEmpty ? const <String>[] : userAgents) {
+        var currentUrl = targetSubUrl;
         HttpClientResponse? attemptResp;
         for (var redirect = 0; redirect < 6; redirect++) {
           final uri = Uri.tryParse(currentUrl);
@@ -526,10 +700,12 @@ class AppController extends ChangeNotifier {
           }
           final request = await client.getUrl(uri);
           request.headers.set('User-Agent', ua);
-          request.headers.set('Accept', '*/*');
+          request.headers.set('Accept', 'application/json, text/plain, */*');
           request.headers.set('Accept-Encoding', 'gzip, deflate');
           request.headers.set('X-Hwid', hwid);
           request.headers.set('x-device-os', 'Android');
+          request.headers.set('x-ver-os', '14');
+          request.headers.set('x-device-model', 'Android');
           request.followRedirects = false;
           attemptResp = await request.close();
 
@@ -569,10 +745,38 @@ class AppController extends ChangeNotifier {
         if (trimmed.toLowerCase().startsWith('<!doctype html') ||
             trimmed.toLowerCase().startsWith('<html')) {
           gotHtml = true;
+          final (extractedSubUrl, extractedProfiles) = _extractFromHtmlLanding(
+            trimmed,
+            subId,
+            parser,
+          );
+          if (extractedProfiles.isNotEmpty) {
+            fresh = extractedProfiles;
+            response = attemptResp;
+            break;
+          }
+          if (extractedSubUrl != null &&
+              extractedSubUrl.isNotEmpty &&
+              extractedSubUrl != targetSubUrl) {
+            targetSubUrl = extractedSubUrl;
+          }
           continue;
         }
 
-        final parsed = parser.parseSubscription(body, subscriptionId: subId);
+        var parsed = <Profile>[];
+        final nativeBodyParsed = await bridge.parseSubscription(body);
+        if (nativeBodyParsed != null &&
+            nativeBodyParsed['ok'] == true &&
+            nativeBodyParsed['nodes'] is List) {
+          parsed = parser.parseEngineNodes(
+            nativeBodyParsed['nodes'] as List,
+            (nativeBodyParsed['primary_tags'] as List?) ?? const [],
+            subscriptionId: subId,
+          );
+        }
+        if (parsed.isEmpty) {
+          parsed = parser.parseSubscription(body, subscriptionId: subId);
+        }
         if (parsed.isNotEmpty) {
           fresh = parsed;
           response = attemptResp;
@@ -580,25 +784,28 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      if (fresh.isEmpty || response == null) {
+      if (fresh.isEmpty) {
         if (lastStatusCode != 200 && lastStatusCode != 0) {
           _lastError = 'Сервер вернул HTTP $lastStatusCode при загрузке подписки';
         } else if (gotHtml) {
           _lastError = 'Сервер вернул HTML-страницу вместо серверов (Cloudflare/капча/ошибка хостинга)';
         } else {
-          _lastError = 'В ответе подписки не найдено распознаваемых серверов';
+          final nativeErr = nativeRes?['error']?.toString() ?? '';
+          _lastError = nativeErr.isNotEmpty
+              ? 'Не удалось загрузить подписку ($nativeErr)'
+              : 'В ответе подписки не найдено распознаваемых серверов';
         }
         notifyListeners();
         return 0;
       }
 
       // Парсим метаданные подписки (Subscription-Userinfo, Profile-Title, Support-Url)
-      int uploadBytes = sub.uploadBytes;
-      int downloadBytes = sub.downloadBytes;
-      int totalBytes = sub.totalBytes;
-      int expireUnix = sub.expireUnix;
-      final userInfo = response.headers.value('subscription-userinfo') ??
-          response.headers.value('Subscription-Userinfo') ??
+      int uploadBytes = (nativeUserInfo?['upload'] as num?)?.toInt() ?? sub.uploadBytes;
+      int downloadBytes = (nativeUserInfo?['download'] as num?)?.toInt() ?? sub.downloadBytes;
+      int totalBytes = (nativeUserInfo?['total'] as num?)?.toInt() ?? sub.totalBytes;
+      int expireUnix = (nativeUserInfo?['expire'] as num?)?.toInt() ?? sub.expireUnix;
+      final userInfo = response?.headers.value('subscription-userinfo') ??
+          response?.headers.value('Subscription-Userinfo') ??
           '';
       if (userInfo.isNotEmpty) {
         for (final part in userInfo.split(';')) {
@@ -615,8 +822,8 @@ class AppController extends ChangeNotifier {
       }
       var parsedTitle = sub.name;
       if (parsedTitle.isEmpty) {
-        final rawTitle = response.headers.value('profile-title') ??
-            response.headers.value('Profile-Title') ??
+        final rawTitle = response?.headers.value('profile-title') ??
+            response?.headers.value('Profile-Title') ??
             '';
         if (rawTitle.startsWith('base64:')) {
           try {
@@ -626,8 +833,8 @@ class AppController extends ChangeNotifier {
           parsedTitle = rawTitle.trim();
         }
       }
-      final supportUrl = response.headers.value('support-url') ??
-          response.headers.value('profile-web-page-url') ??
+      final supportUrl = response?.headers.value('support-url') ??
+          response?.headers.value('profile-web-page-url') ??
           sub.supportUrl;
 
       // Сохраняем файл кэша для ядра в виде готового списка outbounds (sing-box JSON)
@@ -641,7 +848,9 @@ class AppController extends ChangeNotifier {
       // Заменяем старые профили этой подписки свежими
       final otherProfiles = _settings.profiles.where((p) => p.subscriptionId != subId).toList();
       final updatedProfiles = [...otherProfiles, ...fresh];
-      final newSelected = updatedProfiles.any((p) => p.id == _settings.selectedProfileId)
+      final keepSelected = _settings.selectedProfileId.startsWith('auto:') ||
+          updatedProfiles.any((p) => p.id == _settings.selectedProfileId);
+      final newSelected = keepSelected
           ? _settings.selectedProfileId
           : updatedProfiles.first.id;
       final updatedSubs = [
@@ -897,6 +1106,7 @@ class AppController extends ChangeNotifier {
       proxyOnly: _settings.proxyOnly,
       detourProfile: _settings.detourProfile,
       extraProfiles: _settings.profiles,
+      proxyTlsFragment: _settings.proxyTlsFragment,
     );
   }
 
@@ -1439,21 +1649,60 @@ class AppController extends ChangeNotifier {
     }
     const ruKeywords = [
       'ru.sberbank',
+      'sberbankonline',
       'com.idamob.tinkoff',
+      'tbank',
       'ru.alfabank',
       'ru.vtb24',
+      'vtb',
+      'raiffeisen',
+      'sovcombank',
+      'gazprombank',
+      'psbank',
+      'rshb',
+      'uralsib',
+      'pochtabank',
+      'mtsbank',
+      'ozonbank',
+      'yoomoney',
       'ru.rostel',
       'ru.gosuslugi',
       'com.vkontakte',
+      'com.vk.im',
+      'ru.ok.android',
       'ru.yandex',
+      'com.yandex',
       'ru.ozon',
       'com.wildberries',
+      'ru.beru',
+      'megamarket',
+      'samokat',
+      'kuper',
+      'sbermarket',
+      'dodo',
+      'pyaterochka',
+      'magnit',
+      'perekrestok',
+      'vkusvill',
       'ru.avito',
+      'ru.cian',
+      'ru.hh.android',
       'ru.dublgis',
+      'dgis',
       'ru.pochta',
+      'cdek',
       'ru.nalog',
+      'ru.mos',
+      'emias',
+      'rzd',
+      'kinopoisk',
+      'okko',
+      'ivi',
+      'wink',
+      'rutube',
       'ru.mirpay',
       'com.sbp',
+      'sberpay',
     ];
     const dpiKeywords = [
       'com.google.android.youtube',
@@ -1510,6 +1759,14 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Включает или выключает фрагментацию TLS ClientHello на прокси-соединениях (Анти-глушилка LTE).
+  Future<void> setProxyTlsFragment(bool value) async {
+    await _update(_settings.copyWith(proxyTlsFragment: value));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
+  }
+
   /// Экспортирует все настройки приложения в форматированный JSON.
   String exportSettingsJson() =>
       const JsonEncoder.withIndent('  ').convert(_settings.toJson());
@@ -1557,7 +1814,8 @@ class AppController extends ChangeNotifier {
     await _update(_settings.copyWith(appRoutes: routes));
   }
 
-  /// Пингует сервер профиля TCP-соединением. Возвращает мс или -1 при ошибке.
+  /// Проверяет доступность и задержку сервера профиля с учётом TLS/Reality-рукопожатия.
+  /// Возвращает мс или -1 при ошибке/блокировке ТСПУ.
   Future<int> pingProfile(String id) async {
     final profile = _settings.profiles.where((p) => p.id == id).firstOrNull;
     if (profile == null || profile.server.isEmpty) return -1;
@@ -1566,14 +1824,64 @@ class AppController extends ChangeNotifier {
     final sw = Stopwatch()..start();
     var result = -1;
     try {
+      // Если профиль использует цепочку прокси (detour), проверяем первый входной узел цепочки
+      var targetHost = profile.server;
+      var targetPort = profile.port;
+      final chain = profile.extra['chain_outbounds'];
+      if (chain is List && chain.isNotEmpty && chain.last is Map) {
+        final entryHop = chain.last as Map;
+        final h = (entryHop['server'] ?? '').toString();
+        final p = (entryHop['server_port'] as num?)?.toInt() ?? 0;
+        if (h.isNotEmpty && p > 0) {
+          targetHost = h;
+          targetPort = p;
+        }
+      }
+
       final socket = await Socket.connect(
-        profile.server,
-        profile.port,
-        timeout: const Duration(seconds: 3),
+        targetHost,
+        targetPort,
+        timeout: const Duration(milliseconds: 2800),
       );
-      sw.stop();
-      await socket.close();
-      result = sw.elapsedMilliseconds;
+      final tcpRtt = sw.elapsedMilliseconds;
+
+      // Для TCP+TLS/Reality узлов без транзитного SOCKS проверяем реальный TLS ServerHello,
+      // чтобы отсеивать заблокированные ТСПУ IP, где TCP SYN проходит, но TLS глушится (blackhole).
+      final isDirectTlsTcp = (chain is! List || chain.isEmpty) &&
+          profile.hasTls &&
+          !const {'hysteria2', 'hysteria', 'tuic', 'wireguard', 'masque'}.contains(profile.type);
+      if (isDirectTlsTcp) {
+        try {
+          final sni = profile.sni.isNotEmpty ? profile.sni : targetHost;
+          final secure = await SecureSocket.secure(
+            socket,
+            host: sni,
+            onBadCertificate: (_) => true,
+          ).timeout(const Duration(milliseconds: 2200));
+          sw.stop();
+          await secure.close();
+          result = sw.elapsedMilliseconds;
+        } on HandshakeException {
+          // Для REALITY без shortId сервер отвечает подменённым сертификатом или TLS alert —
+          // это доказывает, что пакет дошёл до сервера и ТСПУ не дропнул ClientHello!
+          sw.stop();
+          result = sw.elapsedMilliseconds;
+        } on TlsException {
+          sw.stop();
+          result = sw.elapsedMilliseconds;
+        } catch (_) {
+          // Таймаут или сброс на ClientHello — узел заблокирован ТСПУ
+          result = -1;
+        } finally {
+          try {
+            socket.destroy();
+          } catch (_) {}
+        }
+      } else {
+        sw.stop();
+        await socket.close();
+        result = tcpRtt;
+      }
     } catch (_) {
       result = -1;
     } finally {

@@ -78,6 +78,9 @@ class Profile {
 
   /// Полное описание для бейджа: протокол, безопасность, flow, транспорт.
   String get fullTransportLabel {
+    if (type == 'urltest') {
+      return 'URLTEST · АВТОВЫБОР';
+    }
     final parts = <String>[];
     if (isAmneziaWg) {
       parts.add('AMNEZIAWG');
@@ -1429,6 +1432,7 @@ class RuntimeConfig {
     this.proxyOnly = false,
     this.detourProfile,
     this.extraProfiles = const [],
+    this.proxyTlsFragment = false,
   });
 
   final Profile profile;
@@ -1468,6 +1472,9 @@ class RuntimeConfig {
   /// Все доступные профили для привязки конкретных сервисов (`profile:<id>`).
   final List<Profile> extraProfiles;
 
+  /// Включать ли `tls.record_fragment: true` на исходящих прокси-соединениях (против глушилок LTE).
+  final bool proxyTlsFragment;
+
   /// Есть ли хоть один источник серверов или активный режим DPI.
   bool get hasSources =>
       routingMode == RoutingMode.desync ||
@@ -1492,13 +1499,28 @@ class RuntimeConfig {
   /// обвязка после проверки — здесь их быть не должно.
   Map<String, dynamic> toJson() {
     final enabledSets = ruleSets.where((set) => set.enabled).toList(growable: false);
+    final isAutoGroup = routingMode != RoutingMode.desync &&
+        (profile.type == 'urltest' || profile.id.startsWith('auto:'));
+    final autoCandidates = isAutoGroup
+        ? extraProfiles
+            .where((p) =>
+                p.server.isNotEmpty &&
+                p.type != 'wireguard' &&
+                p.type != 'urltest' &&
+                p.type != 'direct' &&
+                (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
+            .take(50)
+            .toList(growable: false)
+        : const <Profile>[];
+
     final hasStatic = routingMode != RoutingMode.desync &&
+        !isAutoGroup &&
         profile.server.isNotEmpty &&
         profile.type != 'direct';
-    final enabledSubs = (routingMode == RoutingMode.desync || hasStatic)
+    final enabledSubs = (routingMode == RoutingMode.desync || hasStatic || autoCandidates.isNotEmpty)
         ? const <SubscriptionEntry>[]
         : subscriptions.where((sub) => sub.enabled).toList(growable: false);
-    final hasProxy = hasStatic || enabledSubs.isNotEmpty;
+    final hasProxy = hasStatic || autoCandidates.isNotEmpty || enabledSubs.isNotEmpty;
 
     final dedicatedOutbounds = <String, Map<String, dynamic>>{};
     final dedicatedEndpoints = <String, Map<String, dynamic>>{};
@@ -1765,6 +1787,43 @@ class RuntimeConfig {
       }
     }
 
+    final autoMemberTags = <String>[];
+    final autoMemberOutbounds = <Map<String, dynamic>>[];
+    if (autoCandidates.isNotEmpty) {
+      for (var i = 0; i < autoCandidates.length; i++) {
+        final cand = autoCandidates[i];
+        final memberTag = 'auto-srv-$i';
+        final node = cand.toOutbound(tag: memberTag);
+        if (cand.extra['chain_outbounds'] is List && (cand.extra['chain_outbounds'] as List).isNotEmpty) {
+          final rawHops = cand.extra['chain_outbounds'] as List;
+          final tagMap = <String, String>{};
+          for (var h = 0; h < rawHops.length; h++) {
+            final hopMap = rawHops[h];
+            if (hopMap is Map && hopMap['tag'] != null) {
+              tagMap[hopMap['tag'].toString()] = 'auto-hop-$i-$h';
+            }
+          }
+          if (node['detour'] != null && tagMap.containsKey(node['detour'].toString())) {
+            node['detour'] = tagMap[node['detour'].toString()];
+          }
+          for (var h = 0; h < rawHops.length; h++) {
+            final rawHop = rawHops[h];
+            if (rawHop is! Map) continue;
+            final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
+            if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') continue;
+            final oldTag = hop['tag']?.toString() ?? '';
+            hop['tag'] = tagMap[oldTag] ?? 'auto-hop-$i-$h';
+            if (hop['detour'] != null && tagMap.containsKey(hop['detour'].toString())) {
+              hop['detour'] = tagMap[hop['detour'].toString()];
+            }
+            autoMemberOutbounds.add(hop);
+          }
+        }
+        autoMemberTags.add(memberTag);
+        autoMemberOutbounds.insert(autoMemberTags.length - 1, node);
+      }
+    }
+
     final endpoints = <Map<String, dynamic>>[
       if (subTags.isEmpty && isMainWg) buildMainProfileEndpoint(),
       if (subTags.isNotEmpty && isMainWg) buildMainProfileEndpoint(tag: 'profile'),
@@ -1774,8 +1833,20 @@ class RuntimeConfig {
     ];
 
     final outbounds = <Map<String, dynamic>>[
-      if (subTags.isEmpty && hasStatic && !isMainWg) buildMainProfileOutbound(),
-      if (subTags.isNotEmpty)
+      if (autoMemberTags.isNotEmpty) ...[
+        {
+          'type': 'urltest',
+          'tag': 'proxy',
+          'outbounds': autoMemberTags,
+          'url': 'https://www.gstatic.com/generate_204',
+          'interval': '3m',
+          'tolerance': 50,
+        },
+        ...autoMemberOutbounds,
+      ],
+      if (autoMemberTags.isEmpty && subTags.isEmpty && hasStatic && !isMainWg)
+        buildMainProfileOutbound(),
+      if (autoMemberTags.isEmpty && subTags.isNotEmpty)
         {
           'type': 'selector',
           'tag': 'proxy',
@@ -1785,13 +1856,28 @@ class RuntimeConfig {
           ],
           'default': hasStatic ? 'profile' : subTags.first,
         },
-      if (subTags.isNotEmpty && hasStatic && !isMainWg) buildMainProfileOutbound(tag: 'profile'),
+      if (autoMemberTags.isEmpty && subTags.isNotEmpty && hasStatic && !isMainWg)
+        buildMainProfileOutbound(tag: 'profile'),
       if (hasDetour && !isDetourWg) detourProfile!.toOutbound(tag: 'detour-proxy'),
       ...chainOutbounds,
       ...dedicatedOutbounds.values,
       {'type': 'direct', 'tag': 'direct'},
       {'type': 'block', 'tag': 'block'},
     ];
+
+    if (proxyTlsFragment) {
+      for (final out in outbounds) {
+        final outType = (out['type'] ?? '').toString().toLowerCase();
+        if (outType == 'naive') continue;
+        if (out['tls'] is Map) {
+          final tls = Map<String, dynamic>.from(out['tls'] as Map);
+          if (tls['enabled'] == true) {
+            tls['record_fragment'] = true;
+            out['tls'] = tls;
+          }
+        }
+      }
+    }
 
     final hasDesyncRules = routeRules.any((r) => r['outbound'] == 'desync');
     final needDesync = routingMode == RoutingMode.desync ||

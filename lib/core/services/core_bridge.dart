@@ -49,6 +49,7 @@ class CoreBridge {
   void Function(TunnelState state)? onState;
   void Function(String log)? onLog;
   void Function(String cmd)? onCommand;
+  void Function(String url)? onDeepLink;
 
   bool _listening = false;
 
@@ -72,6 +73,11 @@ class CoreBridge {
             onLog?.call((data['line'] as String?) ?? '');
           case 'cmd':
             onCommand?.call((data['cmd'] as String?) ?? '');
+          case 'deeplink':
+            final url = (data['url'] as String?)?.trim() ?? '';
+            if (url.isNotEmpty) {
+              onDeepLink?.call(url);
+            }
         }
       },
       onError: (Object error) {
@@ -102,6 +108,44 @@ class CoreBridge {
       return ConfigCheck.fromJson(raw);
     } on PlatformException catch (error) {
       return ConfigCheck(ok: false, error: error.message ?? error.code);
+    }
+  }
+
+  /// Адаптивно скачивает и разбирает подписку напрямую через нативный движок `tachyon-core`.
+  Future<Map<String, dynamic>?> fetchSubscription(
+    String url, {
+    String customUa = '',
+    bool sendHwid = true,
+    String customHwid = '',
+    bool insecure = false,
+  }) async {
+    try {
+      final raw = await _channel.invokeMethod<String>('fetchSubscription', {
+        'url': url,
+        'customUa': customUa,
+        'sendHwid': sendHwid,
+        'customHwid': customHwid,
+        'insecure': insecure,
+      });
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Разбирает любой текст/JSON/YAML подписки напрямую через нативный движок `tachyon-core`.
+  Future<Map<String, dynamic>?> parseSubscription(String payload) async {
+    try {
+      final raw = await _channel.invokeMethod<String>('parseSubscription', {
+        'payload': payload,
+      });
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -288,6 +332,15 @@ class CoreBridge {
           'error';
     } on PlatformException catch (e) {
       return 'error: ${e.message}';
+    }
+  }
+
+  /// Возвращает внешнюю ссылку/текст (ACTION_VIEW / ACTION_SEND), с которой было открыто приложение.
+  Future<String?> consumeLaunchLink() async {
+    try {
+      return await _channel.invokeMethod<String>('consumeLaunchLink');
+    } on PlatformException {
+      return null;
     }
   }
 

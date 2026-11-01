@@ -528,9 +528,9 @@ class TachyonVpnService : VpnService() {
         }
 
         val title = if (currentServerName.isNotEmpty()) {
-            "Tachyon · $currentServerName"
+            "⚡ Tachyon · $currentServerName"
         } else {
-            getString(R.string.notification_title)
+            "⚡ ${getString(R.string.notification_title)}"
         }
 
         val stopAction = Notification.Action.Builder(
@@ -548,7 +548,7 @@ class TachyonVpnService : VpnService() {
         return builder
             .setContentTitle(title)
             .setContentText(statsLine ?: getString(R.string.notification_text))
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setSmallIcon(R.drawable.ic_tachyon_bolt)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openPending)

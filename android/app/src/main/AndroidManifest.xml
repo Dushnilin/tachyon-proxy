@@ -37,6 +37,72 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!-- Приём любых ссылок (https:// подписок, URI серверов, текста из ботов) через меню «Поделиться -> Tachyon» -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Открытие клиентских deep-link подписок и URI всех протоколов -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tachyon" />
+                <data android:scheme="sub" />
+                <data android:scheme="happ" />
+                <data android:scheme="v2raytun" />
+                <data android:scheme="v2rayng" />
+                <data android:scheme="hiddify" />
+                <data android:scheme="sing-box" />
+                <data android:scheme="clash" />
+                <data android:scheme="clashmeta" />
+                <data android:scheme="streisand" />
+                <data android:scheme="karing" />
+                <data android:scheme="flclash" />
+                <data android:scheme="vless" />
+                <data android:scheme="vmess" />
+                <data android:scheme="trojan" />
+                <data android:scheme="ss" />
+                <data android:scheme="shadowsocks" />
+                <data android:scheme="hy2" />
+                <data android:scheme="hysteria2" />
+                <data android:scheme="hysteria" />
+                <data android:scheme="tuic" />
+                <data android:scheme="wg" />
+                <data android:scheme="wireguard" />
+                <data android:scheme="amneziawg" />
+                <data android:scheme="awg" />
+                <data android:scheme="anytls" />
+                <data android:scheme="snell" />
+                <data android:scheme="shadowtls" />
+                <data android:scheme="fptn" />
+                <data android:scheme="fptns" />
+                <data android:scheme="tewfai" />
+                <data android:scheme="mieru" />
+                <data android:scheme="mierus" />
+                <data android:scheme="masque" />
+                <data android:scheme="trusttunnel" />
+                <data android:scheme="openconnect" />
+            </intent-filter>
+
+            <!-- Открытие прямых https:// и http:// ссылок подписок провайдеров -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="*" />
+                <data android:pathPrefix="/sub" />
+                <data android:pathPrefix="/api/v1/client/subscribe" />
+                <data android:pathPrefix="/link/" />
+                <data android:pathPrefix="/s/" />
+                <data android:pathPrefix="/c/" />
+                <data android:pathPrefix="/connect/" />
+            </intent-filter>
         </activity>
 
         <!-- VPN-сервис: держит TUN-интерфейс, в нём работает ядро. -->
@@ -57,7 +123,7 @@
         <service
             android:name="org.tachyon.vpn.TachyonTileService"
             android:label="@string/app_name"
-            android:icon="@android:drawable/ic_lock_lock"
+            android:icon="@drawable/ic_tachyon_bolt"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
             <intent-filter>

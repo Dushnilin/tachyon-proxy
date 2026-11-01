@@ -148,6 +148,17 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final controller = AppScope.of(context);
+    final notice = controller.consumeImportNotice();
+    if (notice != null && notice.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text(notice)),
+        );
+      });
+    }
+
     final pages = <Widget>[
       const HomeTab(),
       const ProfilesTab(),
@@ -162,8 +173,8 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
         onDestinationSelected: (index) => setState(() => _index = index),
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.power_settings_new_outlined),
-            selectedIcon: Icon(Icons.power_settings_new),
+            icon: Icon(Icons.bolt_outlined),
+            selectedIcon: Icon(Icons.bolt_rounded),
             label: 'Туннель',
           ),
           NavigationDestination(

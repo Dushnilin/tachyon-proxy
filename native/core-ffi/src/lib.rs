@@ -30,9 +30,9 @@ use jni::objects::JValue;
 use jni::objects::{JObject, JString};
 #[cfg(unix)]
 use jni::{jni_sig, jni_str};
-use jni::sys::{jint, jstring};
+use jni::sys::{jboolean, jint, jstring};
 use jni::{Env, EnvUnowned};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The single running box: its runtime and the instance to shut down.
 struct Core {
@@ -359,6 +359,113 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_check<'caller>(
                     "{{\"ok\":false,\"error\":{}}}",
                     serde_json::to_string(&err).unwrap_or_else(|_| "\"unknown error\"".to_owned())
                 ),
+            };
+            make_jstring(env, &answer)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// `fetchSubscription(url: String, customUa: String, sendHwid: Boolean, customHwid: String, insecure: Boolean): String?`
+///
+/// Adaptive subscription fetcher powered by `tachyon-core`: tries the engine's
+/// User-Agent cascade (`tachyon-core/<ver> (compatible; sing-box 1.14.3)`,
+/// `v2rayNG/1.8.29`, `ClashMeta/v1.19.10`, etc.) with `X-HWID` headers, parses
+/// all formats (URI bundles, Base64, Xray config arrays with `detour` chains,
+/// sing-box JSON, Clash YAML, SIP008, FPTN) and returns JSON:
+/// `{"ok":true,"body":"...","nodes":[...],"primary_tags":[...],"user_agent":"...","user_info":{...}}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_fetchSubscription<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _this: JObject<'caller>,
+    url: JString<'caller>,
+    custom_ua: JString<'caller>,
+    send_hwid: jboolean,
+    custom_hwid: JString<'caller>,
+    insecure: jboolean,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<jstring> {
+            let url_str = read_string(env, &url)?;
+            let ua_str = read_string(env, &custom_ua)?;
+            let hwid_str = read_string(env, &custom_hwid)?;
+            let ua_opt = (!ua_str.trim().is_empty()).then_some(ua_str.as_str());
+            let hwid_opt = (!hwid_str.trim().is_empty()).then_some(hwid_str.as_str());
+
+            let res = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("tokio runtime: {e}"))
+                .and_then(|rt| {
+                    rt.block_on(core_runtime::subscription::fetch_url_standalone(
+                        &url_str,
+                        ua_opt,
+                        send_hwid,
+                        hwid_opt,
+                        insecure,
+                    ))
+                });
+
+            let answer = match res {
+                Ok(fetched) => {
+                    let primary_tags =
+                        core_config::subscription::primary_node_tags(&fetched.nodes);
+                    let user_info = fetched.user_info.map(|u| {
+                        json!({
+                            "upload": u.upload,
+                            "download": u.download,
+                            "total": u.total,
+                            "expire": u.expire,
+                        })
+                    });
+                    json!({
+                        "ok": true,
+                        "body": fetched.body,
+                        "nodes": fetched.nodes,
+                        "primary_tags": primary_tags,
+                        "user_agent": fetched.user_agent,
+                        "user_info": user_info,
+                    })
+                    .to_string()
+                }
+                Err(err) => json!({
+                    "ok": false,
+                    "error": err,
+                })
+                .to_string(),
+            };
+            make_jstring(env, &answer)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// `parseSubscription(payload: String): String?`
+///
+/// Multi-format subscription payload parser powered by `tachyon-core`.
+/// Returns `{"ok":true,"nodes":[...],"primary_tags":[...]}` or `{"ok":false,"error":"..."}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_parseSubscription<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _this: JObject<'caller>,
+    payload: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> jni::errors::Result<jstring> {
+            let raw = read_string(env, &payload)?;
+            let answer = match core_config::subscription::parse_subscription_payload(&raw) {
+                Ok(nodes) => {
+                    let primary_tags = core_config::subscription::primary_node_tags(&nodes);
+                    json!({
+                        "ok": true,
+                        "nodes": nodes,
+                        "primary_tags": primary_tags,
+                    })
+                    .to_string()
+                }
+                Err(err) => json!({
+                    "ok": false,
+                    "error": err,
+                })
+                .to_string(),
             };
             make_jstring(env, &answer)
         })

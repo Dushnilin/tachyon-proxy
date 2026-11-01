@@ -95,6 +95,66 @@ class LinkParser {
     return const [];
   }
 
+  /// Конвертирует узлы `nodes` и `primary_tags`, разобранные нативным движком `tachyon-core`,
+  /// в список `Profile` с сохранением транзитных цепочек `detour` (`chain_outbounds`).
+  List<Profile> parseEngineNodes(
+    List<dynamic> rawNodes,
+    List<dynamic> rawPrimaryTags, {
+    String subscriptionId = '',
+  }) {
+    final nodes = <Map<String, dynamic>>[];
+    final byTag = <String, Map<String, dynamic>>{};
+    for (final item in rawNodes) {
+      if (item is! Map) continue;
+      final map = Map<String, dynamic>.from(item);
+      nodes.add(map);
+      final tag = (map['tag'] ?? '').toString().trim();
+      if (tag.isNotEmpty) {
+        byTag[tag] = map;
+      }
+    }
+    if (nodes.isEmpty) return const [];
+
+    final primarySet = rawPrimaryTags
+        .map((e) => e.toString().trim())
+        .where((s) => s.isNotEmpty)
+        .toSet();
+
+    final primaryNodes = primarySet.isNotEmpty
+        ? nodes.where((n) => primarySet.contains((n['tag'] ?? '').toString().trim())).toList()
+        : nodes;
+
+    final out = <Profile>[];
+    for (final rawNode in primaryNodes) {
+      final mainNode = Map<String, dynamic>.from(rawNode);
+      final firstHopTag = (mainNode['detour'] ?? '').toString().trim();
+      if (firstHopTag.isNotEmpty && byTag.containsKey(firstHopTag)) {
+        final chainOutbounds = <Map<String, dynamic>>[];
+        final visited = <String>{};
+        var currTag = firstHopTag;
+        while (currTag.isNotEmpty && byTag.containsKey(currTag) && visited.add(currTag)) {
+          final hop = Map<String, dynamic>.from(byTag[currTag]!);
+          chainOutbounds.add(hop);
+          final nextTag = (hop['detour'] ?? '').toString().trim();
+          if (nextTag.isNotEmpty && byTag.containsKey(nextTag)) {
+            currTag = nextTag;
+          } else {
+            hop.remove('detour');
+            currTag = '';
+          }
+        }
+        if (chainOutbounds.isNotEmpty) {
+          mainNode['chain_outbounds'] = chainOutbounds;
+        }
+      }
+      final profile = _outboundMapToProfile(mainNode, subscriptionId: subscriptionId);
+      if (profile != null) {
+        out.add(profile);
+      }
+    }
+    return out;
+  }
+
   /// Разбирает одну ссылку или одиночный JSON-объект.
   Profile? parse(String link, {String subscriptionId = ''}) {
     final value = link.trim().replaceFirst('\uFEFF', '');

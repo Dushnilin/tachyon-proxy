@@ -515,8 +515,8 @@ class _PowerDial extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  Icons.power_settings_new,
-                  size: 40,
+                  Icons.bolt_rounded,
+                  size: 46,
                   color: core,
                 ),
                 const SizedBox(height: Space.sm),

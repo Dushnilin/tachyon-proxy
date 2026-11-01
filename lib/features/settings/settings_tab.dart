@@ -163,6 +163,14 @@ class _SettingsTabState extends State<SettingsTab> {
                 ),
                 const Hairline(),
                 SwitchRow(
+                  title: 'Дробить TLS до прокси (Анти-глушилка LTE)',
+                  subtitle:
+                      'Фрагментировать TLS ClientHello до прокси-узлов (обход блокировок ТСПУ на мобильной сети)',
+                  value: settings.proxyTlsFragment,
+                  onChanged: controller.setProxyTlsFragment,
+                ),
+                const Hairline(),
+                SwitchRow(
                   title: 'Режим «Только прокси» (без VPN TUN)',
                   subtitle: 'Запускать локальный SOCKS5/HTTP на :2080 без системного VPN',
                   value: settings.proxyOnly,

@@ -1945,8 +1945,6 @@ class RuntimeConfig {
       finalOutbound = 'direct';
     } else if (routingMode == RoutingMode.desync) {
       finalOutbound = (desync.enabled || !hasDesyncRules) ? 'desync' : 'direct';
-    } else if (routingMode == RoutingMode.rules && desync.enabled) {
-      finalOutbound = 'desync';
     } else if (hasProxy) {
       finalOutbound = 'proxy';
     } else if (desync.enabled) {

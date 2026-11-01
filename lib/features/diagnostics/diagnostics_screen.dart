@@ -238,62 +238,126 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       _peakMbps = 0.0;
       _speedProgress = 0.0;
       _downloadedBytes = 0;
-      _speedStatus = 'Подключение к тестовому узлу Cloudflare (10 МБ)...';
+      _speedStatus = 'Подключение к скоростному узлу (10 МБ)...';
     });
 
     const totalTargetBytes = 10 * 1024 * 1024;
-    final client = _newHttpClient(const Duration(seconds: 8));
+    final isTunnelActive =
+        mounted && AppScope.read(context).tunnel.status.isActive;
+
+    // Несколько независимых зеркал по 10 МБ: если Cloudflare ECH режется ТСПУ
+    // на прямом соединении, тест мгновенно переключается на живое CDN-зеркало.
+    const endpoints = <(String, String)>[
+      ('Cloudflare Edge', 'https://speed.cloudflare.com/__down?bytes=10485760'),
+      ('Selectel CDN (HTTPS)', 'https://speedtest.selectel.ru/10MB'),
+      ('Selectel CDN (HTTP)', 'http://speedtest.selectel.ru/10MB'),
+      ('OVH Cloud', 'https://proof.ovh.net/files/10Mb.dat'),
+      ('CacheFly CDN', 'http://cachefly.cachefly.net/10mb.test'),
+    ];
+
+    final proxyModes = <bool>[
+      if (isTunnelActive) true,
+      false,
+    ];
+
+    Object? lastErr;
+    var succeeded = false;
 
     try {
-      final req = await client.getUrl(
-        Uri.parse('https://speed.cloudflare.com/__down?bytes=$totalTargetBytes'),
-      );
-      req.headers.set('User-Agent', 'Mozilla/5.0 (Linux; Android 14)');
-      req.headers.set('Cache-Control', 'no-cache');
-      final resp = await req.close().timeout(const Duration(seconds: 10));
+      outer:
+      for (final (mirrorName, url) in endpoints) {
+        for (final useProxy in proxyModes) {
+          if (!mounted) break outer;
+          final client = HttpClient()
+            ..connectionTimeout = const Duration(seconds: 6)
+            ..badCertificateCallback = (_, _, _) => true;
+          if (useProxy) {
+            client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+          }
 
-      final sw = Stopwatch()..start();
-      var received = 0;
-      var lastUpdateMs = 0;
+          try {
+            if (mounted) {
+              setState(() {
+                _speedStatus =
+                    'Замер через $mirrorName${useProxy ? " (туннель)" : ""}...';
+              });
+            }
+            final req = await client
+                .getUrl(Uri.parse(url))
+                .timeout(const Duration(seconds: 6));
+            req.headers.set(
+              'User-Agent',
+              'Mozilla/5.0 (Linux; Android 14) Chrome/124.0.0.0',
+            );
+            req.headers.set('Cache-Control', 'no-cache');
+            final resp =
+                await req.close().timeout(const Duration(seconds: 7));
+            if (resp.statusCode != 200) {
+              await resp.drain<void>();
+              continue;
+            }
 
-      await for (final chunk in resp.timeout(const Duration(seconds: 20))) {
-        if (!mounted) break;
-        received += chunk.length;
-        final elapsedMs = sw.elapsedMilliseconds;
-        if (elapsedMs - lastUpdateMs >= 150 || received >= totalTargetBytes) {
-          lastUpdateMs = elapsedMs;
-          final secs = (elapsedMs / 1000.0).clamp(0.1, 60.0);
-          final mbps = (received * 8.0) / (secs * 1000000.0);
-          setState(() {
-            _downloadedBytes = received;
-            _speedMbps = mbps;
-            if (mbps > _peakMbps) _peakMbps = mbps;
-            _speedProgress = (received / totalTargetBytes).clamp(0.0, 1.0);
-            _speedStatus =
-                'Загружено ${(received / (1024 * 1024)).toStringAsFixed(1)} МБ за ${secs.toStringAsFixed(1)} сек';
-          });
+            final sw = Stopwatch()..start();
+            var received = 0;
+            var lastUpdateMs = 0;
+
+            await for (final chunk
+                in resp.timeout(const Duration(seconds: 25))) {
+              if (!mounted) break;
+              received += chunk.length;
+              final elapsedMs = sw.elapsedMilliseconds;
+              if (elapsedMs - lastUpdateMs >= 140 ||
+                  received >= totalTargetBytes) {
+                lastUpdateMs = elapsedMs;
+                final secs = (elapsedMs / 1000.0).clamp(0.1, 60.0);
+                final mbps = (received * 8.0) / (secs * 1000000.0);
+                setState(() {
+                  _downloadedBytes = received;
+                  _speedMbps = mbps;
+                  if (mbps > _peakMbps) _peakMbps = mbps;
+                  _speedProgress =
+                      (received / totalTargetBytes).clamp(0.0, 1.0);
+                  _speedStatus =
+                      '$mirrorName: ${(received / (1024 * 1024)).toStringAsFixed(1)} МБ за ${secs.toStringAsFixed(1)} с';
+                });
+              }
+              if (received >= totalTargetBytes) break;
+            }
+            sw.stop();
+
+            if (received < 256 * 1024) {
+              // Слишком мало данных (например, обрыв на 16 КБ) — пробуем следующее зеркало
+              continue;
+            }
+
+            final totalSecs = (sw.elapsedMilliseconds / 1000.0).clamp(0.1, 60.0);
+            final avgMbps = (received * 8.0) / (totalSecs * 1000000.0);
+            if (mounted) {
+              setState(() {
+                _speedMbps = avgMbps;
+                if (avgMbps > _peakMbps) _peakMbps = avgMbps;
+                _speedProgress = 1.0;
+                _speedStatus =
+                    'Готово ($mirrorName): средняя ${avgMbps.toStringAsFixed(1)} Мбит/с (${(avgMbps / 8).toStringAsFixed(2)} МБ/с), пик ${_peakMbps.toStringAsFixed(1)} Мбит/с';
+              });
+            }
+            succeeded = true;
+            break outer;
+          } catch (e) {
+            lastErr = e;
+          } finally {
+            client.close(force: true);
+          }
         }
       }
-      sw.stop();
-      final totalSecs = (sw.elapsedMilliseconds / 1000.0).clamp(0.1, 60.0);
-      final avgMbps = (received * 8.0) / (totalSecs * 1000000.0);
-      if (mounted) {
+
+      if (!succeeded && mounted) {
         setState(() {
-          _speedMbps = avgMbps;
-          if (avgMbps > _peakMbps) _peakMbps = avgMbps;
-          _speedProgress = 1.0;
           _speedStatus =
-              'Готово: средняя ${avgMbps.toStringAsFixed(1)} Мбит/с (${(avgMbps / 8).toStringAsFixed(2)} МБ/с), пик ${_peakMbps.toStringAsFixed(1)} Мбит/с';
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _speedStatus = 'Ошибка замера скорости: $e';
+              'Не удалось выполнить замер скорости: ${lastErr ?? "узлы недоступны"}';
         });
       }
     } finally {
-      client.close(force: true);
       if (mounted) {
         setState(() => _runningSpeedtest = false);
       }

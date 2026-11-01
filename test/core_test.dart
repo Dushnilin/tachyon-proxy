@@ -716,24 +716,24 @@ proxies:
       }
     });
 
-    test('RoutingMode.rules при включённом desync.enabled ставит final=desync', () {
-      final cfgWithDesyncFinal = RuntimeConfig(
+    test('RoutingMode.rules ставит final=proxy при наличии прокси и final=desync без прокси', () {
+      final cfgWithProxyFinal = RuntimeConfig(
         profile: _vlessProfile(),
         routingMode: RoutingMode.rules,
         dns: const DnsSettings(),
         ruleSets: const [],
         desync: const DesyncSettings(enabled: true),
       ).toJson();
-      expect((cfgWithDesyncFinal['route'] as Map)['final'], 'desync');
+      expect((cfgWithProxyFinal['route'] as Map)['final'], 'proxy');
 
-      final cfgWithProxyFinal = RuntimeConfig(
-        profile: _vlessProfile(),
+      final cfgWithoutProxyDesyncFinal = RuntimeConfig(
+        profile: const Profile(id: '', name: '', type: 'vless', server: '', port: 443),
         routingMode: RoutingMode.rules,
         dns: const DnsSettings(),
         ruleSets: const [],
-        desync: const DesyncSettings(enabled: false),
+        desync: const DesyncSettings(enabled: true),
       ).toJson();
-      expect((cfgWithProxyFinal['route'] as Map)['final'], 'proxy');
+      expect((cfgWithoutProxyDesyncFinal['route'] as Map)['final'], 'desync');
     });
 
     test('FreeNodesService.generateX25519KeyPair генерирует валидные 32-байтные ключи Curve25519', () {

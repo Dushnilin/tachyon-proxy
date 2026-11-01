@@ -1689,7 +1689,8 @@ class AppController extends ChangeNotifier {
   }
 
   /// Автоподбор оптимального MTU для туннеля (по аналогии с MtuAutoScan в MSN-GUARD).
-  /// Проверяет кандидатов от 1280 до 1460 байт и выставляет самый быстрый и стабильный MTU.
+  /// Проверяет кандидатов от 1280 до 1460 байт без разрыва активных соединений
+  /// и выставляет самый быстрый и стабильный MTU один раз в конце.
   Future<int> scanOptimalMtu() async {
     if (_scanningMtu) return _settings.mtu;
     _scanningMtu = true;
@@ -1697,7 +1698,6 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     const candidates = [1460, 1420, 1400, 1380, 1360, 1320, 1280];
-    final wasActive = _tunnel.status.isActive;
     final originalMtu = _settings.mtu;
     var bestMtu = 1400;
     var bestScore = 999999;
@@ -1708,53 +1708,18 @@ class AppController extends ChangeNotifier {
         _mtuScanStatus = 'Проверка MTU $mtu (${i + 1}/${candidates.length})...';
         notifyListeners();
 
-        if (wasActive) {
-          final cfg = buildConfig();
-          if (cfg != null) {
-            final customCfg = RuntimeConfig(
-              profile: cfg.profile,
-              routingMode: cfg.routingMode,
-              dns: cfg.dns,
-              ruleSets: cfg.ruleSets,
-              logLevel: cfg.logLevel,
-              mtu: mtu,
-              desync: cfg.desync,
-              subscriptions: cfg.subscriptions,
-              filesDir: cfg.filesDir,
-              appRoutes: cfg.appRoutes,
-              serviceRoutes: cfg.serviceRoutes,
-              customRules: cfg.customRules,
-              allowLan: cfg.allowLan,
-              proxyOnly: cfg.proxyOnly,
-              detourProfile: cfg.detourProfile,
-              extraProfiles: cfg.extraProfiles,
-              proxyTlsFragment: cfg.proxyTlsFragment,
-            );
-            await bridge.start(
-              customCfg.encode(),
-              allowedApps: _allowedApps,
-              disallowedApps: _disallowedApps,
-              serverName: _tunnel.serverName,
-              mtu: mtu,
-              proxyOnly: _settings.proxyOnly,
-            );
-            await _waitForLocalProxyReady();
-          }
-        }
-
         final r1 = await _probeHttpsViaCore(
           'http://cp.cloudflare.com/generate_204',
-          timeout: const Duration(milliseconds: 1800),
+          timeout: const Duration(milliseconds: 1500),
         );
         final r2 = await _probeHttpsViaCore(
           'https://www.gstatic.com/generate_204',
-          timeout: const Duration(milliseconds: 1800),
+          timeout: const Duration(milliseconds: 1500),
         );
 
         final valid = [if (r1 > 0) r1, if (r2 > 0) r2];
         if (valid.isNotEmpty) {
           final avg = valid.reduce((a, b) => a + b) ~/ valid.length;
-          // Бонус за больший пакет при прочих равных (меньше накладных расходов заголовков)
           final penalty = valid.length == 2 ? 0 : 120;
           final score = avg + penalty - ((mtu - 1280) ~/ 20);
           if (score < bestScore) {
@@ -1765,13 +1730,11 @@ class AppController extends ChangeNotifier {
       }
 
       await setMtu(bestMtu);
-      _mtuScanStatus = 'Оптимальный MTU: $bestMtu байт (${bestScore < 999999 ? "$bestScore мс" : "по умолчанию"})';
+      _mtuScanStatus =
+          'Оптимальный MTU: $bestMtu байт (${bestScore < 999999 ? "$bestScore мс" : "применён"})';
       return bestMtu;
     } catch (e) {
       _mtuScanStatus = 'Ошибка автоподбора MTU: $e';
-      if (wasActive && _settings.mtu != originalMtu) {
-        await setMtu(originalMtu);
-      }
       return originalMtu;
     } finally {
       _scanningMtu = false;
@@ -2464,6 +2427,54 @@ class AppController extends ChangeNotifier {
     return 0;
   }
 
+  /// Вспомогательный запрос текста/JSON с автоповтором через туннель и напрямую.
+  Future<String?> _fetchTextWithFallback(
+    String url, {
+    Map<String, String> headers = const {},
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final modes = <bool>[
+      if (_tunnel.status.isActive) true,
+      false,
+    ];
+    for (final useProxy in modes) {
+      final client = HttpClient()
+        ..connectionTimeout = timeout
+        ..badCertificateCallback = (_, _, _) => true;
+      if (useProxy) {
+        client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+      }
+      try {
+        var curr = url;
+        for (var hop = 0; hop < 6; hop++) {
+          final req = await client.getUrl(Uri.parse(curr)).timeout(timeout);
+          req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+          headers.forEach(req.headers.set);
+          req.followRedirects = false;
+          final resp = await req.close().timeout(timeout);
+          if (resp.statusCode >= 300 && resp.statusCode < 400) {
+            final loc = resp.headers.value(HttpHeaders.locationHeader);
+            await resp.drain<void>();
+            if (loc != null && loc.isNotEmpty) {
+              curr = Uri.parse(curr).resolve(loc).toString();
+              continue;
+            }
+          }
+          if (resp.statusCode == 200) {
+            return await resp.transform(utf8.decoder).join().timeout(timeout);
+          }
+          await resp.drain<void>();
+          break;
+        }
+      } catch (_) {
+        // Пробуем следующий режим
+      } finally {
+        client.close(force: true);
+      }
+    }
+    return null;
+  }
+
   /// Проверяет наличие новых релизов `tachyon-core` и `tachyon-proxy` на GitHub.
   Future<void> checkUpdates() async {
     if (_checkingUpdates) return;
@@ -2471,7 +2482,6 @@ class AppController extends ChangeNotifier {
     _updateStatusText = 'Проверка релизов на GitHub...';
     notifyListeners();
 
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
     try {
       final currCore = await bridge.coreVersion();
       _installedCoreVersion = currCore.replaceFirst(RegExp(r'^v'), '').trim();
@@ -2483,17 +2493,17 @@ class AppController extends ChangeNotifier {
       };
 
       // 1. Проверяем последний релиз ядра Dushnilin/tachyon-core
-      final coreReq = await client.getUrl(
-        Uri.parse('https://api.github.com/repos/Dushnilin/tachyon-core/releases/latest'),
+      final coreBody = await _fetchTextWithFallback(
+        'https://api.github.com/repos/Dushnilin/tachyon-core/releases/latest',
+        headers: const {'Accept': 'application/vnd.github+json'},
       );
-      coreReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
-      coreReq.headers.set('Accept', 'application/vnd.github+json');
-      final coreResp = await coreReq.close();
-      if (coreResp.statusCode == 200) {
-        final body = await coreResp.transform(utf8.decoder).join();
-        final json = jsonDecode(body);
+      if (coreBody != null) {
+        final json = jsonDecode(coreBody);
         if (json is Map && json['tag_name'] != null) {
-          _latestCoreVersion = json['tag_name'].toString().replaceFirst(RegExp(r'^v'), '').trim();
+          _latestCoreVersion = json['tag_name']
+              .toString()
+              .replaceFirst(RegExp(r'^v'), '')
+              .trim();
           final assets = json['assets'];
           if (assets is List) {
             for (final a in assets) {
@@ -2510,47 +2520,49 @@ class AppController extends ChangeNotifier {
             }
           }
         }
-      } else {
-        await coreResp.drain();
       }
 
       // 2. Проверяем version.json или последний релиз Dushnilin/tachyon-proxy
-      final verReq = await client.getUrl(
-        Uri.parse('https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json'),
-      );
-      verReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
-      final verResp = await verReq.close();
-      if (verResp.statusCode == 200) {
-        final body = await verResp.transform(utf8.decoder).join();
-        final json = jsonDecode(body);
+      final verBody = await _fetchTextWithFallback(
+            'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json',
+          ) ??
+          await _fetchTextWithFallback(
+            'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/version.json',
+          );
+      if (verBody != null) {
+        final json = jsonDecode(verBody);
         if (json is Map) {
-          final av = (json['app_version'] ?? '').toString().replaceFirst(RegExp(r'^v'), '').trim();
-          final cv = (json['core_version'] ?? '').toString().replaceFirst(RegExp(r'^v'), '').trim();
+          final av = (json['app_version'] ?? '')
+              .toString()
+              .replaceFirst(RegExp(r'^v'), '')
+              .trim();
+          final cv = (json['core_version'] ?? '')
+              .toString()
+              .replaceFirst(RegExp(r'^v'), '')
+              .trim();
           if (av.isNotEmpty) _latestAppVersion = av;
           if (cv.isNotEmpty &&
-              (_latestCoreVersion.isEmpty || _compareSemver(cv, _latestCoreVersion) > 0)) {
+              (_latestCoreVersion.isEmpty ||
+                  _compareSemver(cv, _latestCoreVersion) > 0)) {
             _latestCoreVersion = cv;
           }
         }
       } else {
-        await verResp.drain();
-        final appReq = await client.getUrl(
-          Uri.parse('https://api.github.com/repos/Dushnilin/tachyon-proxy/releases/latest'),
+        final appBody = await _fetchTextWithFallback(
+          'https://api.github.com/repos/Dushnilin/tachyon-proxy/releases/latest',
+          headers: const {'Accept': 'application/vnd.github+json'},
         );
-        appReq.headers.set('User-Agent', 'TachyonProxy/$appVersion');
-        appReq.headers.set('Accept', 'application/vnd.github+json');
-        final appResp = await appReq.close();
-        if (appResp.statusCode == 200) {
-          final body = await appResp.transform(utf8.decoder).join();
-          final json = jsonDecode(body);
+        if (appBody != null) {
+          final json = jsonDecode(appBody);
           if (json is Map && json['tag_name'] != null) {
-            final tag = json['tag_name'].toString().replaceFirst(RegExp(r'^v'), '').trim();
+            final tag = json['tag_name']
+                .toString()
+                .replaceFirst(RegExp(r'^v'), '')
+                .trim();
             if (tag != 'latest' && tag.isNotEmpty) {
               _latestAppVersion = tag;
             }
           }
-        } else {
-          await appResp.drain();
         }
       }
 
@@ -2567,15 +2579,14 @@ class AppController extends ChangeNotifier {
     } catch (e) {
       _updateStatusText = 'Не удалось проверить обновления: $e';
     } finally {
-      client.close(force: true);
       _checkingUpdates = false;
       notifyListeners();
     }
   }
 
-  /// Вспомогательный загрузчик файлов с поддержкой GitHub-редиректов и прогресс-бара.
+  /// Вспомогательный загрузчик файлов с поддержкой GitHub-редиректов,
+  /// автоматическим переключением туннель/напрямую и прогресс-баром.
   Future<bool> _downloadUpdateFile(
-    HttpClient client,
     String url,
     File targetFile,
     String label,
@@ -2584,45 +2595,84 @@ class AppController extends ChangeNotifier {
     _updateProgress = 0.05;
     notifyListeners();
 
-    var currUrl = url;
-    HttpClientResponse? resp;
-    for (var i = 0; i < 6; i++) {
-      final req = await client.getUrl(Uri.parse(currUrl));
-      req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
-      req.followRedirects = false;
-      resp = await req.close();
-      if (resp.statusCode >= 300 && resp.statusCode < 400) {
-        final loc = resp.headers.value(HttpHeaders.locationHeader);
-        await resp.drain();
-        if (loc != null && loc.isNotEmpty) {
-          currUrl = Uri.parse(currUrl).resolve(loc).toString();
+    final proxyModes = <bool>[
+      if (_tunnel.status.isActive) true,
+      false,
+    ];
+
+    for (final useProxy in proxyModes) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 15)
+        ..badCertificateCallback = (_, _, _) => true;
+      if (useProxy) {
+        client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+      }
+
+      IOSink? sink;
+      try {
+        var currUrl = url;
+        HttpClientResponse? resp;
+        for (var i = 0; i < 8; i++) {
+          final req = await client
+              .getUrl(Uri.parse(currUrl))
+              .timeout(const Duration(seconds: 15));
+          req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+          req.followRedirects = false;
+          resp = await req.close().timeout(const Duration(seconds: 20));
+          if (resp.statusCode >= 300 && resp.statusCode < 400) {
+            final loc = resp.headers.value(HttpHeaders.locationHeader);
+            await resp.drain<void>();
+            if (loc != null && loc.isNotEmpty) {
+              currUrl = Uri.parse(currUrl).resolve(loc).toString();
+              continue;
+            }
+          }
+          break;
+        }
+        if (resp == null || resp.statusCode != 200) {
+          await resp?.drain<void>();
           continue;
         }
+        final total = resp.contentLength;
+        var received = 0;
+        final partFile = File('${targetFile.path}.part');
+        sink = partFile.openWrite();
+        await for (final chunk in resp.timeout(const Duration(seconds: 45))) {
+          sink.add(chunk);
+          received += chunk.length;
+          final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+          if (total > 0) {
+            _updateProgress = (received / total).clamp(0.05, 0.98);
+            final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
+            final pct = (_updateProgress * 100).round();
+            _updateStatusText = '$label: $mb / $totalMb МБ ($pct%)';
+          } else {
+            _updateProgress =
+                (received / (25 * 1024 * 1024)).clamp(0.08, 0.95);
+            _updateStatusText = '$label: скачано $mb МБ...';
+          }
+          notifyListeners();
+        }
+        await sink.flush();
+        await sink.close();
+        sink = null;
+        if (partFile.existsSync() && partFile.lengthSync() > 500000) {
+          if (targetFile.existsSync()) {
+            targetFile.deleteSync();
+          }
+          partFile.renameSync(targetFile.path);
+          return true;
+        }
+      } catch (_) {
+        // Пробуем следующий режим/зеркало
+      } finally {
+        try {
+          await sink?.close();
+        } catch (_) {}
+        client.close(force: true);
       }
-      break;
     }
-    if (resp == null || resp.statusCode != 200) {
-      await resp?.drain();
-      return false;
-    }
-    final total = resp.contentLength;
-    var received = 0;
-    final sink = targetFile.openWrite();
-    await for (final chunk in resp) {
-      sink.add(chunk);
-      received += chunk.length;
-      if (total > 0) {
-        _updateProgress = (received / total).clamp(0.05, 0.98);
-        final mb = (received / (1024 * 1024)).toStringAsFixed(1);
-        final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
-        final pct = (_updateProgress * 100).round();
-        _updateStatusText = '$label: $mb / $totalMb МБ ($pct%)';
-        notifyListeners();
-      }
-    }
-    await sink.flush();
-    await sink.close();
-    return targetFile.existsSync() && targetFile.lengthSync() > 500000;
+    return false;
   }
 
   /// Отдельное обновление ТОЛЬКО нативного ядра (`libtachyon.so`) через внутренний загрузчик.
@@ -2632,13 +2682,6 @@ class AppController extends ChangeNotifier {
     _updateProgress = 0.02;
     _updateStatusText = 'Подготовка загрузчика ядра tachyon-core...';
     notifyListeners();
-
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20)
-      ..badCertificateCallback = (_, _, _) => true;
-    if (_tunnel.status.isActive) {
-      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
-    }
 
     try {
       final abi = await bridge.deviceAbi();
@@ -2661,14 +2704,15 @@ class AppController extends ChangeNotifier {
       final soFile = File('${updateDir.path}/libtachyon.so');
       final candidateUrls = <String>[
         if (_latestCoreSoUrl.isNotEmpty) _latestCoreSoUrl,
-        'https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
+        'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',
         'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
+        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',
+        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
       ];
 
       var downloaded = false;
       for (final soUrl in candidateUrls) {
         downloaded = await _downloadUpdateFile(
-          client,
           soUrl,
           soFile,
           'Скачивание ядра libtachyon ($abiSuffix)',
@@ -2694,14 +2738,13 @@ class AppController extends ChangeNotifier {
         _updateStatusText = 'Ядро tachyon-core успешно обновлено — перезапуск...';
       } else if (res == 'requires_apk') {
         _updateStatusText =
-            'Политика SELinux вашей прошивки блокирует подмену .so из кэша — используйте «Обновить приложение (APK)»';
+            'Политика SELinux вашей прошивки блокирует подмену .so из кэша — используйте «APK»';
       } else {
         _updateStatusText = 'Ошибка установки ядра: $res';
       }
     } catch (e) {
       _updateStatusText = 'Ошибка обновления ядра: $e';
     } finally {
-      client.close(force: true);
       _updatingEngine = false;
       notifyListeners();
     }
@@ -2714,13 +2757,6 @@ class AppController extends ChangeNotifier {
     _updateProgress = 0.02;
     _updateStatusText = 'Подготовка загрузчика APK...';
     notifyListeners();
-
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 20)
-      ..badCertificateCallback = (_, _, _) => true;
-    if (_tunnel.status.isActive) {
-      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
-    }
 
     try {
       final abi = await bridge.deviceAbi();
@@ -2742,14 +2778,22 @@ class AppController extends ChangeNotifier {
 
       const apkName = 'tachyon-update.apk';
       final apkFile = File('${updateDir.path}/$apkName');
-      final apkUrl =
-          'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk';
-      final okApk = await _downloadUpdateFile(
-        client,
-        apkUrl,
-        apkFile,
-        'Скачивание APK приложения ($abiSuffix)',
-      );
+      final candidateApkUrls = <String>[
+        'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/tachyon-proxy-$abiSuffix.apk',
+        'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk',
+        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/tachyon-proxy-$abiSuffix.apk',
+        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk',
+      ];
+
+      var okApk = false;
+      for (final apkUrl in candidateApkUrls) {
+        okApk = await _downloadUpdateFile(
+          apkUrl,
+          apkFile,
+          'Скачивание APK приложения ($abiSuffix)',
+        );
+        if (okApk) break;
+      }
       if (!okApk) {
         _updateStatusText =
             'Не удалось скачать APK приложения с GitHub Releases';
@@ -2769,7 +2813,6 @@ class AppController extends ChangeNotifier {
     } catch (e) {
       _updateStatusText = 'Ошибка обновления APK: $e';
     } finally {
-      client.close(force: true);
       _updatingApp = false;
       notifyListeners();
     }

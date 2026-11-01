@@ -587,6 +587,73 @@ proxies:
       expect(chainOut['server'], '127.0.0.1');
       expect(chainOut['server_port'], 40000);
     });
+
+    test('uTLS-отпечатки Xray (hellochrome_120 и др.) и XHTTP-диапазоны нормализуются', () {
+      expect(normalizeUtlsFingerprint('hellochrome_120'), 'chrome');
+      expect(normalizeUtlsFingerprint('hellofirefox_120'), 'firefox');
+      expect(normalizeUtlsFingerprint('hellosafari_16_0'), 'safari');
+      expect(normalizeUtlsFingerprint('helloandroid_11_okhttp'), 'android');
+      expect(normalizeUtlsFingerprint('randomizedalpn'), 'randomized');
+      expect(normalizeUtlsFingerprint('chrome_psk_shuffle'), 'chrome_psk_shuffle');
+
+      // Даже уже сохранённый профиль с fp: hellochrome_120 и транзитным узлом
+      // должен отдавать в ядро канонический fingerprint: chrome.
+      const savedProfile = Profile(
+        id: 'lte-4',
+        name: '🇵🇱 #4 Обход глушилок (LTE)',
+        type: 'vless',
+        server: '203.0.113.10',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+        publicKey: 'cGJrMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI',
+        shortId: 'abcd',
+        extra: {
+          'security': 'reality',
+          'fp': 'hellochrome_120',
+          'detour': 'chain-4-relay',
+          'chain_outbounds': [
+            {
+              'type': 'vless',
+              'tag': 'chain-4-relay',
+              'server': '203.0.113.11',
+              'server_port': 443,
+              'uuid': '11111111-2222-3333-4444-555555555555',
+              'tls': {
+                'enabled': true,
+                'server_name': 'ya.ru',
+                'utls': {'enabled': true, 'fingerprint': 'hellochrome_120'},
+              },
+              'transport': {
+                'type': 'xhttp',
+                'path': '/x',
+                'xPaddingBytes': {'from': 100, 'to': 1000},
+                'xmux': {
+                  'maxConcurrency': {'from': 16, 'to': 32},
+                  'maxConnections': 0,
+                },
+              },
+            },
+          ],
+        },
+      );
+
+      final cfg = RuntimeConfig(
+        profile: savedProfile,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+      ).toJson();
+      final outbounds = (cfg['outbounds'] as List).cast<Map<String, dynamic>>();
+      final mainOut = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      final hopOut = outbounds.firstWhere((o) => o['tag'] == 'chain-4-relay');
+
+      expect(((mainOut['tls'] as Map)['utls'] as Map)['fingerprint'], 'chrome');
+      expect(((hopOut['tls'] as Map)['utls'] as Map)['fingerprint'], 'chrome');
+      final hopTr = hopOut['transport'] as Map;
+      expect(hopTr['x_padding_bytes'], '100-1000');
+      expect((hopTr['xmux'] as Map)['max_concurrency'], '16-32');
+      expect((hopTr['xmux'] as Map).containsKey('max_connections'), isFalse);
+    });
   });
 }
 

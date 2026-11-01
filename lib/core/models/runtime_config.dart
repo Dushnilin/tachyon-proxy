@@ -188,7 +188,8 @@ class Profile {
     final cleanExtra = Map<String, dynamic>.from(extra);
     final security = cleanExtra.remove('security')?.toString().toLowerCase() ?? '';
     final vmessSecurity = cleanExtra.remove('vmess_security')?.toString() ?? '';
-    final fp = cleanExtra.remove('fp')?.toString() ?? '';
+    final rawFp = cleanExtra.remove('fp')?.toString() ?? '';
+    final fp = normalizeUtlsFingerprint(rawFp);
     final pq = cleanExtra.remove('pq') == true;
     cleanExtra
       ..remove('pcs')
@@ -226,14 +227,23 @@ class Profile {
       if (pq) tls['pq'] = true;
       if (fp.isNotEmpty) {
         tls['utls'] = {'enabled': true, 'fingerprint': fp};
-      } else if (isReality && !tls.containsKey('utls')) {
+      } else if (tls['utls'] is Map) {
+        final u = Map<String, dynamic>.from(tls['utls'] as Map);
+        final existingFp = u['fingerprint']?.toString() ?? '';
+        u['enabled'] = u['enabled'] ?? true;
+        u['fingerprint'] = existingFp.isNotEmpty
+            ? normalizeUtlsFingerprint(existingFp)
+            : 'chrome';
+        tls['utls'] = u;
+      } else if (isReality) {
         tls['utls'] = {'enabled': true, 'fingerprint': 'chrome'};
       }
       if (isReality) {
+        final cleanSid = normalizeRealityShortId(shortId);
         tls['reality'] = {
           'enabled': true,
-          'public_key': publicKey,
-          if (shortId.isNotEmpty) 'short_id': shortId,
+          'public_key': publicKey.trim(),
+          if (cleanSid.isNotEmpty) 'short_id': cleanSid,
           if (pq) 'support_x25519mlkem768': true,
         };
       }
@@ -263,7 +273,14 @@ class Profile {
         if (shouldUseTls || (security != 'none' && cleanExtra['transport'] == null)) {
           outbound['tls'] = buildTlsObject();
         }
-        if (flow.isNotEmpty) outbound['flow'] = flow;
+        final cleanFlow = normalizeVlessFlow(flow);
+        if (cleanFlow.isNotEmpty) outbound['flow'] = cleanFlow;
+        if (cleanExtra['packet_encoding'] != null) {
+          final pe = cleanExtra['packet_encoding'].toString();
+          if (pe != 'packetaddr' && pe != 'xudp') {
+            cleanExtra.remove('packet_encoding');
+          }
+        }
         return outbound..addAll(cleanExtra);
 
       case 'vmess':
@@ -1728,7 +1745,7 @@ class RuntimeConfig {
     if (hasStatic && !hasDetour && profile.extra['chain_outbounds'] is List) {
       for (final rawHop in profile.extra['chain_outbounds'] as List) {
         if (rawHop is! Map) continue;
-        final hop = Map<String, dynamic>.from(rawHop);
+        final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
         if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
           if (!hop.containsKey('peers') && hop['server'] != null) {
             hop['address'] = hop.remove('local_address') ?? ['10.0.0.2/32'];
@@ -1897,17 +1914,206 @@ class RuntimeConfig {
   String encode() => jsonEncode(toJson());
 }
 
+/// Приводит uTLS-отпечатки Xray / Go (`hellochrome_120`, `chrome_120`, `hellofirefox_auto`,
+/// `hellosafari_16_0`, `helloios_14`, `helloandroid_11_okhttp`, `randomizedalpn` и др.)
+/// к строгому списку `UTLS_FINGERPRINTS` валидатора `tachyon-core`.
+String normalizeUtlsFingerprint(String raw) {
+  final s = raw.trim().toLowerCase();
+  if (s.isEmpty) return '';
+  const valid = {
+    'chrome',
+    'chrome_psk',
+    'chrome_psk_shuffle',
+    'chrome_padding_psk_shuffle',
+    'chrome_pq',
+    'chrome_pq_psk',
+    'firefox',
+    'safari',
+    'edge',
+    '360',
+    'qq',
+    'ios',
+    'android',
+    'randomized',
+    'random',
+  };
+  if (valid.contains(s)) return s;
+  final stripped = s.startsWith('hello')
+      ? s.substring(5).replaceFirst(RegExp(r'^_+'), '')
+      : s;
+  if (valid.contains(stripped)) return stripped;
+  if (stripped.startsWith('chrome')) {
+    if (stripped.contains('padding') &&
+        stripped.contains('psk') &&
+        stripped.contains('shuffle')) {
+      return 'chrome_padding_psk_shuffle';
+    }
+    if (stripped.contains('pq') && stripped.contains('psk')) {
+      return 'chrome_pq_psk';
+    }
+    if (stripped.contains('pq')) return 'chrome_pq';
+    if (stripped.contains('psk') && stripped.contains('shuffle')) {
+      return 'chrome_psk_shuffle';
+    }
+    if (stripped.contains('psk')) return 'chrome_psk';
+    return 'chrome';
+  }
+  if (stripped.startsWith('firefox') || stripped.startsWith('ff')) {
+    return 'firefox';
+  }
+  if (stripped.startsWith('safari')) return 'safari';
+  if (stripped.startsWith('edge')) return 'edge';
+  if (stripped.startsWith('ios')) return 'ios';
+  if (stripped.startsWith('android') || stripped.contains('okhttp')) {
+    return 'android';
+  }
+  if (stripped.startsWith('360')) return '360';
+  if (stripped.startsWith('qq')) return 'qq';
+  if (stripped.startsWith('randomized')) return 'randomized';
+  if (stripped.startsWith('random')) return 'random';
+  return 'chrome';
+}
+
+/// Очищает `short_id` Reality до допустимых 1..16 hex-символов.
+String normalizeRealityShortId(String raw) {
+  final hex = raw.trim().replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+  if (hex.isEmpty) return '';
+  return hex.length > 16 ? hex.substring(0, 16) : hex;
+}
+
+/// Нормализует `flow` для VLESS (`xtls-rprx-vision-udp443` → `xtls-rprx-vision`).
+String normalizeVlessFlow(String raw) {
+  final f = raw.trim();
+  if (f.isEmpty || f.toLowerCase() == 'none') return '';
+  if (f.toLowerCase().startsWith('xtls-rprx-vision')) {
+    return 'xtls-rprx-vision';
+  }
+  return f;
+}
+
+/// Нормализует произвольный узел outbound (включая транзитные `chain_outbounds`).
+Map<String, dynamic> normalizeOutboundNode(Map<String, dynamic> rawNode) {
+  final node = Map<String, dynamic>.from(rawNode);
+  if (node['flow'] != null) {
+    final cleanFlow = normalizeVlessFlow(node['flow'].toString());
+    if (cleanFlow.isEmpty) {
+      node.remove('flow');
+    } else {
+      node['flow'] = cleanFlow;
+    }
+  }
+  if (node['packet_encoding'] != null) {
+    final pe = node['packet_encoding'].toString();
+    if (pe != 'packetaddr' && pe != 'xudp') {
+      node.remove('packet_encoding');
+    }
+  }
+  if (node['tls'] is Map) {
+    final tls = Map<String, dynamic>.from(node['tls'] as Map);
+    if (tls['utls'] is Map) {
+      final utls = Map<String, dynamic>.from(tls['utls'] as Map);
+      final rawFp = utls['fingerprint']?.toString() ?? '';
+      utls['enabled'] = utls['enabled'] ?? true;
+      utls['fingerprint'] = rawFp.isNotEmpty
+          ? normalizeUtlsFingerprint(rawFp)
+          : 'chrome';
+      tls['utls'] = utls;
+    }
+    if (tls['reality'] is Map) {
+      final reality = Map<String, dynamic>.from(tls['reality'] as Map);
+      if (reality['short_id'] != null) {
+        final sid = normalizeRealityShortId(reality['short_id'].toString());
+        if (sid.isEmpty) {
+          reality.remove('short_id');
+        } else {
+          reality['short_id'] = sid;
+        }
+      }
+      tls['reality'] = reality;
+      if (reality['enabled'] == true && tls['utls'] == null) {
+        tls['utls'] = {'enabled': true, 'fingerprint': 'chrome'};
+      }
+    }
+    node['tls'] = tls;
+  }
+  if (node['transport'] is Map) {
+    final tr = Map<String, dynamic>.from(node['transport'] as Map);
+    final trType = tr['type']?.toString().toLowerCase() ?? '';
+    if (trType == 'xhttp' || trType == 'splithttp') {
+      node['transport'] = normalizeXhttpTransport(tr);
+    }
+  }
+  return node;
+}
+
+String? _formatXhttpRange(Object? val) {
+  if (val == null) return null;
+  if (val is num) return val.toInt().toString();
+  if (val is String) {
+    final s = val.trim();
+    return s.isEmpty ? null : s;
+  }
+  if (val is List && val.length == 2) {
+    final a = int.tryParse(val[0].toString().trim());
+    final b = int.tryParse(val[1].toString().trim());
+    if (a != null && b != null) {
+      return a == b ? '$a' : '$a-$b';
+    }
+  }
+  if (val is Map && (val.containsKey('from') || val.containsKey('to'))) {
+    final from = int.tryParse((val['from'] ?? 0).toString().trim()) ?? 0;
+    final to = int.tryParse((val['to'] ?? from).toString().trim()) ?? from;
+    return from == to ? '$from' : '$from-$to';
+  }
+  return null;
+}
+
 /// Приводит параметры XHTTP-транспорта к строгому каноническому формату ядpa
 /// (snake_case, правильные типы, отсечение неизвестных camelCase полей Xray).
-Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> raw) {
+Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
+  final raw = Map<String, dynamic>.from(rawInput);
+  while (raw['extra'] != null) {
+    final extraVal = raw.remove('extra');
+    if (extraVal is Map) {
+      for (final entry in extraVal.entries) {
+        raw.putIfAbsent(entry.key.toString(), () => entry.value);
+      }
+    } else if (extraVal is String && extraVal.trim().startsWith('{')) {
+      try {
+        final decoded = jsonDecode(extraVal);
+        if (decoded is Map) {
+          for (final entry in decoded.entries) {
+            raw.putIfAbsent(entry.key.toString(), () => entry.value);
+          }
+        }
+      } catch (_) {}
+    } else {
+      break;
+    }
+  }
+
   final out = <String, dynamic>{'type': 'xhttp'};
 
   void setStr(String targetKey, List<String> sourceKeys) {
     for (final k in sourceKeys) {
       if (raw.containsKey(k) && raw[k] != null) {
-        final val = raw[k].toString();
+        final v = raw[k];
+        if (v is Map || v is List) continue;
+        final val = v.toString().trim();
         if (val.isNotEmpty) {
           out[targetKey] = val;
+          return;
+        }
+      }
+    }
+  }
+
+  void setRange(String targetKey, List<String> sourceKeys) {
+    for (final k in sourceKeys) {
+      if (raw.containsKey(k) && raw[k] != null) {
+        final formatted = _formatXhttpRange(raw[k]);
+        if (formatted != null && formatted.isNotEmpty) {
+          out[targetKey] = formatted;
           return;
         }
       }
@@ -1943,7 +2149,7 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> raw) {
           return;
         }
         if (val is String) {
-          final parsed = int.tryParse(val);
+          final parsed = int.tryParse(val.trim());
           if (parsed != null) {
             out[targetKey] = parsed;
             return;
@@ -1956,24 +2162,24 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> raw) {
   setStr('host', ['host']);
   setStr('path', ['path']);
   setStr('mode', ['mode']);
-  setStr('session_placement', ['session_placement', 'sessionPlacement', 'sessionIDPlacement']);
-  setStr('session_key', ['session_key', 'sessionKey', 'sessionIDKey']);
+  setStr('session_placement', ['session_placement', 'sessionPlacement', 'sessionIDPlacement', 'sessionIdPlacement', 'session_id_placement']);
+  setStr('session_key', ['session_key', 'sessionKey', 'sessionIDKey', 'sessionIdKey', 'session_id_key']);
   setStr('seq_placement', ['seq_placement', 'seqPlacement']);
   setStr('seq_key', ['seq_key', 'seqKey']);
-  setStr('session_table', ['session_table', 'sessionTable', 'sessionIDTable', 'session_id_table']);
-  setStr('session_length', ['session_length', 'sessionLength', 'sessionIDLength', 'session_id_length']);
+  setStr('session_table', ['session_table', 'sessionTable', 'sessionIDTable', 'sessionIdTable', 'session_id_table']);
+  setRange('session_length', ['session_length', 'sessionLength', 'sessionIDLength', 'sessionIdLength', 'session_id_length']);
   setStr('uplink_data_placement', ['uplink_data_placement', 'uplinkDataPlacement']);
   setStr('uplink_data_key', ['uplink_data_key', 'uplinkDataKey']);
-  setStr('uplink_chunk_size', ['uplink_chunk_size', 'uplinkChunkSize']);
-  setStr('uplink_http_method', ['uplink_http_method', 'uplinkHttpMethod']);
-  setStr('x_padding_bytes', ['x_padding_bytes', 'xPaddingBytes', 'xpaddingbytes']);
+  setRange('uplink_chunk_size', ['uplink_chunk_size', 'uplinkChunkSize']);
+  setStr('uplink_http_method', ['uplink_http_method', 'uplinkHttpMethod', 'uplinkHTTPMethod']);
+  setRange('x_padding_bytes', ['x_padding_bytes', 'xPaddingBytes', 'xpaddingbytes']);
   setStr('x_padding_key', ['x_padding_key', 'xPaddingKey']);
   setStr('x_padding_header', ['x_padding_header', 'xPaddingHeader']);
   setStr('x_padding_placement', ['x_padding_placement', 'xPaddingPlacement']);
   setStr('x_padding_method', ['x_padding_method', 'xPaddingMethod']);
-  setStr('sc_max_each_post_bytes', ['sc_max_each_post_bytes', 'scMaxEachPostBytes']);
-  setStr('sc_min_posts_interval_ms', ['sc_min_posts_interval_ms', 'scMinPostsIntervalMs']);
-  setStr('sc_stream_up_server_secs', ['sc_stream_up_server_secs', 'scStreamUpServerSecs']);
+  setRange('sc_max_each_post_bytes', ['sc_max_each_post_bytes', 'scMaxEachPostBytes']);
+  setRange('sc_min_posts_interval_ms', ['sc_min_posts_interval_ms', 'scMinPostsIntervalMs']);
+  setRange('sc_stream_up_server_secs', ['sc_stream_up_server_secs', 'scStreamUpServerSecs']);
 
   setBool('no_grpc_header', ['no_grpc_header', 'noGRPCHeader']);
   setBool('x_padding_obfs_mode', ['x_padding_obfs_mode', 'xPaddingObfsMode']);
@@ -1996,30 +2202,43 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> raw) {
       switch (k) {
         case 'max_concurrency':
         case 'maxConcurrency':
-          muxOut['max_concurrency'] = v;
+          final r = _formatXhttpRange(v);
+          if (r != null && r != '0' && r != '0-0') {
+            muxOut['max_concurrency'] = r;
+          }
           break;
         case 'max_connections':
         case 'maxConnections':
-          muxOut['max_connections'] = v is num ? v.toInt() : (int.tryParse(v.toString()) ?? v);
+          final r = _formatXhttpRange(v);
+          if (r != null && r != '0' && r != '0-0') {
+            muxOut['max_connections'] = int.tryParse(r) ?? r;
+          }
           break;
         case 'c_max_reuse_times':
         case 'cMaxReuseTimes':
-          muxOut['c_max_reuse_times'] = v;
+          final r = _formatXhttpRange(v);
+          if (r != null) muxOut['c_max_reuse_times'] = r;
           break;
         case 'h_max_request_times':
         case 'hMaxRequestTimes':
-          muxOut['h_max_request_times'] = v;
+          final r = _formatXhttpRange(v);
+          if (r != null) muxOut['h_max_request_times'] = r;
           break;
         case 'h_max_reusable_secs':
         case 'hMaxReusableSecs':
         case 'maxReusableSecs':
-          muxOut['h_max_reusable_secs'] = v;
+          final r = _formatXhttpRange(v);
+          if (r != null) muxOut['h_max_reusable_secs'] = r;
           break;
         case 'h_keep_alive_period':
         case 'hKeepAlivePeriod':
-          muxOut['h_keep_alive_period'] = v is num ? v.toInt() : (int.tryParse(v.toString()) ?? v);
+          final n = v is num ? v.toInt() : int.tryParse(v.toString().trim());
+          if (n != null) muxOut['h_keep_alive_period'] = n;
           break;
       }
+    }
+    if (muxOut.containsKey('max_concurrency') && muxOut.containsKey('max_connections')) {
+      muxOut.remove('max_connections');
     }
     if (muxOut.isNotEmpty) {
       out['xmux'] = muxOut;

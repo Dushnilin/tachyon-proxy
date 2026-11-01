@@ -199,7 +199,7 @@ class LinkParser {
     final extra = <String, dynamic>{
       'security': security,
       if ((query['fp'] ?? query['fingerprint'] ?? '').isNotEmpty)
-        'fp': query['fp'] ?? query['fingerprint'],
+        'fp': normalizeUtlsFingerprint(query['fp'] ?? query['fingerprint'] ?? ''),
     };
 
     final encryption = query['encryption'] ?? '';
@@ -235,9 +235,9 @@ class LinkParser {
       sni: sni,
       alpn: _splitCsv(query['alpn']),
       allowInsecure: _isTruthy(query['allowInsecure'] ?? query['insecure']),
-      flow: query['flow'] ?? '',
-      publicKey: pbk,
-      shortId: sid,
+      flow: normalizeVlessFlow(query['flow'] ?? ''),
+      publicKey: pbk.trim(),
+      shortId: normalizeRealityShortId(sid),
       subscriptionId: subscriptionId,
       extra: extra,
     );
@@ -373,7 +373,7 @@ class LinkParser {
     final extra = <String, dynamic>{
       'security': security,
       if ((query['fp'] ?? query['fingerprint'] ?? '').isNotEmpty)
-        'fp': query['fp'] ?? query['fingerprint'],
+        'fp': normalizeUtlsFingerprint(query['fp'] ?? query['fingerprint'] ?? ''),
     };
     _extractCertPin(extra, query['pcs'] ?? query['pinSHA256']);
     final trMap = _buildTransportFromQuery(transportType, query);
@@ -1820,10 +1820,10 @@ class LinkParser {
 
   Map<String, dynamic>? _convertXrayTls(Map<String, dynamic> stream, String defaultServer) {
     final sec = (stream['security'] ?? 'none').toString().toLowerCase();
-    if (sec == 'tls') {
+    if (sec == 'tls' || sec == 'xtls') {
       final ts = stream['tlsSettings'] is Map ? stream['tlsSettings'] as Map : const {};
       final sni = (ts['serverName'] ?? defaultServer).toString();
-      final fp = (ts['fingerprint'] ?? '').toString();
+      final fp = normalizeUtlsFingerprint((ts['fingerprint'] ?? '').toString());
       return {
         'enabled': true,
         if (sni.isNotEmpty) 'server_name': sni,
@@ -1835,16 +1835,17 @@ class LinkParser {
     if (sec == 'reality') {
       final rs = stream['realitySettings'] is Map ? stream['realitySettings'] as Map : const {};
       final sni = (rs['serverName'] ?? defaultServer).toString();
-      final fp = (rs['fingerprint'] ?? 'chrome').toString();
+      final rawFp = (rs['fingerprint'] ?? '').toString();
+      final fp = rawFp.isEmpty ? 'chrome' : normalizeUtlsFingerprint(rawFp);
+      final sid = normalizeRealityShortId((rs['shortId'] ?? '').toString());
       return {
         'enabled': true,
         if (sni.isNotEmpty) 'server_name': sni,
-        'utls': {'enabled': true, 'fingerprint': fp.isEmpty ? 'chrome' : fp},
+        'utls': {'enabled': true, 'fingerprint': fp},
         'reality': {
           'enabled': true,
-          'public_key': (rs['publicKey'] ?? '').toString(),
-          if ((rs['shortId'] ?? '').toString().isNotEmpty)
-            'short_id': rs['shortId'].toString(),
+          'public_key': (rs['publicKey'] ?? '').toString().trim(),
+          if (sid.isNotEmpty) 'short_id': sid,
         },
       };
     }
@@ -2138,7 +2139,9 @@ class LinkParser {
       final tlsOn = force || p['tls'] == true || p['reality-opts'] is Map;
       if (!tlsOn) return null;
       final sni = (p['servername'] ?? p['sni'] ?? server).toString();
-      final fp = (p['client-fingerprint'] ?? p['fingerprint'] ?? '').toString();
+      final fp = normalizeUtlsFingerprint(
+        (p['client-fingerprint'] ?? p['fingerprint'] ?? '').toString(),
+      );
       final tls = <String, dynamic>{
         'enabled': true,
         if (sni.isNotEmpty) 'server_name': sni,
@@ -2148,10 +2151,11 @@ class LinkParser {
       };
       if (p['reality-opts'] is Map) {
         final ro = p['reality-opts'] as Map;
+        final sid = normalizeRealityShortId((ro['short-id'] ?? '').toString());
         tls['reality'] = {
           'enabled': true,
-          if (ro['public-key'] != null) 'public_key': ro['public-key'].toString(),
-          if (ro['short-id'] != null) 'short_id': ro['short-id'].toString(),
+          if (ro['public-key'] != null) 'public_key': ro['public-key'].toString().trim(),
+          if (sid.isNotEmpty) 'short_id': sid,
         };
         tls.putIfAbsent('utls', () => {'enabled': true, 'fingerprint': 'chrome'});
       }
@@ -2432,7 +2436,16 @@ class LinkParser {
       rest['security'] = 'tls';
     }
     if (utls?['fingerprint'] != null) {
-      rest['fp'] = utls!['fingerprint'].toString();
+      final normFp = normalizeUtlsFingerprint(utls!['fingerprint'].toString());
+      if (normFp.isNotEmpty) {
+        rest['fp'] = normFp;
+      }
+    }
+    if (rest['chain_outbounds'] is List) {
+      rest['chain_outbounds'] = (rest['chain_outbounds'] as List)
+          .whereType<Map>()
+          .map((h) => normalizeOutboundNode(Map<String, dynamic>.from(h)))
+          .toList(growable: false);
     }
 
     final uuid = (rest.remove('uuid') ?? '').toString();
@@ -2443,13 +2456,14 @@ class LinkParser {
             '')
         .toString();
     final method = (rest.remove('method') ?? '').toString();
-    final flow = (rest.remove('flow') ?? '').toString();
+    final flow = normalizeVlessFlow((rest.remove('flow') ?? '').toString());
     final pubKey = (reality?['public_key'] ??
             rest['peer_public_key'] ??
             rest['public_key'] ??
             '')
-        .toString();
-    final shortId = (reality?['short_id'] ?? '').toString();
+        .toString()
+        .trim();
+    final shortId = normalizeRealityShortId((reality?['short_id'] ?? '').toString());
     final tag = (item['tag'] ?? '').toString().trim();
 
     return Profile(

@@ -178,6 +178,8 @@ class MainActivity : FlutterFragmentActivity() {
     private fun dumpDiagnostics() {
         Thread({
             try {
+                val ver = runCatching { TachyonCore.version() }.getOrNull()
+                android.util.Log.i("TachyonDump", "ENGINE VERSION: $ver (customSo=${TachyonCore.isCustomSoLoaded})")
                 val stats = runCatching { TachyonCore.stats() }.getOrNull()
                 android.util.Log.i("TachyonDump", "STATS: $stats")
                 val logFile = File(filesDir, LOG_FILE_NAME)
@@ -548,9 +550,14 @@ class MainActivity : FlutterFragmentActivity() {
                     runCatching {
                         targetSo.setWritable(true, true)
                         targetSo.delete()
+                        File(TachyonCore.CUSTOM_STAMP_PATH).delete()
                     }
                     runOnUiThread { result.success("requires_apk") }
                     return@Thread
+                }
+
+                runCatching {
+                    File(TachyonCore.CUSTOM_STAMP_PATH).writeText(System.currentTimeMillis().toString())
                 }
 
                 runOnUiThread {

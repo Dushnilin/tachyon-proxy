@@ -254,11 +254,18 @@ class AppController extends ChangeNotifier {
       final deduped = _dedupProfiles(_settings.profiles, defaultSubId: defaultSubId);
       final selectedExists = _settings.selectedProfileId.startsWith('auto:') ||
           deduped.any((p) => p.id == _settings.selectedProfileId);
+      final nonWarpFirst = deduped
+          .where((p) => p.subscriptionId != 'free-warp')
+          .firstOrNull;
+      final effectiveSelectedId = (_settings.selectedProfileId.startsWith('free-warp') &&
+              nonWarpFirst != null)
+          ? nonWarpFirst.id
+          : (selectedExists
+              ? _settings.selectedProfileId
+              : (deduped.isNotEmpty ? deduped.first.id : ''));
       _settings = _settings.copyWith(
         profiles: deduped,
-        selectedProfileId: selectedExists
-            ? _settings.selectedProfileId
-            : (deduped.isNotEmpty ? deduped.first.id : ''),
+        selectedProfileId: effectiveSelectedId,
       );
       unawaited(store.save(_settings));
     }
@@ -1774,20 +1781,37 @@ class AppController extends ChangeNotifier {
         name: '⚡ Cloudflare WARP (AmneziaWG)',
         updatedAt: DateTime.now().millisecondsSinceEpoch,
       );
+      final previousSelectedId = _settings.selectedProfileId;
       final otherProfiles = _settings.profiles
           .where((p) => p.subscriptionId != subId)
           .toList();
-      final mergedProfiles = [...generated, ...otherProfiles];
+      final mergedProfiles = [...otherProfiles, ...generated];
 
       await _update(
         _settings.copyWith(
-          subscriptions: [warpSub, ...otherSubs],
+          subscriptions: [...otherSubs, warpSub],
           profiles: mergedProfiles,
           selectedProfileId: generated.first.id,
         ),
       );
       if (_tunnel.status.isActive) {
         await _restartActiveTunnel();
+        await _waitForLocalProxyReady();
+        final probeMs = await _probeHttpsViaCore(
+          'http://cp.cloudflare.com/generate_204',
+          timeout: const Duration(milliseconds: 3500),
+        );
+        if (probeMs < 0 &&
+            previousSelectedId.isNotEmpty &&
+            otherProfiles.isNotEmpty) {
+          await _update(
+            _settings.copyWith(selectedProfileId: previousSelectedId),
+          );
+          await _restartActiveTunnel();
+          _freeNodesStatus =
+              'Узлы WARP созданы (${generated.length} шт.), но ваш провайдер блокирует UDP WARP — возвращён рабочий профиль';
+          return generated.length;
+        }
       }
       _freeNodesStatus =
           'Готово: создано ${generated.length} узлов WARP AmneziaWG, выбран ${generated.first.name}';

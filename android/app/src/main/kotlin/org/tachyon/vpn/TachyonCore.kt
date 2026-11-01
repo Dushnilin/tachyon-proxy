@@ -20,6 +20,7 @@ object TachyonCore {
 
     private const val LIBRARY = "tachyon"
     const val CUSTOM_SO_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/libtachyon.so"
+    const val CUSTOM_STAMP_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/engine_v029_plus.stamp"
 
     @Volatile
     private var loaded = false
@@ -34,7 +35,15 @@ object TachyonCore {
 
     init {
         val customSo = File(CUSTOM_SO_PATH)
-        if (customSo.exists() && customSo.length() > 1_000_000L) {
+        val stampFile = File(CUSTOM_STAMP_PATH)
+        if (customSo.exists() && !stampFile.exists()) {
+            // Удаляем устаревший кэшированный .so (например 0.1.6), скачанный до раздельного загрузчика v0.2.9+
+            runCatching {
+                customSo.setWritable(true, true)
+                customSo.delete()
+            }
+        }
+        if (customSo.exists() && stampFile.exists() && customSo.length() > 1_000_000L) {
             try {
                 customSo.setWritable(false, false)
                 customSo.setReadable(true, false)
@@ -43,7 +52,11 @@ object TachyonCore {
                 loaded = true
                 isCustomSoLoaded = true
             } catch (_: Throwable) {
-                runCatching { customSo.delete() }
+                runCatching {
+                    customSo.setWritable(true, true)
+                    customSo.delete()
+                    stampFile.delete()
+                }
             }
         }
         if (!loaded) {

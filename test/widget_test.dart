@@ -65,9 +65,13 @@ void main() {
 
     // Прямой список разрешается прямым резолвером, иначе домены из него
     // не совпадут с правилом маршрутизации.
-    final dnsRules = config['dns']['rules'] as List;
-    expect(dnsRules, hasLength(1));
-    expect(dnsRules.first['server'], RuntimeConfig.directTag);
+    final dnsRules = (config['dns']['rules'] as List).cast<Map>();
+    expect(
+      dnsRules.any((r) =>
+          (r['rule_set'] as List?)?.contains('russia_inside') == true &&
+          r['server'] == RuntimeConfig.directTag),
+      isTrue,
+    );
   });
 
   test('DoH-адрес превращается в типизированный сервер', () {

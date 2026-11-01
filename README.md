@@ -3,15 +3,27 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/Dushnilin/tachyon-proxy/build.yml?branch=main&style=flat-square&label=APK%20Build&labelColor=141417&color=6FD08C" alt="Build Status"></a>
+  <a href="https://github.com/Dushnilin/tachyon-proxy/releases"><img src="https://img.shields.io/badge/APK-Releases-B9A8FF?style=flat-square&labelColor=141417" alt="Releases"></a>
   <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20(Rust)-B9A8FF?style=flat-square&labelColor=141417" alt="Engine: tachyon-core"></a>
   <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/rules-tachyon--lists%20(.trs)-6FD08C?style=flat-square&labelColor=141417" alt="Rules: tachyon-lists"></a>
   <img src="https://img.shields.io/badge/Android-8.0%2B%20(API%2026)-A8A8AD?style=flat-square&labelColor=141417" alt="Android 8.0+">
-  <img src="https://img.shields.io/badge/ABI-arm64--v8a%20%7C%20armeabi--v7a%20%7C%20x86__64-A8A8AD?style=flat-square&labelColor=141417" alt="ABI">
 </p>
 
 **`tachyon-proxy`** — самостоятельный Android VPN-клиент и пакетный десинхронизатор ТСПУ (DPI) на Flutter, построенный поверх нативного Rust-движка [`tachyon-core`](https://github.com/Dushnilin/tachyon-core).
 
 Приложение формирует конфигурацию `sing-box`-совместимого ядра, поднимает системный `VpnService` (TUN), защищает исходящие сокеты от петель маршрутизации через локальный Unix-сокет `protect_path` и передаёт управление трафиком в `libtachyon.so` по JNI.
+
+---
+
+## Скачать APK
+
+Готовые сборки автоматически публикуются через GitHub Actions в разделе **[Releases](https://github.com/Dushnilin/tachyon-proxy/releases)**:
+
+- **`tachyon-proxy-arm64-v8a.apk`** — основной пакет для современных смартфонов (`64-bit ARM`)
+- **`tachyon-proxy-armeabi-v7a.apk`** — для `32-bit ARM` устройств и ТВ-боксов
+- **`tachyon-proxy-x86_64.apk`** — для эмуляторов и `x86_64` систем
+- **`tachyon-proxy-universal.apk`** — универсальный APK со всеми архитектурами
 
 ---
 
@@ -67,46 +79,6 @@
 - **Журнал и резервное копирование**: `Live-tail` логов ядра с фильтрацией по уровням (`ERROR`, `WARN`, `INFO`), настройка `MTU` (`1360`..`9000`), `Allow LAN (:2080)` и полный экспорт/импорт настроек в `JSON`.
 
 ---
-
-## Быстрая сборка
-
-### На Windows (рекомендуется, ~15–25 сек)
-
-Скрипт [`build.ps1`](./build.ps1) собирает APK локально через Flutter и Android SDK/NDK, а с флагом `-Native` предварительно компилирует свежий `libtachyon.so` из соседнего репозитория `G:\tachyon-core`:
-
-```powershell
-# Собрать APK с готовыми библиотеками libtachyon.so и сразу установить по ADB:
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Install
-
-# Пересобрать Rust-ядро (libtachyon.so) из G:\tachyon-core + собрать и установить APK:
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Native -Install
-```
-
-Готовый релизный пакет сохраняется в `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk`.
-
-### Сборка в Docker (Linux / CI)
-
-```bash
-# 1. Сборочный образ (Flutter + Android SDK/NDK r27 + Rust)
-docker build -t tachyon-proxy-build -f docker/Dockerfile .
-
-# 2. Кросс-компиляция libtachyon.so для arm64-v8a, armeabi-v7a и x86_64
-docker run --rm -v "$PWD:/src" -v "/path/to/tachyon-core:/core:ro" \
-    tachyon-proxy-build bash docker/build_native.sh
-
-# 3. Сборка release APK
-docker run --rm -v "$PWD:/src" -w /src \
-    tachyon-proxy-build bash docker/build_apk.sh
-```
-
----
-
-## Проверка кода
-
-```bash
-flutter analyze
-flutter test
-```
 
 ## Системные требования
 

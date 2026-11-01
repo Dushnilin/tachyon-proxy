@@ -37,9 +37,11 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# Local caches & temporary native worktrees
+# Local caches, local helper scripts & internal notes
 native/core-ffi/.work/
 native/core-ffi/.work_win/
 .cache/
 scripts/
 third_party/
+build.ps1
+roadmap.md

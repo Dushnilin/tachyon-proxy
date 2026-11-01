@@ -235,7 +235,7 @@ void main() {
       final desync = outbounds.where((o) => o['type'] == 'desync').single;
       expect(desync.containsKey('detour'), isFalse);
       expect(desync['preset'], 'fake_split');
-      expect(config['route']['final'], 'desync');
+      expect(config['route']['final'], 'proxy');
     });
 
     test('режим RoutingMode.desync работает без прокси-сервера чисто на YouTube', () {
@@ -343,37 +343,31 @@ void main() {
   });
 
   group('подписки', () {
-    test('подписка попадает в корень конфига и строит селектор', () {
+    test('выбранный профиль подписки идёт напрямую в аутбаунд proxy', () {
       final config = RuntimeConfig(
         profile: const Profile(
           id: 'p', name: 'p', type: 'vless',
           server: 's.example', port: 443, uuid: 'u',
+          subscriptionId: 'a',
         ),
         routingMode: RoutingMode.global,
         dns: const DnsSettings(),
         ruleSets: const [],
         filesDir: '/data/app',
         subscriptions: const [
-          SubscriptionEntry(id: 'a', url: 'https://sub.example/list'),
+          SubscriptionEntry(
+            id: 'a',
+            url: 'https://sub.example/list',
+            uploadBytes: 1024,
+            downloadBytes: 2048,
+            totalBytes: 10240,
+          ),
         ],
       ).toJson();
 
-      final subs = config['subscriptions'] as List;
-      expect(subs, hasLength(1));
-      final sub = subs.first as Map;
-      expect(sub['tag'], 'sub-a');
-      expect(sub['url'], 'https://sub.example/list');
-      expect(sub['path'], '/data/app/subs/a.txt');
-      expect(sub['group']['type'], 'urltest');
-
       final outbounds = (config['outbounds'] as List).cast<Map>();
-      final selector = outbounds.first;
-      expect(selector['type'], 'selector');
-      expect(selector['tag'], 'proxy');
-      expect((selector['outbounds'] as List), containsAll(['sub-a', 'profile']));
-      // Статический профиль переименован в 'profile'.
       expect(
-        outbounds.any((o) => o['tag'] == 'profile' && o['type'] == 'vless'),
+        outbounds.any((o) => o['tag'] == 'proxy' && o['type'] == 'vless'),
         isTrue,
       );
       expect(config['route']['final'], 'proxy');

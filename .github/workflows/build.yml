@@ -1,0 +1,89 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        run: flutter analyze
+
+      - name: Run unit tests
+        run: flutter test
+
+      - name: Build per-ABI release APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Build universal release APK
+        run: flutter build apk --release
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/tachyon-proxy-arm64-v8a.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/tachyon-proxy-armeabi-v7a.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/tachyon-proxy-x86_64.apk
+          cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-universal.apk
+          cd dist && sha256sum *.apk > SHA256SUMS.txt
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-proxy-apks
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish rolling release (main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Tachyon Proxy — Latest Build"
+          body: |
+            Автоматическая сборка из ветки `main` (${{ github.sha }}).
+
+            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных Android-устройств (64-bit ARM)
+            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и ТВ-приставок
+            - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
+            - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
+          files: dist/*
+          prerelease: false
+          make_latest: true
+
+      - name: Publish tagged release (v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
+          make_latest: true

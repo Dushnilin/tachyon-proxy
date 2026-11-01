@@ -35,11 +35,14 @@ jobs:
       - name: Check tachyon-core version & decide whether to run
         id: core_check
         env:
-          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           current_core=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
-          latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null || echo "v${current_core}")
+          latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null | tr -d '\r' || true)
+          if [[ ! "$latest_tag" =~ ^v[0-9]+\.[0-9]+ ]]; then
+            latest_tag="v${current_core}"
+          fi
           latest_core="${latest_tag#v}"
           app_ver=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f1 | tr -d '\r')
           echo "current_core=${current_core}" >> "$GITHUB_OUTPUT"
@@ -53,7 +56,7 @@ jobs:
             echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            if [ -n "$PRIVATE_TOKEN" ] && { [ "$current_core" != "$latest_core" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; }; then
+            if [ -n "$PRIVATE_TOKEN" ] && [ "$current_core" != "$latest_core" ] && GH_TOKEN="$PRIVATE_TOKEN" gh api user >/dev/null 2>&1; then
               echo "rebuild_core=true" >> "$GITHUB_OUTPUT"
             else
               echo "rebuild_core=false" >> "$GITHUB_OUTPUT"

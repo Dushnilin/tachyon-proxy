@@ -1,0 +1,253 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import '../models/app_rules.dart';
+import '../models/runtime_config.dart';
+
+/// Хранилище настроек приложения.
+///
+/// Файл лежит в приватном каталоге приложения: путь отдаёт нативный слой
+/// (`filesDir`), поэтому внешние зависимости не нужны.
+class SettingsStore {
+  SettingsStore({required this.directory});
+
+  /// Приватный каталог приложения.
+  final String directory;
+
+  File get _file => File('$directory/tachyon-settings.json');
+
+  /// Читает настройки; при отсутствии файла — значения по умолчанию.
+  Future<AppSettings> load() async {
+    try {
+      if (!await _file.exists()) return const AppSettings();
+      final raw = await _file.readAsString();
+      return AppSettings.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      // Повреждённый файл не должен мешать запуску: начинаем с умолчаний.
+      return const AppSettings();
+    }
+  }
+
+  /// Сохраняет настройки.
+  Future<void> save(AppSettings settings) async {
+    await _file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(settings.toJson()),
+      flush: true,
+    );
+  }
+}
+
+/// Все настройки приложения: профили, маршрутизация, DNS и списки.
+class AppSettings {
+  const AppSettings({
+    this.profiles = const [],
+    this.selectedProfileId = '',
+    this.routingMode = RoutingMode.rules,
+    this.dns = const DnsSettings(),
+    this.ruleSets = const [],
+    this.appsMode = AppsMode.all,
+    this.appPackages = const [],
+    this.appRoutes = const {},
+    this.serviceRoutes = const {
+      'youtube': 'desync',
+      'discord': 'desync',
+      'ru': 'direct',
+    },
+    this.themeMode = 'dark',
+    this.logLevel = 'warn',
+    this.mtu = 9000,
+    this.desync = const DesyncSettings(),
+    this.subscriptions = const [],
+    this.hwid = '',
+    this.customRules = const [],
+    this.collapsedSubs = const [],
+    this.autoStart = false,
+    this.allowLan = false,
+    this.autoUpdateSubs = true,
+  });
+
+  final List<Profile> profiles;
+
+  /// Идентификатор выбранного профиля.
+  final String selectedProfileId;
+
+  final RoutingMode routingMode;
+  final DnsSettings dns;
+  final List<RuleSetEntry> ruleSets;
+
+  /// Как приложения попадают в туннель.
+  final AppsMode appsMode;
+
+  /// Пакеты приложений, отмеченные пользователем (legacy).
+  final List<String> appPackages;
+
+  /// Точечная маршрутизация: packageName → outbound (proxy/direct/desync/block).
+  /// Имеет приоритет над appsMode/appPackages.
+  final Map<String, String> appRoutes;
+
+  /// Точечная маршрутизация сервисов: serviceId → outbound (desync/proxy/direct/block).
+  final Map<String, String> serviceRoutes;
+
+  /// `dark` или `light`.
+  final String themeMode;
+  final String logLevel;
+  final int mtu;
+
+  /// Обход DPI.
+  final DesyncSettings desync;
+
+  /// Подписки: URL, которые ядро качает и обновляет само.
+  final List<SubscriptionEntry> subscriptions;
+
+  /// Уникальный аппаратный ID для подписок с защитой HWID (Remnawave/Happ).
+  final String hwid;
+
+  /// Пользовательские правила маршрутизации.
+  final List<CustomRule> customRules;
+
+  /// Свёрнутые подписки на дашборде и в профилях.
+  final List<String> collapsedSubs;
+
+  /// Автозапуск туннеля при старте системы Android.
+  final bool autoStart;
+
+  /// Локальный HTTP/SOCKS5 прокси в локальную сеть на 0.0.0.0:2080.
+  final bool allowLan;
+
+  /// Автообновление подписок при запуске приложения.
+  final bool autoUpdateSubs;
+
+  Profile? get selectedProfile {
+    if (profiles.isEmpty) return null;
+    for (final profile in profiles) {
+      if (profile.id == selectedProfileId) return profile;
+    }
+    return profiles.first;
+  }
+
+  AppSettings copyWith({
+    List<Profile>? profiles,
+    String? selectedProfileId,
+    RoutingMode? routingMode,
+    DnsSettings? dns,
+    List<RuleSetEntry>? ruleSets,
+    AppsMode? appsMode,
+    List<String>? appPackages,
+    Map<String, String>? appRoutes,
+    Map<String, String>? serviceRoutes,
+    String? themeMode,
+    String? logLevel,
+    int? mtu,
+    DesyncSettings? desync,
+    List<SubscriptionEntry>? subscriptions,
+    String? hwid,
+    List<CustomRule>? customRules,
+    List<String>? collapsedSubs,
+    bool? autoStart,
+    bool? allowLan,
+    bool? autoUpdateSubs,
+  }) {
+    return AppSettings(
+      profiles: profiles ?? this.profiles,
+      selectedProfileId: selectedProfileId ?? this.selectedProfileId,
+      routingMode: routingMode ?? this.routingMode,
+      dns: dns ?? this.dns,
+      ruleSets: ruleSets ?? this.ruleSets,
+      appsMode: appsMode ?? this.appsMode,
+      appPackages: appPackages ?? this.appPackages,
+      appRoutes: appRoutes ?? this.appRoutes,
+      serviceRoutes: serviceRoutes ?? this.serviceRoutes,
+      themeMode: themeMode ?? this.themeMode,
+      desync: desync ?? this.desync,
+      subscriptions: subscriptions ?? this.subscriptions,
+      hwid: hwid ?? this.hwid,
+      logLevel: logLevel ?? this.logLevel,
+      mtu: mtu ?? this.mtu,
+      customRules: customRules ?? this.customRules,
+      collapsedSubs: collapsedSubs ?? this.collapsedSubs,
+      autoStart: autoStart ?? this.autoStart,
+      allowLan: allowLan ?? this.allowLan,
+      autoUpdateSubs: autoUpdateSubs ?? this.autoUpdateSubs,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'profiles': profiles.map((profile) => profile.toJson()).toList(),
+        'selectedProfileId': selectedProfileId,
+        'routingMode': routingMode.name,
+        'dns': dns.toJson(),
+        'ruleSets': ruleSets.map((set) => set.toJson()).toList(),
+        'appsMode': appsMode.name,
+        'appPackages': appPackages,
+        'appRoutes': appRoutes,
+        'serviceRoutes': serviceRoutes,
+        'themeMode': themeMode,
+        'logLevel': logLevel,
+        'mtu': mtu,
+        'desync': desync.toJson(),
+        'subscriptions':
+            subscriptions.map((sub) => sub.toJson()).toList(),
+        'hwid': hwid,
+        'customRules': customRules.map((r) => r.toJson()).toList(),
+        'collapsedSubs': collapsedSubs,
+        'autoStart': autoStart,
+        'allowLan': allowLan,
+        'autoUpdateSubs': autoUpdateSubs,
+      };
+
+  static AppSettings fromJson(Map<String, dynamic> json) {
+    return AppSettings(
+      profiles: ((json['profiles'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(Profile.fromJson)
+          .toList(growable: false),
+      selectedProfileId: (json['selectedProfileId'] as String?) ?? '',
+      routingMode: RoutingMode.fromName(json['routingMode'] as String?),
+      dns: json['dns'] is Map<String, dynamic>
+          ? DnsSettings.fromJson(json['dns'] as Map<String, dynamic>)
+          : const DnsSettings(),
+      ruleSets: ((json['ruleSets'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(RuleSetEntry.fromJson)
+          .toList(growable: false),
+      appsMode: AppsMode.fromName(json['appsMode'] as String?),
+      appPackages: ((json['appPackages'] as List?) ?? const [])
+          .map((item) => item.toString())
+          .toList(growable: false),
+      appRoutes: ((json['appRoutes'] as Map?) ?? const {})
+          .map((k, v) => MapEntry(k.toString(), v.toString())),
+      serviceRoutes: json['serviceRoutes'] is Map
+          ? (json['serviceRoutes'] as Map)
+              .map((k, v) => MapEntry(k.toString(), v.toString()))
+          : const {
+              'youtube': 'desync',
+              'discord': 'desync',
+              'ru': 'direct',
+            },
+      themeMode: (json['themeMode'] as String?) ?? 'dark',
+      logLevel: (json['logLevel'] as String?) ?? 'warn',
+      mtu: (json['mtu'] as num?)?.toInt() ?? 9000,
+      desync: json['desync'] is Map<String, dynamic>
+          ? DesyncSettings.fromJson(json['desync'] as Map<String, dynamic>)
+          : const DesyncSettings(),
+      subscriptions: ((json['subscriptions'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(SubscriptionEntry.fromJson)
+          .toList(growable: false),
+      hwid: (json['hwid'] as String?) ?? '',
+      customRules: ((json['customRules'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(CustomRule.fromJson)
+          .toList(growable: false),
+      collapsedSubs: ((json['collapsedSubs'] as List?) ?? const [])
+          .map((item) => item.toString())
+          .toList(growable: false),
+      autoStart: json['autoStart'] == true,
+      allowLan: json['allowLan'] == true,
+      autoUpdateSubs: json['autoUpdateSubs'] != false,
+    );
+  }
+}

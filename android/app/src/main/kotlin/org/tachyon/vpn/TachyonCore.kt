@@ -1,0 +1,62 @@
+package org.tachyon.vpn
+
+/**
+ * Мост к нативному ядру `tachyon-core` (libtachyon.so).
+ *
+ * Символы, экспортируемые Rust-библиотекой:
+ *  - Java_org_tachyon_vpn_TachyonCore_start
+ *  - Java_org_tachyon_vpn_TachyonCore_stop
+ *  - Java_org_tachyon_vpn_TachyonCore_lastError
+ *  - Java_org_tachyon_vpn_TachyonCore_version
+ *  - Java_org_tachyon_vpn_TachyonCore_nativeStats
+ *  - Java_org_tachyon_vpn_TachyonCore_check
+ *  - Java_org_tachyon_vpn_TachyonCore_protectOpen
+ *  - Java_org_tachyon_vpn_TachyonCore_protectLoop
+ *  - Java_org_tachyon_vpn_TachyonCore_protectClose
+ */
+object TachyonCore {
+
+    private const val LIBRARY = "tachyon"
+
+    @Volatile
+    private var loaded = false
+
+    @Volatile
+    var loadError: String? = null
+        private set
+
+    init {
+        try {
+            System.loadLibrary(LIBRARY)
+            loaded = true
+        } catch (error: UnsatisfiedLinkError) {
+            loadError = error.message ?: "не удалось загрузить lib$LIBRARY.so"
+        } catch (error: SecurityException) {
+            loadError = error.message ?: "lib$LIBRARY.so: доступ запрещён"
+        }
+    }
+
+    val isAvailable: Boolean
+        get() = loaded
+
+    private fun requireLoaded() {
+        if (!loaded) {
+            throw IllegalStateException(loadError ?: "ядро не загружено")
+        }
+    }
+
+    fun stats(): String? {
+        if (!loaded) return null
+        return nativeStats()
+    }
+
+    external fun check(config: String): String?
+    external fun start(config: String, tunFd: Int, protectPath: String, logPath: String): Int
+    external fun stop(): Int
+    external fun lastError(): String?
+    external fun version(): String?
+    external fun nativeStats(): String?
+    external fun protectOpen(path: String): Int
+    external fun protectLoop(service: TachyonVpnService): Int
+    external fun protectClose(): Int
+}

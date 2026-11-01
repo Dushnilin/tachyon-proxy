@@ -1,0 +1,27 @@
+[package]
+name = "core-ffi"
+# Версия совпадает с версией ядра tachyon-core, который собирается рядом:
+# `version()` в JNI отдаёт CARGO_PKG_VERSION, и приложение сверяет её с
+# версией движка, чтобы поймать рассинхрон .so и ядра.
+version = "0.2.6"
+edition = "2024"
+rust-version = "1.89"
+license = "LicenseRef-Proprietary"
+description = "tachyon-core JNI bindings: the core inside the Android VpnService process"
+
+[lib]
+# Загружается как System.loadLibrary("tachyon") -> libtachyon.so
+name = "tachyon"
+crate-type = ["cdylib"]
+
+[features]
+default = ["full"]
+full = ["core-config/full", "core-runtime/full"]
+
+[dependencies]
+core-runtime = { path = "../crates/core-runtime", default-features = false }
+core-config = { path = "../crates/core-config", default-features = false }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+jni = "0.22"

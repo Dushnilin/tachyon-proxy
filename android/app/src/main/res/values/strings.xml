@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tachyon</string>
+
+    <string name="notification_channel_name">Служба VPN</string>
+    <string name="notification_channel_description">Уведомление о состоянии туннеля</string>
+    <string name="notification_title">Tachyon запущен</string>
+    <string name="notification_text">Трафик идёт через туннель</string>
+</resources>

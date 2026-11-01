@@ -1,0 +1,2 @@
+-keep class org.tachyon.vpn.** { *; }
+-keep class app.tachyon.tachyon_proxy.** { *; }

@@ -1,0 +1,436 @@
+package app.tachyon.tachyon_proxy
+
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.net.VpnService
+import android.os.Build
+import android.os.Bundle
+import android.util.LruCache
+import androidx.activity.result.contract.ActivityResultContracts
+import io.flutter.embedding.android.FlutterFragmentActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import org.tachyon.vpn.TachyonCore
+import org.tachyon.vpn.TachyonVpnService
+import org.tachyon.vpn.TunnelStateHolder
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
+
+/**
+ * Мост между Flutter и нативным слоем.
+ *
+ * Два канала:
+ *  - `app.tachyon.proxy/vpn` — команды: проверить конфигурацию, поднять и
+ *    остановить туннель, узнать состояние, прочитать журнал;
+ *  - `app.tachyon.proxy/events` — события: смена состояния туннеля.
+ *
+ * Нативные вызовы блокирующие, поэтому `check` и `version` уходят в
+ * отдельный поток: главный поток Flutter ждать не должен.
+ */
+class MainActivity : FlutterFragmentActivity() {
+
+    private var eventSink: EventChannel.EventSink? = null
+    private var pendingCmd: String? = null
+
+    /** Запрос, ждущий разрешения на VPN. */
+    private var pendingStart: PendingStart? = null
+
+    /**
+     * Уведомление о туннеле нужно пользователю, но отказ на него не мешает
+     * работе: сервис остаётся foreground-состоянием.
+     */
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                android.util.Log.i("Tachyon", "уведомления запрещены")
+            }
+        }
+
+    /** Запрос разрешения на VPN: `onActivityResult` в новых SDK удалён. */
+    private val vpnPermission =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { answer ->
+            val pending = pendingStart
+            pendingStart = null
+            if (pending == null) return@registerForActivityResult
+
+            if (answer.resultCode == RESULT_OK) {
+                startTunnel(
+                    pending.config,
+                    pending.allowedApps,
+                    pending.disallowedApps,
+                    pending.serverName,
+                    pending.mtu,
+                )
+                pending.result.success(null)
+            } else {
+                TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null)
+                pending.result.success("разрешение VPN не выдано")
+            }
+        }
+
+    private val stateListener = TunnelStateHolder.Listener { _, error ->
+        runOnUiThread {
+            eventSink?.success(
+                mapOf(
+                    "type" to "state",
+                    "status" to TunnelStateHolder.stateName(),
+                    "error" to (error ?: ""),
+                ),
+            )
+        }
+    }
+
+    private val commandListener = TunnelStateHolder.CommandListener { cmd ->
+        runOnUiThread {
+            eventSink?.success(mapOf("type" to "cmd", "cmd" to cmd))
+        }
+    }
+
+    private val iconCache = LruCache<String, ByteArray>(256)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        intent?.getStringExtra("cmd")?.let { cmd ->
+            if (cmd == "dump_log") {
+                dumpDiagnostics()
+            } else {
+                pendingCmd = cmd
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra("cmd")?.let { cmd ->
+            if (cmd == "dump_log") {
+                dumpDiagnostics()
+                return
+            }
+            val sink = eventSink
+            if (sink != null) {
+                runOnUiThread { sink.success(mapOf("type" to "cmd", "cmd" to cmd)) }
+            } else {
+                pendingCmd = cmd
+            }
+        }
+    }
+
+    private fun dumpDiagnostics() {
+        Thread({
+            try {
+                val stats = runCatching { TachyonCore.stats() }.getOrNull()
+                android.util.Log.i("TachyonDump", "STATS: $stats")
+                val logFile = File(filesDir, LOG_FILE_NAME)
+                if (logFile.exists()) {
+                    val lines = logFile.readLines()
+                    val tail = if (lines.size > 150) lines.subList(lines.size - 150, lines.size) else lines
+                    android.util.Log.i("TachyonDump", "=== TACHYON.LOG (${lines.size} lines) ===")
+                    for (line in tail) {
+                        android.util.Log.i("TachyonDump", "LOG: $line")
+                    }
+                } else {
+                    android.util.Log.i("TachyonDump", "TACHYON.LOG does not exist")
+                }
+            } catch (e: Throwable) {
+                android.util.Log.e("TachyonDump", "dump failed", e)
+            }
+        }, "tachyon-dump").start()
+    }
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_VPN)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "check" -> handleCheck(call, result)
+                    "start" -> handleStart(call, result)
+                    "stop" -> handleStop(result)
+                    "status" -> result.success(currentStatus())
+                    "version" -> handleVersion(result)
+                    "stats" -> handleStats(result)
+                    "logs" -> handleLogs(call, result)
+                    "clearLogs" -> handleClearLogs(result)
+                    "apps" -> handleApps(result)
+                    "appIcon" -> handleAppIcon(call, result)
+                    "shareText" -> handleShareText(call, result)
+                    "filesDir" -> result.success(filesDir.absolutePath)
+                    else -> result.notImplemented()
+                }
+            }
+
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_EVENTS)
+            .setStreamHandler(
+                object : EventChannel.StreamHandler {
+                    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                        eventSink = events
+                        TunnelStateHolder.addListener(stateListener)
+                        TunnelStateHolder.addCommandListener(commandListener)
+                        pendingCmd?.let { cmd ->
+                            pendingCmd = null
+                            runOnUiThread { events?.success(mapOf("type" to "cmd", "cmd" to cmd)) }
+                        }
+                    }
+
+                    override fun onCancel(arguments: Any?) {
+                        TunnelStateHolder.removeListener(stateListener)
+                        TunnelStateHolder.removeCommandListener(commandListener)
+                        eventSink = null
+                    }
+                },
+            )
+    }
+
+    override fun onDestroy() {
+        TunnelStateHolder.removeListener(stateListener)
+        TunnelStateHolder.removeCommandListener(commandListener)
+        super.onDestroy()
+    }
+
+    /** Проверяет конфигурацию движком: ответ приходит из отдельного потока. */
+    private fun handleCheck(call: MethodCall, result: MethodChannel.Result) {
+        val config = call.argument<String>("config")
+        if (config.isNullOrBlank()) {
+            result.success("""{"ok":false,"error":"пустая конфигурация"}""")
+            return
+        }
+        Thread({
+            val response = runCatching { TachyonCore.check(config) }
+                .getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
+            runOnUiThread { result.success(response) }
+        }, "tachyon-check").start()
+    }
+
+    /**
+     * Поднимает туннель.
+     *
+     * Перед стартом проверяется разрешение VPN: без него система покажет свой
+     * диалог, и ответ придёт в [onActivityResult].
+     */
+    private fun handleStart(call: MethodCall, result: MethodChannel.Result) {
+        val config = call.argument<String>("config")
+        if (config.isNullOrBlank()) {
+            result.success("пустая конфигурация")
+            return
+        }
+        val allowedApps = call.argument<List<String>>("allowedApps").orEmpty()
+        val disallowedApps = call.argument<List<String>>("disallowedApps").orEmpty()
+        val serverName = call.argument<String>("serverName").orEmpty()
+        val mtu = call.argument<Int>("mtu") ?: 9000
+
+        // Проверяем конфигурацию до запроса разрешения: если она невалидна,
+        // пользователю незачем показывать диалог VPN.
+        val check = runCatching { TachyonCore.check(config) }.getOrNull()
+        if (check == null) {
+            result.success("движок недоступен: ${TachyonCore.lastError()}")
+            return
+        }
+        val verdict = runCatching { JSONObject(check) }.getOrNull()
+        val accepted = verdict?.optBoolean("ok", false) ?: false
+        if (!accepted) {
+            val reason = verdict?.optString("error").orEmpty().ifEmpty { check }
+            result.success("конфигурация отклонена движком: $reason")
+            return
+        }
+
+        val prepare = VpnService.prepare(this)
+        if (prepare != null) {
+            pendingStart = PendingStart(config, allowedApps, disallowedApps, serverName, mtu, result)
+            vpnPermission.launch(prepare)
+            return
+        }
+        startTunnel(config, allowedApps, disallowedApps, serverName, mtu)
+        result.success(null)
+    }
+
+    /** Останавливает туннель. */
+    private fun handleStop(result: MethodChannel.Result) {
+        val intent = Intent(this, TachyonVpnService::class.java).setAction(
+            TachyonVpnService.ACTION_STOP,
+        )
+        startService(intent)
+        result.success(null)
+    }
+
+    /** Текущее состояние туннеля. */
+    private fun currentStatus(): Map<String, Any?> = mapOf(
+        "status" to TunnelStateHolder.stateName(),
+        "error" to (TunnelStateHolder.error ?: ""),
+        "server" to TunnelStateHolder.serverName,
+    )
+
+    /** Версия нативного ядра. */
+    private fun handleVersion(result: MethodChannel.Result) {
+        Thread({
+            val version = runCatching { TachyonCore.version() }.getOrNull()
+            runOnUiThread { result.success(version ?: "неизвестно") }
+        }, "tachyon-version").start()
+    }
+
+    /** Статистика трафика: байты и число соединений. */
+    private fun handleStats(result: MethodChannel.Result) {
+        Thread({
+            val stats = TachyonCore.stats()
+            runOnUiThread { result.success(stats) }
+        }, "tachyon-stats").start()
+    }
+
+    /** Хвост журнала ядра. */
+    private fun handleLogs(call: MethodCall, result: MethodChannel.Result) {
+        val limit = call.argument<Int>("limit") ?: 400
+        Thread({
+            val file = File(filesDir, LOG_FILE_NAME)
+            val lines = if (file.exists()) {
+                runCatching { file.readLines() }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            val tail = if (lines.size > limit) lines.subList(lines.size - limit, lines.size) else lines
+            runOnUiThread { result.success(tail) }
+        }, "tachyon-logs").start()
+    }
+
+    /** Очищает журнал ядра. */
+    private fun handleClearLogs(result: MethodChannel.Result) {
+        Thread({
+            val file = File(filesDir, LOG_FILE_NAME)
+            runCatching { if (file.exists()) file.writeText("") }
+            runOnUiThread { result.success(true) }
+        }, "tachyon-clear-logs").start()
+    }
+
+    /** Возвращает PNG-иконку приложения (64x64) с кэшированием в память. */
+    private fun handleAppIcon(call: MethodCall, result: MethodChannel.Result) {
+        val pkg = call.argument<String>("package")
+        if (pkg.isNullOrBlank()) {
+            result.success(null)
+            return
+        }
+        iconCache.get(pkg)?.let { cached ->
+            result.success(cached)
+            return
+        }
+        Thread({
+            val bytes = runCatching {
+                val drawable = packageManager.getApplicationIcon(pkg)
+                val size = 64
+                val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                drawable.setBounds(0, 0, size, size)
+                drawable.draw(canvas)
+                val stream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.PNG, 90, stream)
+                bitmap.recycle()
+                stream.toByteArray()
+            }.getOrNull()
+            if (bytes != null) {
+                iconCache.put(pkg, bytes)
+            }
+            runOnUiThread { result.success(bytes) }
+        }, "tachyon-icon").start()
+    }
+
+    /** Открывает системное меню «Поделиться» для текста/ссылки/резервной копии. */
+    private fun handleShareText(call: MethodCall, result: MethodChannel.Result) {
+        val text = call.argument<String>("text").orEmpty()
+        val subject = call.argument<String>("subject").orEmpty()
+        if (text.isEmpty()) {
+            result.success(false)
+            return
+        }
+        runCatching {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+                if (subject.isNotEmpty()) putExtra(Intent.EXTRA_SUBJECT, subject)
+            }
+            startActivity(Intent.createChooser(sendIntent, subject.ifEmpty { "Поделиться" }))
+        }
+        result.success(true)
+    }
+
+    /** Список установленных приложений — для правил по пакетам. */
+    private fun handleApps(result: MethodChannel.Result) {
+        val manager = packageManager
+        @Suppress("DEPRECATION")
+        val packages = manager.getInstalledPackages(0)
+        val ownPackage = packageName
+        val apps = packages
+            .filter { it.packageName != ownPackage }
+            .mapNotNull { info ->
+                // У части пакетов информации о приложении нет.
+                val application = info.applicationInfo ?: return@mapNotNull null
+                mapOf(
+                    "package" to info.packageName,
+                    "label" to runCatching {
+                        manager.getApplicationLabel(application).toString()
+                    }.getOrDefault(info.packageName),
+                    "system" to ((application.flags and ApplicationInfo.FLAG_SYSTEM) != 0),
+                )
+            }
+            .sortedBy { (it["label"] as String).lowercase() }
+        result.success(apps)
+    }
+
+    /** Запускает сервис с готовой конфигурацией. */
+    private fun startTunnel(
+        config: String,
+        allowedApps: List<String>,
+        disallowedApps: List<String>,
+        serverName: String,
+        mtu: Int,
+    ) {
+        val intent = Intent(this, TachyonVpnService::class.java).apply {
+            action = TachyonVpnService.ACTION_START
+            putExtra(TachyonVpnService.EXTRA_CONFIG, config)
+            putExtra(TachyonVpnService.EXTRA_SERVER_NAME, serverName)
+            putExtra(TachyonVpnService.EXTRA_MTU, mtu)
+            putStringArrayListExtra(
+                TachyonVpnService.EXTRA_ALLOWED_PACKAGES,
+                ArrayList(allowedApps),
+            )
+            putStringArrayListExtra(
+                TachyonVpnService.EXTRA_DISALLOWED_PACKAGES,
+                ArrayList(disallowedApps),
+            )
+        }
+        TunnelStateHolder.serverName = serverName
+        TunnelStateHolder.update(TunnelStateHolder.State.Starting, null)
+        startForegroundService(intent)
+    }
+
+    /** Отложенный запуск: ждём разрешения VPN от системы. */
+    private class PendingStart(
+        val config: String,
+        val allowedApps: List<String>,
+        val disallowedApps: List<String>,
+        val serverName: String,
+        val mtu: Int,
+        val result: MethodChannel.Result,
+    )
+
+    /** Экранирует текст ошибки для вставки в JSON. */
+    private fun escape(value: String?): String =
+        (value ?: "ошибка").replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ")
+
+    companion object {
+        private const val CHANNEL_VPN = "app.tachyon.proxy/vpn"
+        private const val CHANNEL_EVENTS = "app.tachyon.proxy/events"
+        private const val REQUEST_VPN_PERMISSION = 4711
+        private const val LOG_FILE_NAME = "tachyon.log"
+    }
+}

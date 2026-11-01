@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Знак приложения: круг с разрывом и вертикальной чертой - тот же
+         «диск включения», что и на главном экране. -->
+    <color name="ic_launcher_background">#0B0B0C</color>
+</resources>

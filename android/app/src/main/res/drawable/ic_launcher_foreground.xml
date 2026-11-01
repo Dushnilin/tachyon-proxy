@@ -1,22 +1,77 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Передний план знака Tachyon: стремительная молния в защитном кольце.
-     Контур держится в безопасной зоне 108x108 (центр 54,54). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Внешнее тонкое кольцо Morphe -->
+
+    <!-- Бирюзово-синее энергетическое кольцо Tachyon -->
     <path
-        android:pathData="M54,26 A28,28 0 1,1 53.99,26"
-        android:strokeColor="#3D3366"
-        android:strokeWidth="2.5" />
-    <!-- Молния Tachyon (акцентная подложка) -->
+        android:pathData="M54,25 A29,29 0 1,1 53.99,25"
+        android:strokeWidth="3.8">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="25"
+                android:startY="25"
+                android:endX="83"
+                android:endY="83"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#3B82F6" />
+                <item android:offset="1.0" android:color="#10B981" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Тёмный внутренний диск ядра -->
     <path
-        android:fillColor="#B9A8FF"
-        android:pathData="M58.5,28 L37,56 H52.5 L48.5,80 L71,52 H55.5 L58.5,28 Z" />
-    <!-- Яркое ядро молнии -->
+        android:pathData="M54,28 A26,26 0 1,1 53.99,28 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="26"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#17325C" />
+                <item android:offset="1.0" android:color="#090D1A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Тень под двухгранной молнией -->
     <path
-        android:fillColor="#F2F2F4"
-        android:pathData="M57,33 L41.5,54.5 H53.2 L50.2,74.5 L66.5,53.5 H54.8 L57,33 Z" />
+        android:fillColor="#66000000"
+        android:pathData="M58.4,33.2 L39.4,58.3 H52.3 L49.6,78.7 L68.6,53.6 H55.7 Z" />
+
+    <!-- Полный контур молнии (правая голубая грань) -->
+    <path
+        android:pathData="M58.4,31.2 L39.4,56.3 H52.3 L49.6,76.7 L68.6,51.6 H55.7 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="45"
+                android:startY="31"
+                android:endX="66"
+                android:endY="77"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#DBEAFE" />
+                <item android:offset="1.0" android:color="#60A5FA" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Левая светлая 3D-грань молнии -->
+    <path
+        android:pathData="M58.4,31.2 L39.4,56.3 H52.3 L55.7,51.6 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="40"
+                android:startY="31"
+                android:endX="56"
+                android:endY="56"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFFFF" />
+                <item android:offset="1.0" android:color="#E0F2FE" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

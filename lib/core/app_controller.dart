@@ -10,6 +10,7 @@ import 'models/runtime_config.dart';
 import 'models/tunnel_state.dart';
 import 'services/core_bridge.dart';
 import 'services/dns_benchmark.dart';
+import 'services/free_nodes_service.dart';
 import 'services/link_parser.dart';
 import 'services/lists_repository.dart';
 import 'services/settings_store.dart';
@@ -72,6 +73,25 @@ class AppController extends ChangeNotifier {
   /// Реальный HTTP 204 пинг через поднятый туннель (URL-Test).
   int? _urlTestPing;
   bool _testingUrlPing = false;
+  final List<int> _latencyHistory = List<int>.filled(24, 0, growable: true);
+
+  /// Данные выходного узла (Exit Node GeoIP), по аналогии с MSN-GUARD OrbitCards/ExitGeo.
+  String _exitIp = '';
+  String _exitCountry = '';
+  String _exitCity = '';
+  String _exitFlag = '⚡';
+  String _exitIsp = '';
+  bool _refreshingExitGeo = false;
+
+  /// Автоподбор оптимального MTU (MtuAutoScan).
+  bool _scanningMtu = false;
+  String _mtuScanStatus = '';
+
+  /// Автоподбор бесплатных туннелей (Cloudflare WARP AmneziaWG + SHARD пул).
+  bool _provisioningFreeNodes = false;
+  String _freeNodesStatus = '';
+  bool get provisioningFreeNodes => _provisioningFreeNodes;
+  String get freeNodesStatus => _freeNodesStatus;
 
   /// Автоподбор рецепта DPI (Desync).
   bool _testingDesync = false;
@@ -83,15 +103,18 @@ class AppController extends ChangeNotifier {
   int _consecutiveWatchdogFails = 0;
   String _lastNetType = '';
 
-  /// Версия приложения и состояние встроенного обновления ядра/APK.
-  static const String appVersion = '0.0.3';
+  /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
+  static const String appVersion = '0.0.4';
   bool _checkingUpdates = false;
+  bool _updatingEngine = false;
   bool _updatingApp = false;
+  bool _updatingLists = false;
   double _updateProgress = 0.0;
   String _updateStatusText = '';
   String _installedCoreVersion = '';
   String _latestCoreVersion = '';
   String _latestAppVersion = '';
+  String _latestCoreSoUrl = '';
 
   AppSettings get settings => _settings;
   TunnelState get tunnel => _tunnel;
@@ -118,12 +141,24 @@ class AppController extends ChangeNotifier {
   List<int> get upHistory => _upHistory;
   int? get urlTestPing => _urlTestPing;
   bool get testingUrlPing => _testingUrlPing;
+  List<int> get latencyHistory => _latencyHistory;
+  String get exitIp => _exitIp;
+  String get exitCountry => _exitCountry;
+  String get exitCity => _exitCity;
+  String get exitFlag => _exitFlag;
+  String get exitIsp => _exitIsp;
+  bool get refreshingExitGeo => _refreshingExitGeo;
+  bool get scanningMtu => _scanningMtu;
+  String get mtuScanStatus => _mtuScanStatus;
   bool get testingDesync => _testingDesync;
   String get desyncTestStatus => _desyncTestStatus;
   List<DesyncScanEntry> get desyncScanResults => _desyncScanResults;
   String get activeNetworkType => _lastNetType;
   bool get checkingUpdates => _checkingUpdates;
+  bool get updatingEngine => _updatingEngine;
   bool get updatingApp => _updatingApp;
+  bool get updatingLists => _updatingLists;
+  bool get isAnyUpdateRunning => _updatingEngine || _updatingApp || _updatingLists;
   double get updateProgress => _updateProgress;
   String get updateStatusText => _updateStatusText;
   String get installedCoreVersion => _installedCoreVersion;
@@ -300,8 +335,52 @@ class AppController extends ChangeNotifier {
       }
     }
 
+    await ensureRequiredListsDownloaded();
+
     if (needsDnsCheck) {
       await runDnsBenchmark();
+    }
+  }
+
+  /// Докачивает отсутствующие на диске `.trs` файлы из `tachyon-lists`
+  /// для всех активных `serviceRoutes` (YouTube, Discord, Telegram, Сайты РФ и др.)
+  /// и включённых пользователем списков `ruleSets`.
+  Future<void> ensureRequiredListsDownloaded() async {
+    if (filesDirPath.isEmpty) return;
+    final requiredIds = <String>{};
+    for (final service in BuiltInService.catalog) {
+      final route = _settings.serviceRoutes[service.id];
+      if (route != null && route.isNotEmpty && route != 'off') {
+        requiredIds.add(service.trsId);
+      }
+    }
+    for (final set in _settings.ruleSets) {
+      if (set.enabled) {
+        requiredIds.add(set.id);
+      }
+    }
+    var downloadedAny = false;
+    for (final id in requiredIds) {
+      final file = File(lists.pathFor(id));
+      if (!file.existsSync() || file.lengthSync() < 8) {
+        final res = await lists.download(id);
+        if (res.startsWith('/') || res.contains(RegExp(r'^[A-Z]:'))) {
+          downloadedAny = true;
+          final size = await lists.sizeOf(id);
+          final sets = _settings.ruleSets.map((set) {
+            if (set.id != id) return set;
+            return set.copyWith(
+              path: res,
+              sizeBytes: size,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            );
+          }).toList();
+          await _update(_settings.copyWith(ruleSets: sets));
+        }
+      }
+    }
+    if (downloadedAny && _tunnel.status.isActive) {
+      await _restartActiveTunnel();
     }
   }
 
@@ -358,13 +437,41 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Ожидает готовности локального mixed-прокси ядра (127.0.0.1:2080).
+  Future<bool> _waitForLocalProxyReady({
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        final s = await Socket.connect(
+          '127.0.0.1',
+          2080,
+          timeout: const Duration(milliseconds: 250),
+        );
+        s.destroy();
+        return true;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
+    }
+    return false;
+  }
+
   /// Перезапускает активный туннель с новой конфигурацией.
   Future<void> _restartActiveTunnel() async {
-    if (!_tunnel.status.isActive || _tunnel.status.isBusy) return;
+    for (var i = 0; i < 20 && _tunnel.status.isBusy; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (!_tunnel.status.isActive) return;
     await toggleTunnel();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    for (var i = 0; i < 20 && _tunnel.status.isBusy; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
     if (!_tunnel.status.isActive && !_tunnel.status.isBusy) {
       await toggleTunnel();
+      await _waitForLocalProxyReady();
     }
   }
 
@@ -976,6 +1083,9 @@ class AppController extends ChangeNotifier {
       routes[serviceId] = outbound;
     }
     await _update(_settings.copyWith(serviceRoutes: routes));
+    if (outbound.isNotEmpty && outbound != 'off') {
+      await ensureRequiredListsDownloaded();
+    }
     if (_tunnel.status.isActive) {
       await _restartActiveTunnel();
     }
@@ -984,6 +1094,9 @@ class AppController extends ChangeNotifier {
   /// Меняет режим по приложениям.
   Future<void> setAppsMode(AppsMode mode) async {
     await _update(_settings.copyWith(appsMode: mode));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Отмечает или снимает отметку с приложения.
@@ -995,20 +1108,37 @@ class AppController extends ChangeNotifier {
       packages.add(packageName);
     }
     await _update(_settings.copyWith(appPackages: packages));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Меняет параметры DNS.
   Future<void> setDns(DnsSettings dns) async {
     await _update(_settings.copyWith(dns: dns));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Включает или выключает список правил.
   Future<void> toggleRuleSet(String id) async {
+    var enabling = false;
     final sets = _settings.ruleSets.map((set) {
       if (set.id != id) return set;
+      enabling = !set.enabled;
       return set.copyWith(enabled: !set.enabled);
     }).toList();
     await _update(_settings.copyWith(ruleSets: sets));
+    if (enabling) {
+      final path = lists.pathFor(id);
+      if (path.isNotEmpty && !File(path).existsSync()) {
+        await downloadList(id);
+      }
+    }
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Меняет действие списка: в туннель, напрямую или блокировать.
@@ -1018,6 +1148,9 @@ class AppController extends ChangeNotifier {
       return set.copyWith(action: action);
     }).toList();
     await _update(_settings.copyWith(ruleSets: sets));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Обновляет каталог списков и подтягивает описание на диск.
@@ -1122,6 +1255,12 @@ class AppController extends ChangeNotifier {
       _downSpeed = 0;
       _prevTrafficAt = null;
       _urlTestPing = null;
+      _exitIp = '';
+      _exitCountry = '';
+      _exitCity = '';
+      _exitFlag = '';
+      _exitIsp = '';
+      _latencyHistory.clear();
       _tunnel = _tunnel.copyWith(
         status: VpnStatus.disconnected,
         clearStartedAt: true,
@@ -1130,6 +1269,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    await ensureRequiredListsDownloaded();
     final config = buildConfig();
     if (config == null) {
       _lastError = 'нет профиля или подписки';
@@ -1184,7 +1324,15 @@ class AppController extends ChangeNotifier {
         startedAt: _tunnel.startedAt ?? DateTime.now(),
       );
       unawaited(_pollTrafficOnce());
+      unawaited(refreshExitGeo());
     } else {
+      if (!state.status.isActive) {
+        _exitIp = '';
+        _exitCountry = '';
+        _exitCity = '';
+        _exitFlag = '';
+        _exitIsp = '';
+      }
       _tunnel = _withServer(state);
     }
     notifyListeners();
@@ -1208,9 +1356,23 @@ class AppController extends ChangeNotifier {
   }
 
   /// Приложения, исключённые из туннеля.
+  ///
+  /// Включает как список `AppsMode.deny`, так и приложения с точечным правилом
+  /// `direct` из `appRoutes` (чтобы их трафик гарантированно шёл мимо VPN даже на
+  /// ядрах Android с ограничением netlink UID-lookup).
   List<String> get _disallowedApps {
-    if (_settings.appsMode == AppsMode.deny) return _settings.appPackages;
-    return const [];
+    final set = <String>{};
+    if (_settings.appsMode == AppsMode.deny) {
+      set.addAll(_settings.appPackages);
+    }
+    if (_settings.appsMode != AppsMode.allow) {
+      for (final entry in _settings.appRoutes.entries) {
+        if (entry.value == 'direct' && entry.key.isNotEmpty) {
+          set.add(entry.key);
+        }
+      }
+    }
+    return set.toList(growable: false);
   }
 
   /// Проверяет конфигурацию движком, не запуская туннель.
@@ -1388,32 +1550,351 @@ class AppController extends ChangeNotifier {
     return importProfiles(raw.trim());
   }
 
+  /// Выполняет HTTPS-запрос через локальный mixed-инбаунд ядра (`127.0.0.1:2080`),
+  /// если туннель активен, и возвращает время отклика в мс (или `-1` при ошибке).
+  ///
+  /// Так как сам пакет `app.tachyon.tachyon_proxy` добавлен в `addDisallowedApplication`
+  /// в `TachyonVpnService` для защиты от петель маршрутизации, прямые сокеты из Dart
+  /// идут мимо TUN. Направление проверочного запроса в `127.0.0.1:2080` гарантирует,
+  /// что тест реально проходит через `tachyon-core` (включая `desync` и `proxy`).
+  Future<int> _probeHttpsViaCore(
+    String url, {
+    Duration timeout = const Duration(milliseconds: 2800),
+  }) async {
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..idleTimeout = const Duration(seconds: 1)
+      ..badCertificateCallback = (_, _, _) => true;
+    if (_tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
+    try {
+      final sw = Stopwatch()..start();
+      final req = await client.getUrl(Uri.parse(url)).timeout(timeout);
+      req.headers.set('Cache-Control', 'no-cache');
+      req.headers.set('Connection', 'close');
+      final resp = await req.close().timeout(timeout);
+      await resp.drain<void>().timeout(timeout);
+      sw.stop();
+      if (resp.statusCode > 0 && resp.statusCode < 500) {
+        return sw.elapsedMilliseconds;
+      }
+      return -1;
+    } catch (_) {
+      return -1;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Проверяет реальный сквозной HTTP 204 пинг через текущий маршрут/туннель.
   Future<int> testUrlPing() async {
     if (_testingUrlPing) return _urlTestPing ?? -1;
     _testingUrlPing = true;
     notifyListeners();
     var result = -1;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
     try {
-      final sw = Stopwatch()..start();
-      final req = await client.getUrl(Uri.parse('http://cp.cloudflare.com/generate_204'));
-      req.headers.set('Cache-Control', 'no-cache');
-      final resp = await req.close().timeout(const Duration(seconds: 5));
-      await resp.drain<void>();
-      sw.stop();
-      if (resp.statusCode == 204 || resp.statusCode == 200) {
-        result = sw.elapsedMilliseconds;
-      }
-    } catch (_) {
-      result = -1;
+      result = await _probeHttpsViaCore(
+        'http://cp.cloudflare.com/generate_204',
+        timeout: const Duration(seconds: 5),
+      );
     } finally {
-      client.close(force: true);
       _urlTestPing = result;
+      if (result > 0) {
+        if (_latencyHistory.length >= 24) _latencyHistory.removeAt(0);
+        _latencyHistory.add(result);
+      }
       _testingUrlPing = false;
       notifyListeners();
     }
     return result;
+  }
+
+  /// Определяет внешний IP-адрес, флаг страны, город и провайдера через активный туннель,
+  /// а также обновляет историю задержки для спарклайна `ExitNodeCard`.
+  Future<void> refreshExitGeo() async {
+    if (_refreshingExitGeo) return;
+    _refreshingExitGeo = true;
+    notifyListeners();
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 4)
+      ..idleTimeout = const Duration(seconds: 1)
+      ..badCertificateCallback = (_, _, _) => true;
+    if (_tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
+
+    try {
+      // Замеряем живой пинг параллельно с определением GeoIP
+      unawaited(testUrlPing());
+
+      Future<Map<String, dynamic>?> fetchJson(String url) async {
+        try {
+          final sw = Stopwatch()..start();
+          final req = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 4));
+          req.headers.set('Accept', 'application/json');
+          req.headers.set('User-Agent', 'Tachyon/0.0.4');
+          final resp = await req.close().timeout(const Duration(seconds: 4));
+          if (resp.statusCode != 200) {
+            await resp.drain<void>();
+            return null;
+          }
+          final body = await resp.transform(utf8.decoder).join().timeout(const Duration(seconds: 4));
+          sw.stop();
+          if (_latencyHistory.isEmpty && sw.elapsedMilliseconds > 0) {
+            _latencyHistory.add(sw.elapsedMilliseconds);
+            _urlTestPing ??= sw.elapsedMilliseconds;
+          }
+          final decoded = jsonDecode(body);
+          return decoded is Map<String, dynamic> ? decoded : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      var data = await fetchJson('https://ipwho.is/?lang=ru');
+      if (data != null && data['success'] != false && (data['ip'] as String?)?.isNotEmpty == true) {
+        _exitIp = (data['ip'] as String? ?? '').trim();
+        _exitCountry = (data['country'] as String? ?? '').trim();
+        _exitCity = (data['city'] as String? ?? '').trim();
+        final cc = (data['country_code'] as String? ?? '').trim().toUpperCase();
+        _exitFlag = _countryCodeToFlag(cc);
+        final conn = data['connection'];
+        _exitIsp = conn is Map ? (conn['isp']?.toString() ?? conn['org']?.toString() ?? '').trim() : '';
+      } else {
+        data = await fetchJson('http://ip-api.com/json/?fields=status,country,countryCode,city,isp,query&lang=ru');
+        if (data != null && data['status'] == 'success') {
+          _exitIp = (data['query'] as String? ?? '').trim();
+          _exitCountry = (data['country'] as String? ?? '').trim();
+          _exitCity = (data['city'] as String? ?? '').trim();
+          final cc = (data['countryCode'] as String? ?? '').trim().toUpperCase();
+          _exitFlag = _countryCodeToFlag(cc);
+          _exitIsp = (data['isp'] as String? ?? '').trim();
+        }
+      }
+    } finally {
+      client.close(force: true);
+      _refreshingExitGeo = false;
+      notifyListeners();
+    }
+  }
+
+  String _countryCodeToFlag(String code) {
+    if (code.length != 2) return '🌐';
+    final a = code.codeUnitAt(0);
+    final b = code.codeUnitAt(1);
+    if (a < 65 || a > 90 || b < 65 || b > 90) return '🌐';
+    return String.fromCharCodes([0x1F1E6 + (a - 65), 0x1F1E6 + (b - 65)]);
+  }
+
+  /// Автоподбор оптимального MTU для туннеля (по аналогии с MtuAutoScan в MSN-GUARD).
+  /// Проверяет кандидатов от 1280 до 1460 байт и выставляет самый быстрый и стабильный MTU.
+  Future<int> scanOptimalMtu() async {
+    if (_scanningMtu) return _settings.mtu;
+    _scanningMtu = true;
+    _mtuScanStatus = 'Подготовка сканирования MTU...';
+    notifyListeners();
+
+    const candidates = [1460, 1420, 1400, 1380, 1360, 1320, 1280];
+    final wasActive = _tunnel.status.isActive;
+    final originalMtu = _settings.mtu;
+    var bestMtu = 1400;
+    var bestScore = 999999;
+
+    try {
+      for (var i = 0; i < candidates.length; i++) {
+        final mtu = candidates[i];
+        _mtuScanStatus = 'Проверка MTU $mtu (${i + 1}/${candidates.length})...';
+        notifyListeners();
+
+        if (wasActive) {
+          final cfg = buildConfig();
+          if (cfg != null) {
+            final customCfg = RuntimeConfig(
+              profile: cfg.profile,
+              routingMode: cfg.routingMode,
+              dns: cfg.dns,
+              ruleSets: cfg.ruleSets,
+              logLevel: cfg.logLevel,
+              mtu: mtu,
+              desync: cfg.desync,
+              subscriptions: cfg.subscriptions,
+              filesDir: cfg.filesDir,
+              appRoutes: cfg.appRoutes,
+              serviceRoutes: cfg.serviceRoutes,
+              customRules: cfg.customRules,
+              allowLan: cfg.allowLan,
+              proxyOnly: cfg.proxyOnly,
+              detourProfile: cfg.detourProfile,
+              extraProfiles: cfg.extraProfiles,
+              proxyTlsFragment: cfg.proxyTlsFragment,
+            );
+            await bridge.start(
+              customCfg.encode(),
+              allowedApps: _allowedApps,
+              disallowedApps: _disallowedApps,
+              serverName: _tunnel.serverName,
+              mtu: mtu,
+              proxyOnly: _settings.proxyOnly,
+            );
+            await _waitForLocalProxyReady();
+          }
+        }
+
+        final r1 = await _probeHttpsViaCore(
+          'http://cp.cloudflare.com/generate_204',
+          timeout: const Duration(milliseconds: 1800),
+        );
+        final r2 = await _probeHttpsViaCore(
+          'https://www.gstatic.com/generate_204',
+          timeout: const Duration(milliseconds: 1800),
+        );
+
+        final valid = [if (r1 > 0) r1, if (r2 > 0) r2];
+        if (valid.isNotEmpty) {
+          final avg = valid.reduce((a, b) => a + b) ~/ valid.length;
+          // Бонус за больший пакет при прочих равных (меньше накладных расходов заголовков)
+          final penalty = valid.length == 2 ? 0 : 120;
+          final score = avg + penalty - ((mtu - 1280) ~/ 20);
+          if (score < bestScore) {
+            bestScore = score;
+            bestMtu = mtu;
+          }
+        }
+      }
+
+      await setMtu(bestMtu);
+      _mtuScanStatus = 'Оптимальный MTU: $bestMtu байт (${bestScore < 999999 ? "$bestScore мс" : "по умолчанию"})';
+      return bestMtu;
+    } catch (e) {
+      _mtuScanStatus = 'Ошибка автоподбора MTU: $e';
+      if (wasActive && _settings.mtu != originalMtu) {
+        await setMtu(originalMtu);
+      }
+      return originalMtu;
+    } finally {
+      _scanningMtu = false;
+      notifyListeners();
+    }
+  }
+
+  /// Генерирует бесплатный Cloudflare WARP с обфускацией AmneziaWG (Anti-DPI),
+  /// сканирует живые эндпоинты Cloudflare и выбирает самый быстрый узел.
+  Future<int> provisionFreeWarp() async {
+    if (_provisioningFreeNodes) return 0;
+    _provisioningFreeNodes = true;
+    _freeNodesStatus = 'Генерация бесплатного WARP (AmneziaWG)...';
+    notifyListeners();
+
+    try {
+      final service = FreeNodesService();
+      final generated = await service.generateWarpProfiles(
+        useLocalProxy: _tunnel.status.isActive,
+        onStatus: (msg) {
+          _freeNodesStatus = msg;
+          notifyListeners();
+        },
+      );
+      if (generated.isEmpty) {
+        _freeNodesStatus = 'Не удалось создать профили WARP';
+        return 0;
+      }
+
+      const subId = 'free-warp';
+      final otherSubs = _settings.subscriptions
+          .where((s) => s.id != subId)
+          .toList();
+      final warpSub = SubscriptionEntry(
+        id: subId,
+        url: 'https://api.cloudflareclient.com/warp',
+        name: '⚡ Cloudflare WARP (AmneziaWG)',
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
+      );
+      final otherProfiles = _settings.profiles
+          .where((p) => p.subscriptionId != subId)
+          .toList();
+      final mergedProfiles = [...generated, ...otherProfiles];
+
+      await _update(
+        _settings.copyWith(
+          subscriptions: [warpSub, ...otherSubs],
+          profiles: mergedProfiles,
+          selectedProfileId: generated.first.id,
+        ),
+      );
+      if (_tunnel.status.isActive) {
+        await _restartActiveTunnel();
+      }
+      _freeNodesStatus =
+          'Готово: создано ${generated.length} узлов WARP AmneziaWG, выбран ${generated.first.name}';
+      return generated.length;
+    } catch (e) {
+      _freeNodesStatus = 'Ошибка генерации WARP: $e';
+      return 0;
+    } finally {
+      _provisioningFreeNodes = false;
+      notifyListeners();
+    }
+  }
+
+  /// Скачивает пул бесплатных узлов SHARD (как в MSN-GUARD), размножает по живым
+  /// Cloudflare Edge IP, проводит параллельную гонку (Race) и выбирает лучший узел.
+  Future<int> provisionFreeShardNodes() async {
+    if (_provisioningFreeNodes) return 0;
+    _provisioningFreeNodes = true;
+    _freeNodesStatus = 'Подключение к пулу бесплатных узлов SHARD...';
+    notifyListeners();
+
+    try {
+      final service = FreeNodesService();
+      final winners = await service.fetchAndRaceShardNodes(
+        useLocalProxy: _tunnel.status.isActive,
+        onStatus: (msg) {
+          _freeNodesStatus = msg;
+          notifyListeners();
+        },
+      );
+      if (winners.isEmpty) {
+        _freeNodesStatus = 'Не удалось загрузить пул бесплатных узлов';
+        return 0;
+      }
+
+      const subId = 'free-shard';
+      final otherSubs = _settings.subscriptions
+          .where((s) => s.id != subId)
+          .toList();
+      final shardSub = SubscriptionEntry(
+        id: subId,
+        url: FreeNodesService.shardSources.first,
+        name: '⚡ Бесплатный пул (SHARD · CF Edge)',
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
+      );
+      final otherProfiles = _settings.profiles
+          .where((p) => p.subscriptionId != subId)
+          .toList();
+      final mergedProfiles = [...winners, ...otherProfiles];
+
+      await _update(
+        _settings.copyWith(
+          subscriptions: [shardSub, ...otherSubs],
+          profiles: mergedProfiles,
+          selectedProfileId: winners.first.id,
+        ),
+      );
+      if (_tunnel.status.isActive) {
+        await _restartActiveTunnel();
+      }
+      _freeNodesStatus =
+          'Подобран лучший узел: ${winners.first.name} (всего ${winners.length})';
+      return winners.length;
+    } catch (e) {
+      _freeNodesStatus = 'Ошибка автоподбора SHARD: $e';
+      return 0;
+    } finally {
+      _provisioningFreeNodes = false;
+      notifyListeners();
+    }
   }
 
   /// Пингует серверы и автоматически переключается на самый быстрый рабочий сервер.
@@ -1462,6 +1943,9 @@ class AppController extends ChangeNotifier {
   Future<void> addCustomRule(CustomRule rule) async {
     final list = [..._settings.customRules.where((r) => r.id != rule.id), rule];
     await _update(_settings.copyWith(customRules: list));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Переключает активность пользовательского правила.
@@ -1470,6 +1954,9 @@ class AppController extends ChangeNotifier {
         .map((r) => r.id == id ? r.copyWith(enabled: !r.enabled) : r)
         .toList(growable: false);
     await _update(_settings.copyWith(customRules: list));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Меняет действие пользовательского правила (proxy / direct / desync / block).
@@ -1478,57 +1965,28 @@ class AppController extends ChangeNotifier {
         .map((r) => r.id == id ? r.copyWith(action: action) : r)
         .toList(growable: false);
     await _update(_settings.copyWith(customRules: list));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Удаляет пользовательское правило.
   Future<void> removeCustomRule(String id) async {
     final list = _settings.customRules.where((r) => r.id != id).toList(growable: false);
     await _update(_settings.copyWith(customRules: list));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Автоподбор оптимального рецепта Desync путём проверки TLS-соединения с YouTube/Discord.
   Future<String> autoPickDesyncPreset() async {
-    if (_testingDesync) return _settings.desync.preset;
-    _testingDesync = true;
-    _desyncTestStatus = 'Проверка доступности YouTube / GStatic...';
-    notifyListeners();
-    try {
-      final probeHosts = [
-        'rr1---sn-gvnuxaxjvh-n8me.googlevideo.com',
-        'www.youtube.com',
-        'discord.com',
-      ];
-      var directWorks = false;
-      for (final host in probeHosts) {
-        try {
-          final sock = await SecureSocket.connect(
-            host,
-            443,
-            timeout: const Duration(milliseconds: 1800),
-          );
-          await sock.close();
-          directWorks = true;
-          break;
-        } catch (_) {}
-      }
-      final chosen = directWorks ? 'fake_split' : 'fake_disorder';
-      final fool = directWorks ? 'autottl' : 'md5';
-      await setDesync(_settings.desync.copyWith(
-        enabled: true,
-        preset: chosen,
-        fooling: fool,
-        autoTune: true,
-      ));
-      _desyncTestStatus = 'Выбран рецепт: $chosen ($fool)';
-      return chosen;
-    } finally {
-      _testingDesync = false;
-      notifyListeners();
-    }
+    final winner = await scanAllDesyncStrategies();
+    return winner?.preset ?? _settings.desync.preset;
   }
 
   /// Глубокий сканер (Снайпер) стратегий Desync: тестирует 6 боевых связок
-  /// `preset × fooling` с замером времени TLS/HTTPS рукопожатия.
+  /// `preset × fooling` с замером реального HTTPS-прохождения через `tachyon-core` (`127.0.0.1:2080`).
   Future<DesyncScanEntry?> scanAllDesyncStrategies() async {
     if (_testingDesync) return null;
     _testingDesync = true;
@@ -1547,6 +2005,7 @@ class AppController extends ChangeNotifier {
 
     final results = <DesyncScanEntry>[];
     DesyncScanEntry? best;
+    final prevRoutingMode = _settings.routingMode;
 
     try {
       final netType = await bridge.networkType();
@@ -1557,46 +2016,33 @@ class AppController extends ChangeNotifier {
         _desyncTestStatus = '[${i + 1}/${candidates.length}] Тест $label...';
         notifyListeners();
 
-        // Применяем кандидата
+        // На время замера принудительно направляем трафик в desync и отключаем autoTune,
+        // чтобы ядро применило именно тестируемую пару preset + fooling.
         await _update(_settings.copyWith(
+          routingMode: RoutingMode.desync,
           desync: _settings.desync.copyWith(
             enabled: true,
             preset: preset,
             fooling: fooling,
-            autoTune: true,
+            autoTune: false,
           ),
         ));
         if (_tunnel.status.isActive) {
           await _restartActiveTunnel();
-          await Future<void>.delayed(const Duration(milliseconds: 500));
+        } else {
+          await toggleTunnel();
+          await _waitForLocalProxyReady();
         }
 
-        // Замеряем скорость TLS-рукопожатия к YouTube и Discord
-        var ytMs = -1;
-        var dcMs = -1;
-        try {
-          final sw = Stopwatch()..start();
-          final s = await SecureSocket.connect(
-            'www.youtube.com',
-            443,
-            timeout: const Duration(milliseconds: 2200),
-          );
-          sw.stop();
-          await s.close();
-          ytMs = sw.elapsedMilliseconds;
-        } catch (_) {}
-
-        try {
-          final sw = Stopwatch()..start();
-          final s = await SecureSocket.connect(
-            'discord.com',
-            443,
-            timeout: const Duration(milliseconds: 2200),
-          );
-          sw.stop();
-          await s.close();
-          dcMs = sw.elapsedMilliseconds;
-        } catch (_) {}
+        // Замеряем скорость реального HTTPS-ответа от YouTube и Discord через 127.0.0.1:2080
+        final ytMs = await _probeHttpsViaCore(
+          'https://www.youtube.com/generate_204',
+          timeout: const Duration(milliseconds: 2600),
+        );
+        final dcMs = await _probeHttpsViaCore(
+          'https://discord.com/api/v9/experiments',
+          timeout: const Duration(milliseconds: 2600),
+        );
 
         final scoreMs = (ytMs >= 0 && dcMs >= 0)
             ? ((ytMs + dcMs) ~/ 2)
@@ -1620,18 +2066,28 @@ class AppController extends ChangeNotifier {
 
       final winnerPreset = best?.preset ?? 'fake_disorder';
       final winnerFooling = best?.fooling ?? 'autottl';
-      await setDesync(_settings.desync.copyWith(
-        enabled: true,
-        preset: winnerPreset,
-        fooling: winnerFooling,
-        wifiPreset: netType == 'wifi' ? winnerPreset : _settings.desync.wifiPreset,
-        cellularPreset: netType == 'cellular' ? winnerPreset : _settings.desync.cellularPreset,
+      await _update(_settings.copyWith(
+        routingMode: prevRoutingMode,
+        desync: _settings.desync.copyWith(
+          enabled: true,
+          preset: winnerPreset,
+          fooling: winnerFooling,
+          autoTune: true,
+          wifiPreset: netType == 'wifi' ? winnerPreset : _settings.desync.wifiPreset,
+          cellularPreset: netType == 'cellular' ? winnerPreset : _settings.desync.cellularPreset,
+        ),
       ));
+      if (_tunnel.status.isActive) {
+        await _restartActiveTunnel();
+      }
       _desyncTestStatus = best != null
           ? 'Лучший: ${best.label} (${best.avgMs} мс)'
           : 'Применён надёжный профиль: $winnerPreset ($winnerFooling)';
       return best;
     } finally {
+      if (_settings.routingMode != prevRoutingMode) {
+        await _update(_settings.copyWith(routingMode: prevRoutingMode));
+      }
       _testingDesync = false;
       notifyListeners();
     }
@@ -1645,6 +2101,9 @@ class AppController extends ChangeNotifier {
       final prev = routes.length;
       routes.clear();
       await _update(_settings.copyWith(appRoutes: routes));
+      if (_tunnel.status.isActive) {
+        await _restartActiveTunnel();
+      }
       return prev;
     }
     const ruKeywords = [
@@ -1726,12 +2185,20 @@ class AppController extends ChangeNotifier {
       }
     }
     await _update(_settings.copyWith(appRoutes: routes));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
     return count;
   }
 
   /// Настройки MTU, Allow LAN, автозапуска и автообновления подписок.
   Future<void> setMtu(int mtu) => _update(_settings.copyWith(mtu: mtu));
-  Future<void> setAllowLan(bool value) => _update(_settings.copyWith(allowLan: value));
+  Future<void> setAllowLan(bool value) async {
+    await _update(_settings.copyWith(allowLan: value));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
+  }
   Future<void> setAutoStart(bool value) => _update(_settings.copyWith(autoStart: value));
   Future<void> setAutoUpdateSubs(bool value) =>
       _update(_settings.copyWith(autoUpdateSubs: value));
@@ -1812,6 +2279,9 @@ class AppController extends ChangeNotifier {
       routes[packageName] = outbound;
     }
     await _update(_settings.copyWith(appRoutes: routes));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
   }
 
   /// Проверяет доступность и задержку сервера профиля с учётом TLS/Reality-рукопожатия.
@@ -2005,6 +2475,12 @@ class AppController extends ChangeNotifier {
     try {
       final currCore = await bridge.coreVersion();
       _installedCoreVersion = currCore.replaceFirst(RegExp(r'^v'), '').trim();
+      final abi = await bridge.deviceAbi();
+      final abiSuffix = switch (abi) {
+        'armeabi-v7a' || 'armeabi' => 'armeabi-v7a',
+        'x86_64' => 'x86_64',
+        _ => 'arm64-v8a',
+      };
 
       // 1. Проверяем последний релиз ядра Dushnilin/tachyon-core
       final coreReq = await client.getUrl(
@@ -2018,6 +2494,21 @@ class AppController extends ChangeNotifier {
         final json = jsonDecode(body);
         if (json is Map && json['tag_name'] != null) {
           _latestCoreVersion = json['tag_name'].toString().replaceFirst(RegExp(r'^v'), '').trim();
+          final assets = json['assets'];
+          if (assets is List) {
+            for (final a in assets) {
+              if (a is Map) {
+                final name = (a['name'] ?? '').toString().toLowerCase();
+                final dlUrl = (a['browser_download_url'] ?? '').toString();
+                if (dlUrl.isNotEmpty &&
+                    name.endsWith('.so') &&
+                    name.contains(abiSuffix.toLowerCase())) {
+                  _latestCoreSoUrl = dlUrl;
+                  break;
+                }
+              }
+            }
+          }
         }
       } else {
         await coreResp.drain();
@@ -2082,16 +2573,73 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Скачивает и устанавливает обновление движка (`libtachyon.so`) или всего приложения (`APK`)
-  /// прямо из интерфейса приложения.
-  Future<void> installUpdate({bool preferEngineOnly = false}) async {
-    if (_updatingApp) return;
-    _updatingApp = true;
-    _updateProgress = 0.02;
-    _updateStatusText = 'Определение архитектуры устройства...';
+  /// Вспомогательный загрузчик файлов с поддержкой GitHub-редиректов и прогресс-бара.
+  Future<bool> _downloadUpdateFile(
+    HttpClient client,
+    String url,
+    File targetFile,
+    String label,
+  ) async {
+    _updateStatusText = '$label...';
+    _updateProgress = 0.05;
     notifyListeners();
 
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    var currUrl = url;
+    HttpClientResponse? resp;
+    for (var i = 0; i < 6; i++) {
+      final req = await client.getUrl(Uri.parse(currUrl));
+      req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+      req.followRedirects = false;
+      resp = await req.close();
+      if (resp.statusCode >= 300 && resp.statusCode < 400) {
+        final loc = resp.headers.value(HttpHeaders.locationHeader);
+        await resp.drain();
+        if (loc != null && loc.isNotEmpty) {
+          currUrl = Uri.parse(currUrl).resolve(loc).toString();
+          continue;
+        }
+      }
+      break;
+    }
+    if (resp == null || resp.statusCode != 200) {
+      await resp?.drain();
+      return false;
+    }
+    final total = resp.contentLength;
+    var received = 0;
+    final sink = targetFile.openWrite();
+    await for (final chunk in resp) {
+      sink.add(chunk);
+      received += chunk.length;
+      if (total > 0) {
+        _updateProgress = (received / total).clamp(0.05, 0.98);
+        final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+        final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
+        final pct = (_updateProgress * 100).round();
+        _updateStatusText = '$label: $mb / $totalMb МБ ($pct%)';
+        notifyListeners();
+      }
+    }
+    await sink.flush();
+    await sink.close();
+    return targetFile.existsSync() && targetFile.lengthSync() > 500000;
+  }
+
+  /// Отдельное обновление ТОЛЬКО нативного ядра (`libtachyon.so`) через внутренний загрузчик.
+  Future<void> updateEngineOnly() async {
+    if (isAnyUpdateRunning) return;
+    _updatingEngine = true;
+    _updateProgress = 0.02;
+    _updateStatusText = 'Подготовка загрузчика ядра tachyon-core...';
+    notifyListeners();
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..badCertificateCallback = (_, _, _) => true;
+    if (_tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
+
     try {
       final abi = await bridge.deviceAbi();
       final fDir = await bridge.filesDir();
@@ -2110,80 +2658,101 @@ class AppController extends ChangeNotifier {
         _ => 'arm64-v8a',
       };
 
-      Future<bool> downloadFile(String url, File targetFile, String label) async {
-        _updateStatusText = '$label...';
-        _updateProgress = 0.05;
-        notifyListeners();
+      final soFile = File('${updateDir.path}/libtachyon.so');
+      final candidateUrls = <String>[
+        if (_latestCoreSoUrl.isNotEmpty) _latestCoreSoUrl,
+        'https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
+        'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
+      ];
 
-        var currUrl = url;
-        HttpClientResponse? resp;
-        for (var i = 0; i < 6; i++) {
-          final req = await client.getUrl(Uri.parse(currUrl));
-          req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
-          req.followRedirects = false;
-          resp = await req.close();
-          if (resp.statusCode >= 300 && resp.statusCode < 400) {
-            final loc = resp.headers.value(HttpHeaders.locationHeader);
-            await resp.drain();
-            if (loc != null && loc.isNotEmpty) {
-              currUrl = Uri.parse(currUrl).resolve(loc).toString();
-              continue;
-            }
-          }
-          break;
-        }
-        if (resp == null || resp.statusCode != 200) {
-          await resp?.drain();
-          return false;
-        }
-        final total = resp.contentLength;
-        var received = 0;
-        final sink = targetFile.openWrite();
-        await for (final chunk in resp) {
-          sink.add(chunk);
-          received += chunk.length;
-          if (total > 0) {
-            _updateProgress = (received / total).clamp(0.05, 0.98);
-            final mb = (received / (1024 * 1024)).toStringAsFixed(1);
-            final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
-            _updateStatusText = '$label ($mb / $totalMb МБ)';
-            notifyListeners();
-          }
-        }
-        await sink.flush();
-        await sink.close();
-        return targetFile.existsSync() && targetFile.lengthSync() > 500000;
+      var downloaded = false;
+      for (final soUrl in candidateUrls) {
+        downloaded = await _downloadUpdateFile(
+          client,
+          soUrl,
+          soFile,
+          'Скачивание ядра libtachyon ($abiSuffix)',
+        );
+        if (downloaded) break;
       }
 
-      if (preferEngineOnly) {
-        final soFile = File('${updateDir.path}/libtachyon.so');
-        final soUrl =
-            'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so';
-        final okSo = await downloadFile(soFile.existsSync() ? soUrl : soUrl, soFile, 'Скачивание движка ($abiSuffix)');
-        if (okSo) {
-          _updateStatusText = 'Применение нового ядра...';
-          _updateProgress = 0.99;
-          notifyListeners();
-          if (_tunnel.status.isActive) {
-            await bridge.stop();
-          }
-          final res = await bridge.installEngineSo(soFile.path);
-          if (res == 'ok') {
-            _updateStatusText = 'Движок обновлён — перезапуск...';
-            notifyListeners();
-            return;
-          }
-        }
+      if (!downloaded) {
+        _updateStatusText =
+            'Не удалось скачать бинарник ядра libtachyon-$abiSuffix.so с GitHub Releases';
+        return;
       }
 
-      // Скачиваем и запускаем установку свежего APK со встроенным ядром
+      _updateStatusText = 'Горячая установка нового ядра в загрузчик...';
+      _updateProgress = 0.99;
+      notifyListeners();
+      if (_tunnel.status.isActive) {
+        await bridge.stop();
+      }
+      final res = await bridge.installEngineSo(soFile.path);
+      if (res == 'ok') {
+        _updateProgress = 1.0;
+        _updateStatusText = 'Ядро tachyon-core успешно обновлено — перезапуск...';
+      } else if (res == 'requires_apk') {
+        _updateStatusText =
+            'Политика SELinux вашей прошивки блокирует подмену .so из кэша — используйте «Обновить приложение (APK)»';
+      } else {
+        _updateStatusText = 'Ошибка установки ядра: $res';
+      }
+    } catch (e) {
+      _updateStatusText = 'Ошибка обновления ядра: $e';
+    } finally {
+      client.close(force: true);
+      _updatingEngine = false;
+      notifyListeners();
+    }
+  }
+
+  /// Отдельное обновление ТОЛЬКО приложения (`APK`) через системный установщик Android.
+  Future<void> updateAppOnly() async {
+    if (isAnyUpdateRunning) return;
+    _updatingApp = true;
+    _updateProgress = 0.02;
+    _updateStatusText = 'Подготовка загрузчика APK...';
+    notifyListeners();
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..badCertificateCallback = (_, _, _) => true;
+    if (_tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
+
+    try {
+      final abi = await bridge.deviceAbi();
+      final fDir = await bridge.filesDir();
+      if (fDir.isEmpty) {
+        _updateStatusText = 'Ошибка: каталог приложения недоступен';
+        return;
+      }
+      final updateDir = Directory('$fDir/update');
+      if (!updateDir.existsSync()) {
+        updateDir.createSync(recursive: true);
+      }
+
+      final abiSuffix = switch (abi) {
+        'armeabi-v7a' || 'armeabi' => 'armeabi-v7a',
+        'x86_64' => 'x86_64',
+        _ => 'arm64-v8a',
+      };
+
       const apkName = 'tachyon-update.apk';
       final apkFile = File('${updateDir.path}/$apkName');
       final apkUrl =
           'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk';
-      final okApk = await downloadFile(apkUrl, apkFile, 'Скачивание обновления ($abiSuffix)');
+      final okApk = await _downloadUpdateFile(
+        client,
+        apkUrl,
+        apkFile,
+        'Скачивание APK приложения ($abiSuffix)',
+      );
       if (!okApk) {
-        _updateStatusText = 'Не удалось скачать пакет обновления с GitHub Releases';
+        _updateStatusText =
+            'Не удалось скачать APK приложения с GitHub Releases';
         return;
       }
 
@@ -2192,18 +2761,79 @@ class AppController extends ChangeNotifier {
       notifyListeners();
       final res = await bridge.installApk(apkName);
       if (res != 'ok') {
-        _updateStatusText = 'Ошибка установки: $res';
+        _updateStatusText = 'Ошибка установки APK: $res';
       } else {
-        _updateStatusText = 'Подтвердите установку обновления в окне Android';
+        _updateStatusText =
+            'Пакет скачан — подтвердите установку обновления в окне Android';
       }
     } catch (e) {
-      _updateStatusText = 'Ошибка обновления: $e';
+      _updateStatusText = 'Ошибка обновления APK: $e';
     } finally {
       client.close(force: true);
       _updatingApp = false;
       notifyListeners();
     }
   }
+
+  /// Отдельное обновление всех списков маршрутизации (`tachyon-lists` `.trs`).
+  Future<void> updateListsOnly() async {
+    if (isAnyUpdateRunning) return;
+    _updatingLists = true;
+    _updateProgress = 0.05;
+    _updateStatusText = 'Обновление каталога tachyon-lists...';
+    notifyListeners();
+
+    try {
+      await refreshLists();
+      final idsToUpdate = <String>{};
+      for (final entry in _settings.serviceRoutes.entries) {
+        if (entry.value.isNotEmpty && entry.value != 'off') {
+          final svc = BuiltInService.catalog
+              .where((s) => s.id == entry.key)
+              .firstOrNull;
+          if (svc != null && svc.trsId.isNotEmpty) {
+            idsToUpdate.add(svc.trsId);
+          }
+        }
+      }
+      for (final rs in _settings.ruleSets) {
+        if (rs.enabled || rs.sizeBytes > 0) {
+          idsToUpdate.add(rs.id);
+        }
+      }
+      if (idsToUpdate.isEmpty) {
+        for (final svc in BuiltInService.catalog) {
+          idsToUpdate.add(svc.trsId);
+        }
+      }
+
+      final list = idsToUpdate.toList();
+      for (var i = 0; i < list.length; i++) {
+        final id = list[i];
+        _updateProgress = ((i + 1) / list.length).clamp(0.1, 0.99);
+        _updateStatusText =
+            'Скачивание списка $id.trs (${i + 1}/${list.length})...';
+        notifyListeners();
+        await downloadList(id);
+      }
+
+      if (_tunnel.status.isActive) {
+        await _restartActiveTunnel();
+      }
+      _updateProgress = 1.0;
+      _updateStatusText =
+          'Списки tachyon-lists успешно обновлены (${list.length} шт.)';
+    } catch (e) {
+      _updateStatusText = 'Ошибка обновления списков: $e';
+    } finally {
+      _updatingLists = false;
+      notifyListeners();
+    }
+  }
+
+  /// Совместимый метод установки обновления.
+  Future<void> installUpdate({bool preferEngineOnly = false}) =>
+      preferEngineOnly ? updateEngineOnly() : updateAppOnly();
 
   /// Список установленных приложений.
   Future<List<InstalledApp>> installedApps() => bridge.installedApps();

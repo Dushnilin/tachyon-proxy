@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tachyon_proxy/core/models/app_rules.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/models/tunnel_state.dart';
 import 'package:tachyon_proxy/core/services/dns_benchmark.dart';
+import 'package:tachyon_proxy/core/services/free_nodes_service.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
 
 Profile _vlessProfile() => const Profile(
@@ -653,6 +656,91 @@ proxies:
       expect(hopTr['x_padding_bytes'], '100-1000');
       expect((hopTr['xmux'] as Map)['max_concurrency'], '16-32');
       expect((hopTr['xmux'] as Map).containsKey('max_connections'), isFalse);
+    });
+
+    test('RoutingMode.rules с YouTube -> desync использует FakeIP, reverse_mapping и списки tachyon-lists (.trs)', () {
+      final tmpDir = Directory.systemTemp.createTempSync('tachyon_trs_test_');
+      try {
+        final listsDir = Directory('${tmpDir.path}/lists')..createSync(recursive: true);
+        File('${listsDir.path}/youtube.trs').writeAsBytesSync([1, 2, 3, 4]);
+        File('${listsDir.path}/telegram.trs').writeAsBytesSync([1, 2, 3, 4]);
+
+        final cfg = RuntimeConfig(
+          profile: _vlessProfile(),
+          routingMode: RoutingMode.rules,
+          dns: const DnsSettings(fakeIp: true),
+          ruleSets: const [],
+          filesDir: tmpDir.path,
+          serviceRoutes: const {'youtube': 'desync', 'telegram': 'proxy'},
+        ).toJson();
+
+        final dns = cfg['dns'] as Map<String, dynamic>;
+        expect(dns['reverse_mapping'], isTrue);
+        final dnsRules = (dns['rules'] as List).cast<Map<String, dynamic>>();
+        // Домены desync не должны уходить в dns-direct в обход FakeIP
+        final directBeforeFakeIp = dnsRules
+            .takeWhile((r) => r['server'] != 'dns-fakeip')
+            .where((r) => r['server'] == 'dns-direct')
+            .toList();
+        for (final r in directBeforeFakeIp) {
+          final suffixes = (r['domain_suffix'] as List?) ?? const [];
+          expect(suffixes.contains('youtube.com'), isFalse);
+        }
+
+        // Проверяем, что списки youtube.trs и telegram.trs из tachyon-lists подключены как rule_set
+        final ruleSets = ((cfg['route'] as Map)['rule_set'] as List).cast<Map<String, dynamic>>();
+        expect(ruleSets.any((rs) => rs['tag'] == 'youtube' && rs['format'] == 'trs'), isTrue);
+        expect(ruleSets.any((rs) => rs['tag'] == 'telegram' && rs['format'] == 'trs'), isTrue);
+
+        final routeRules = ((cfg['route'] as Map)['rules'] as List).cast<Map<String, dynamic>>();
+        expect(
+          routeRules.any((r) =>
+              r['outbound'] == 'desync' &&
+              ((r['rule_set'] as List?)?.contains('youtube') ?? false)),
+          isTrue,
+        );
+        expect(
+          routeRules.any((r) =>
+              r['outbound'] == 'proxy' &&
+              ((r['rule_set'] as List?)?.contains('telegram') ?? false)),
+          isTrue,
+        );
+
+        // Локальный прокси 127.0.0.1:2080 всегда присутствует для внутренних проверок
+        final inbounds = (cfg['inbounds'] as List).cast<Map<String, dynamic>>();
+        final lanIn = inbounds.firstWhere((i) => i['tag'] == 'lan-in');
+        expect(lanIn['listen'], '127.0.0.1');
+        expect(lanIn['listen_port'], 2080);
+      } finally {
+        tmpDir.deleteSync(recursive: true);
+      }
+    });
+
+    test('RoutingMode.rules при включённом desync.enabled ставит final=desync', () {
+      final cfgWithDesyncFinal = RuntimeConfig(
+        profile: _vlessProfile(),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        desync: const DesyncSettings(enabled: true),
+      ).toJson();
+      expect((cfgWithDesyncFinal['route'] as Map)['final'], 'desync');
+
+      final cfgWithProxyFinal = RuntimeConfig(
+        profile: _vlessProfile(),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        desync: const DesyncSettings(enabled: false),
+      ).toJson();
+      expect((cfgWithProxyFinal['route'] as Map)['final'], 'proxy');
+    });
+
+    test('FreeNodesService.generateX25519KeyPair генерирует валидные 32-байтные ключи Curve25519', () {
+      final kp = FreeNodesService.generateX25519KeyPair();
+      expect(kp.privateKey.isNotEmpty, isTrue);
+      expect(kp.publicKey.isNotEmpty, isTrue);
+      expect(kp.privateKey, isNot(equals(kp.publicKey)));
     });
   });
 }

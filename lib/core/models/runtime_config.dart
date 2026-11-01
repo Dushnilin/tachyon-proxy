@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 /// Профиль подключения: сервер и параметры исходящего соединения.
 ///
@@ -954,10 +955,11 @@ enum RoutingMode {
 }
 
 /// Встроенный пресет популярного сервиса для быстрой точечной настройки
-/// (например: YouTube -> Desync, Discord -> Desync, остальное -> Прокси).
+/// (напрямую связан со списками `.trs` из `tachyon-lists`).
 class BuiltInService {
   const BuiltInService({
     required this.id,
+    required this.trsId,
     required this.title,
     required this.subtitle,
     required this.domains,
@@ -965,6 +967,9 @@ class BuiltInService {
   });
 
   final String id;
+
+  /// Идентификатор соответствующего списка `.trs` в репозитории `tachyon-lists`.
+  final String trsId;
   final String title;
   final String subtitle;
   final List<String> domains;
@@ -973,8 +978,9 @@ class BuiltInService {
   static const List<BuiltInService> catalog = [
     BuiltInService(
       id: 'youtube',
+      trsId: 'youtube',
       title: 'YouTube',
-      subtitle: 'Видео, Shorts, YouTube Music (googlevideo.com, youtube.com)',
+      subtitle: 'tachyon-lists/youtube.trs (Видео, Shorts, YouTube Music)',
       domains: [
         'youtube.com',
         'youtu.be',
@@ -982,6 +988,8 @@ class BuiltInService {
         'ytimg.com',
         'ggpht.com',
         'youtubei.googleapis.com',
+        'jnn-pa.googleapis.com',
+        'quake-pa.googleapis.com',
         'youtube-nocookie.com',
         'withyoutube.com',
       ],
@@ -994,8 +1002,9 @@ class BuiltInService {
     ),
     BuiltInService(
       id: 'discord',
+      trsId: 'discord',
       title: 'Discord',
-      subtitle: 'Сообщения, медиа и голосовые каналы',
+      subtitle: 'tachyon-lists/discord.trs (Домены + голосовые подсети)',
       domains: [
         'discord.com',
         'discordapp.com',
@@ -1003,16 +1012,17 @@ class BuiltInService {
         'discord.gg',
         'discord.media',
         'discordcdn.com',
-        'discordstatus.com',
       ],
       packages: ['com.discord'],
     ),
     BuiltInService(
       id: 'telegram',
+      trsId: 'telegram',
       title: 'Telegram',
-      subtitle: 'Мессенджер, звонки и веб-версия',
+      subtitle: 'tachyon-lists/telegram.trs (Домены + подсети MTProto)',
       domains: [
         'telegram.org',
+        'telegram.me',
         't.me',
         'telegra.ph',
         'telesco.pe',
@@ -1026,8 +1036,9 @@ class BuiltInService {
     ),
     BuiltInService(
       id: 'instagram',
+      trsId: 'meta',
       title: 'Instagram / Meta',
-      subtitle: 'Instagram, Facebook, Threads',
+      subtitle: 'tachyon-lists/meta.trs (Instagram, Facebook, Threads + подсети)',
       domains: [
         'instagram.com',
         'cdninstagram.com',
@@ -1039,8 +1050,9 @@ class BuiltInService {
     ),
     BuiltInService(
       id: 'openai',
+      trsId: 'ai_all',
       title: 'ChatGPT / AI',
-      subtitle: 'OpenAI, Claude, Gemini',
+      subtitle: 'tachyon-lists/ai_all.trs (OpenAI, Claude, Gemini, Perplexity)',
       domains: [
         'openai.com',
         'chatgpt.com',
@@ -1048,13 +1060,15 @@ class BuiltInService {
         'oaiusercontent.com',
         'anthropic.com',
         'claude.ai',
+        'gemini.google.com',
       ],
       packages: ['com.openai.chatgpt'],
     ),
     BuiltInService(
       id: 'ru',
+      trsId: 'ru_domains',
       title: 'Сайты РФ (.ru / Банки / Госуслуги)',
-      subtitle: 'Прямой доступ без прокси для российских сервисов',
+      subtitle: 'tachyon-lists/ru_domains.trs (Домены и подсети РФ напрямую)',
       domains: [
         'ru',
         'su',
@@ -1065,10 +1079,6 @@ class BuiltInService {
         'gosuslugi.ru',
         'sberbank.ru',
         'tbank.ru',
-        'ozon.ru',
-        'wb.ru',
-        'wildberries.ru',
-        'avito.ru',
       ],
     ),
   ];
@@ -1632,7 +1642,8 @@ class RuntimeConfig {
         'ip_cidr' => 'ip_cidr',
         _ => 'domain_suffix',
       };
-      if (key != 'ip_cidr' && (action == 'direct' || action == 'desync')) {
+      if (key != 'ip_cidr' &&
+          (action == 'direct' || (!dns.fakeIp && action == 'desync'))) {
         dnsRules.add({
           key: [val],
           'action': 'route',
@@ -1660,7 +1671,11 @@ class RuntimeConfig {
       }
     }
 
-    // Точечные правила сервисов (YouTube, Discord, Telegram, Сайты РФ и др.).
+    final ruleSetDefs = <String, Map<String, dynamic>>{};
+
+    // Точечные правила сервисов (YouTube, Discord, Telegram, Сайты РФ и др.):
+    // напрямую подключают `.trs` из `tachyon-lists` при наличии файла на диске,
+    // плюс базовые домены для мгновенного старта до завершения фоновой докачки.
     for (final service in BuiltInService.catalog) {
       final rawAction = serviceRoutes[service.id];
       if (rawAction == null || rawAction.isEmpty || rawAction == 'off') continue;
@@ -1670,8 +1685,32 @@ class RuntimeConfig {
         continue;
       }
       final action = resolveOutbound(rawAction);
-      final isDirectOrDesync = action == 'direct' || action == 'desync';
-      if (isDirectOrDesync && service.domains.isNotEmpty) {
+      final useDirectDns = action == 'direct' || (!dns.fakeIp && action == 'desync');
+
+      final trsPath = filesDir.isNotEmpty ? '$filesDir/lists/${service.trsId}.trs' : '';
+      final hasTrsOnDisk = trsPath.isNotEmpty && File(trsPath).existsSync();
+      if (hasTrsOnDisk) {
+        ruleSetDefs[service.trsId] = {
+          'type': 'local',
+          'tag': service.trsId,
+          'format': 'trs',
+          'path': trsPath,
+        };
+        if (useDirectDns) {
+          dnsRules.add({
+            'rule_set': [service.trsId],
+            'action': 'route',
+            'server': directTag,
+          });
+        }
+        routeRules.add({
+          'rule_set': [service.trsId],
+          'action': 'route',
+          'outbound': action,
+        });
+      }
+
+      if (useDirectDns && service.domains.isNotEmpty) {
         dnsRules.add({
           'domain_suffix': service.domains,
           'action': 'route',
@@ -1688,10 +1727,16 @@ class RuntimeConfig {
     }
 
     for (final set in enabledSets) {
+      ruleSetDefs[set.id] = {
+        'type': 'local',
+        'tag': set.id,
+        'format': 'trs',
+        'path': set.path,
+      };
       final action = resolveOutbound(set.action.isEmpty ? 'proxy' : set.action);
-      final isDirectOrDesync = action == 'direct' || action == 'desync';
-      if (isDirectOrDesync) {
-        // Домены прямого списка и обхода DPI разрешаются прямым резолвером
+      final useDirectDns = action == 'direct' || (!dns.fakeIp && action == 'desync');
+      if (useDirectDns) {
+        // Домены прямого списка (и обхода DPI без FakeIP) разрешаются прямым резолвером
         dnsRules.add({
           'rule_set': [set.id],
           'action': 'route',
@@ -1900,9 +1945,13 @@ class RuntimeConfig {
       finalOutbound = 'direct';
     } else if (routingMode == RoutingMode.desync) {
       finalOutbound = (desync.enabled || !hasDesyncRules) ? 'desync' : 'direct';
+    } else if (routingMode == RoutingMode.rules && desync.enabled) {
+      finalOutbound = 'desync';
     } else if (hasProxy) {
       finalOutbound = 'proxy';
-    } else if (desync.enabled || needDesync) {
+    } else if (desync.enabled) {
+      finalOutbound = 'desync';
+    } else if (needDesync) {
       finalOutbound = hasDesyncRules ? 'direct' : 'desync';
     } else {
       finalOutbound = 'direct';
@@ -1915,6 +1964,7 @@ class RuntimeConfig {
         'rules': dnsRules,
         'final': finalTag,
         'strategy': 'prefer_ipv4',
+        'reverse_mapping': true,
       },
       'inbounds': [
         if (!proxyOnly)
@@ -1927,13 +1977,12 @@ class RuntimeConfig {
             'strict_route': false,
             'stack': 'system',
           },
-        if (allowLan || proxyOnly)
-          {
-            'type': 'mixed',
-            'tag': 'lan-in',
-            'listen': allowLan ? '0.0.0.0' : '127.0.0.1',
-            'listen_port': 2080,
-          },
+        {
+          'type': 'mixed',
+          'tag': 'lan-in',
+          'listen': allowLan ? '0.0.0.0' : '127.0.0.1',
+          'listen_port': 2080,
+        },
       ],
       'outbounds': outbounds,
       if (endpoints.isNotEmpty) 'endpoints': endpoints,
@@ -1944,15 +1993,7 @@ class RuntimeConfig {
         ],
       'route': {
         'rules': routeRules,
-        'rule_set': [
-          for (final set in enabledSets)
-            {
-              'type': 'local',
-              'tag': set.id,
-              'format': 'trs',
-              'path': set.path,
-            },
-        ],
+        'rule_set': ruleSetDefs.values.toList(),
         'final': finalOutbound,
         'auto_detect_interface': false,
         'default_domain_resolver': bootstrapTag,

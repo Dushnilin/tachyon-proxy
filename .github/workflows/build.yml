@@ -36,6 +36,7 @@ jobs:
         id: core_check
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || github.token }}
+          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           current_core=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
           latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null || echo "v${current_core}")
@@ -52,7 +53,7 @@ jobs:
             echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            if [ "$current_core" != "$latest_core" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            if [ -n "$PRIVATE_TOKEN" ] && { [ "$current_core" != "$latest_core" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; }; then
               echo "rebuild_core=true" >> "$GITHUB_OUTPUT"
             else
               echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
@@ -60,7 +61,7 @@ jobs:
           fi
 
       - name: Checkout tachyon-core-src (when core updated)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true'
         uses: actions/checkout@v4
         with:
           repository: Dushnilin/tachyon-core-src
@@ -69,14 +70,14 @@ jobs:
           path: .core-src
 
       - name: Install Rust toolchain for Android NDK (when core updated)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Compile libtachyon.so for all Android ABIs (when core updated)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true' && secrets.PRIVATE_REPO_TOKEN != ''
+        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.rebuild_core == 'true'
         run: |
           latest_core="${{ steps.core_check.outputs.latest_core }}"
           sed -i "s/^version = \".*\"/version = \"${latest_core}\"/" native/core-ffi/Cargo.toml

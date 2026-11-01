@@ -100,12 +100,20 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     ]);
   }
 
+  HttpClient _newHttpClient(Duration timeout) {
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..badCertificateCallback = ((_, _, _) => true);
+    if (mounted && AppScope.read(context).tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
+    return client;
+  }
+
   Future<void> _checkIpAndTrace() async {
     if (_checkingIp) return;
     setState(() => _checkingIp = true);
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 6)
-      ..badCertificateCallback = ((_, _, _) => true);
+    final client = _newHttpClient(const Duration(seconds: 6));
     try {
       try {
         final req = await client.getUrl(
@@ -190,9 +198,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     });
 
     await Future.wait(_targets.map((target) async {
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 5)
-        ..badCertificateCallback = ((_, _, _) => true);
+      final client = _newHttpClient(const Duration(seconds: 5));
       var ms = -1;
       var status = 0;
       try {
@@ -236,9 +242,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     });
 
     const totalTargetBytes = 10 * 1024 * 1024;
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 8)
-      ..badCertificateCallback = ((_, _, _) => true);
+    final client = _newHttpClient(const Duration(seconds: 8));
 
     try {
       final req = await client.getUrl(
@@ -474,6 +478,61 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                       _runningSpeedtest
                           ? 'Идёт замер скорости...'
                           : 'Запустить спидтест (10 МБ)',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: Space.xl),
+          const SectionLabel('Автоподбор MTU (MtuAutoScan)'),
+          HairlineCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.tune_rounded, size: 20, color: tokens.accent),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Text(
+                        'Текущий MTU: ${controller.settings.mtu} байт',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                    ),
+                    Pill(
+                      label: '${controller.settings.mtu} B',
+                      color: tokens.accent,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: Space.xs),
+                Text(
+                  controller.mtuScanStatus.isNotEmpty
+                      ? controller.mtuScanStatus
+                      : 'Автоматический поиск оптимального размера пакета (1280–1460 байт) без фрагментации',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: Space.md),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: controller.scanningMtu
+                        ? null
+                        : () => controller.scanOptimalMtu(),
+                    icon: controller.scanningMtu
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.radar_rounded, size: 18),
+                    label: Text(
+                      controller.scanningMtu
+                          ? 'Сканирование MTU...'
+                          : 'Подобрать оптимальный MTU',
                     ),
                   ),
                 ),

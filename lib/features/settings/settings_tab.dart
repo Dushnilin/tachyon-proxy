@@ -389,37 +389,187 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
           ),
           const SizedBox(height: Space.xl),
-          const SectionLabel('О приложении и обновления'),
+          const SectionLabel('Центр обновлений (Встроенный загрузчик)'),
           HairlineCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                DetailRow(
-                  label: 'Ядро tachyon-core',
-                  value: _version.isEmpty
-                      ? '—'
-                      : (controller.hasCoreUpdate
-                          ? '$_version → v${controller.latestCoreVersion}'
-                          : _version),
+                // 1. Отдельно Ядро tachyon-core (libtachyon.so)
+                Row(
+                  children: [
+                    Icon(Icons.memory_rounded, size: 20, color: tokens.accent),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Ядро tachyon-core (libtachyon.so)',
+                            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _version.isEmpty
+                                ? 'Чтение версии нативного движка...'
+                                : (controller.hasCoreUpdate
+                                    ? 'Установлено: $_version · Доступно: v${controller.latestCoreVersion}'
+                                    : 'Установлено: $_version (горячая замена .so)'),
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: controller.hasCoreUpdate
+                                      ? tokens.success
+                                      : tokens.muted,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: Space.sm),
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 36),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: controller.isAnyUpdateRunning
+                          ? null
+                          : () => controller.updateEngineOnly(),
+                      icon: controller.updatingEngine
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.bolt_rounded, size: 16),
+                      label: const Text('Ядро'),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: Space.md),
                 const Hairline(),
-                DetailRow(
-                  label: 'Приложение',
-                  value: controller.hasAppUpdate
-                      ? '${AppController.appVersion} → v${controller.latestAppVersion} (${settings.mtu} MTU)'
-                      : '${AppController.appVersion} (${settings.mtu} MTU)',
+                const SizedBox(height: Space.md),
+
+                // 2. Отдельно Приложение Tachyon Proxy (APK)
+                Row(
+                  children: [
+                    Icon(
+                      Icons.install_mobile_rounded,
+                      size: 20,
+                      color: tokens.success,
+                    ),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Приложение Tachyon Proxy (APK)',
+                            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            controller.hasAppUpdate
+                                ? 'Установлено: v${AppController.appVersion} · Доступно: v${controller.latestAppVersion}'
+                                : 'Версия v${AppController.appVersion} · MTU ${settings.mtu}',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: controller.hasAppUpdate
+                                      ? tokens.success
+                                      : tokens.muted,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: Space.sm),
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 36),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: controller.isAnyUpdateRunning
+                          ? null
+                          : () => controller.updateAppOnly(),
+                      icon: controller.updatingApp
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.system_update_alt_rounded, size: 16),
+                      label: const Text('APK'),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: Space.md),
                 const Hairline(),
-                const DetailRow(
-                  label: 'Плитка шторки Android',
-                  value: 'Доступна в быстрых настройках',
+                const SizedBox(height: Space.md),
+
+                // 3. Отдельно Списки маршрутизации tachyon-lists (.trs)
+                Row(
+                  children: [
+                    Icon(
+                      Icons.rule_folder_outlined,
+                      size: 20,
+                      color: tokens.warning,
+                    ),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Списки правил tachyon-lists (.trs)',
+                            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Бинарные базы доменов и CIDR (YouTube, Discord, Telegram, РФ)',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: tokens.muted,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: Space.sm),
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 36),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: controller.isAnyUpdateRunning
+                          ? null
+                          : () => controller.updateListsOnly(),
+                      icon: controller.updatingLists
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.cloud_download_outlined, size: 16),
+                      label: const Text('Списки'),
+                    ),
+                  ],
                 ),
-                const Hairline(),
-                const DetailRow(
-                  label: 'Списки',
-                  value: 'tachyon-lists',
-                ),
+
                 if (controller.updateStatusText.isNotEmpty) ...[
+                  const SizedBox(height: Space.md),
                   const Hairline(),
                   Padding(
                     padding: const EdgeInsets.only(top: Space.sm),
@@ -434,52 +584,32 @@ class _SettingsTabState extends State<SettingsTab> {
                     ),
                   ),
                 ],
-                if (controller.updatingApp) ...[
+                if (controller.isAnyUpdateRunning) ...[
                   const SizedBox(height: Space.sm),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(4),
                     child: LinearProgressIndicator(
-                      value: controller.updateProgress > 0 ? controller.updateProgress : null,
+                      value: controller.updateProgress > 0
+                          ? controller.updateProgress
+                          : null,
                       minHeight: 6,
                     ),
                   ),
                 ],
                 const SizedBox(height: Space.md),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: (controller.checkingUpdates || controller.updatingApp)
-                            ? null
-                            : () => controller.checkUpdates(),
-                        icon: controller.checkingUpdates
-                            ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.sync_rounded, size: 17),
-                        label: const Text('Проверить'),
-                      ),
-                    ),
-                    const SizedBox(width: Space.sm),
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: controller.updatingApp
-                            ? null
-                            : () => controller.installUpdate(
-                                  preferEngineOnly:
-                                      controller.hasCoreUpdate && !controller.hasAppUpdate,
-                                ),
-                        icon: const Icon(Icons.system_update_alt_rounded, size: 17),
-                        label: Text(
-                          (controller.hasCoreUpdate || controller.hasAppUpdate)
-                              ? 'Обновить'
-                              : 'Обновить ядро/APK',
-                        ),
-                      ),
-                    ),
-                  ],
+                OutlinedButton.icon(
+                  onPressed: (controller.checkingUpdates ||
+                          controller.isAnyUpdateRunning)
+                      ? null
+                      : () => controller.checkUpdates(),
+                  icon: controller.checkingUpdates
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.sync_rounded, size: 17),
+                  label: const Text('Проверить обновления на GitHub'),
                 ),
               ],
             ),

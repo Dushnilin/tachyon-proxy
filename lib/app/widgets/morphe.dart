@@ -177,7 +177,132 @@ class Hairline extends StatelessWidget {
   }
 }
 
-/// Центрированный логотип приложения: молния-акцент и разрежённые капитель.
+/// Фирменный двухгранный 3D-знак молнии Tachyon (как на иконке приложения).
+class TachyonBoltIcon extends StatelessWidget {
+  const TachyonBoltIcon({
+    super.key,
+    this.size = 24,
+    this.primaryColor,
+    this.secondaryColor,
+    this.glow = false,
+  });
+
+  final double size;
+  final Color? primaryColor;
+  final Color? secondaryColor;
+  final bool glow;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: _TachyonBoltPainter(
+          primary: primaryColor ?? Colors.white,
+          secondary: secondaryColor ?? tokens.accent,
+          glow: glow,
+        ),
+      ),
+    );
+  }
+}
+
+class _TachyonBoltPainter extends CustomPainter {
+  _TachyonBoltPainter({
+    required this.primary,
+    required this.secondary,
+    required this.glow,
+  });
+
+  final Color primary;
+  final Color secondary;
+  final bool glow;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+
+    // Точные пропорции двухгранной молнии из иконки Tachyon
+    final p0 = Offset(w * 0.575, h * 0.10); // Top peak
+    final p1 = Offset(w * 0.220, h * 0.545); // Left wing
+    final p2 = Offset(w * 0.468, h * 0.545); // Left inner notch
+    final p3 = Offset(w * 0.425, h * 0.90); // Bottom peak
+    final p4 = Offset(w * 0.780, h * 0.455); // Right wing
+    final p5 = Offset(w * 0.532, h * 0.455); // Right inner notch
+
+    final fullBolt = Path()
+      ..moveTo(p0.dx, p0.dy)
+      ..lineTo(p1.dx, p1.dy)
+      ..lineTo(p2.dx, p2.dy)
+      ..lineTo(p3.dx, p3.dy)
+      ..lineTo(p4.dx, p4.dy)
+      ..lineTo(p5.dx, p5.dy)
+      ..close();
+
+    final leftFacet = Path()
+      ..moveTo(p0.dx, p0.dy)
+      ..lineTo(p1.dx, p1.dy)
+      ..lineTo(p2.dx, p2.dy)
+      ..lineTo(p5.dx, p5.dy)
+      ..close();
+
+    if (glow) {
+      canvas.drawPath(
+        fullBolt,
+        Paint()
+          ..color = secondary.withValues(alpha: 0.55)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, w * 0.18),
+      );
+    }
+
+    // Падающая тень под молнией
+    canvas.save();
+    canvas.translate(0, h * 0.032);
+    canvas.drawPath(
+      fullBolt,
+      Paint()..color = Colors.black.withValues(alpha: 0.42),
+    );
+    canvas.restore();
+
+    // Правая/основная грань с градиентом
+    final rect = Offset.zero & size;
+    canvas.drawPath(
+      fullBolt,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(primary, secondary, 0.28)!,
+            Color.lerp(secondary, const Color(0xFF60A5FA), 0.45)!,
+          ],
+        ).createShader(rect),
+    );
+
+    // Левая светлая 3D-грань (Top-Left Specular Facet)
+    canvas.drawPath(
+      leftFacet,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.white,
+            Color.lerp(Colors.white, primary, 0.35)!,
+          ],
+        ).createShader(rect),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _TachyonBoltPainter old) =>
+      old.primary != primary || old.secondary != secondary || old.glow != glow;
+}
+
+/// Центрированный логотип приложения: двухгранная молния Tachyon и разрежённые капитель.
 class Wordmark extends StatelessWidget {
   const Wordmark({super.key, this.subtitle});
 
@@ -193,10 +318,11 @@ class Wordmark extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Icon(
-              Icons.bolt_rounded,
-              size: 20,
-              color: tokens.accent,
+            TachyonBoltIcon(
+              size: 22,
+              primaryColor: Colors.white,
+              secondaryColor: tokens.accent,
+              glow: true,
             ),
             const SizedBox(width: Space.xs + 2),
             Text(

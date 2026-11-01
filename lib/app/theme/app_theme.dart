@@ -111,12 +111,13 @@ abstract final class TachyonTheme {
         style: FilledButton.styleFrom(
           backgroundColor: t.accent,
           foregroundColor: scheme.onPrimary,
-          minimumSize: const Size.fromHeight(50),
+          minimumSize: const Size(64, 44),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(Radii.control),
           ),
           textStyle: const TextStyle(
-            fontSize: 15,
+            fontSize: 14,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.2,
           ),
@@ -125,12 +126,13 @@ abstract final class TachyonTheme {
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: t.ink,
-          minimumSize: const Size.fromHeight(50),
+          minimumSize: const Size(64, 44),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           side: BorderSide(color: t.line),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(Radii.control),
           ),
-          textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
         ),
       ),
       textButtonTheme: TextButtonThemeData(

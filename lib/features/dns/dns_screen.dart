@@ -44,7 +44,7 @@ class DnsScreen extends StatelessWidget {
           const SectionLabel('Режим DNS и анти-утечки'),
           HairlineCard(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SwitchRow(
                   title: 'FakeIP (198.18.0.0/15)',
@@ -86,7 +86,7 @@ class DnsScreen extends StatelessWidget {
           const SectionLabel('Резолверы'),
           HairlineCard(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SwitchRow(
                   title: 'Подбирать автоматически',
@@ -156,7 +156,7 @@ class DnsScreen extends StatelessWidget {
           const SectionLabel('Проверка'),
           HairlineCard(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
                   'Замеряется задержка до каждого резолвера: '
@@ -195,7 +195,7 @@ class DnsScreen extends StatelessWidget {
           const SectionLabel('Загрузочные серверы'),
           HairlineCard(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
                   'Ими разрешаются имена DoH-резолверов и домены, '

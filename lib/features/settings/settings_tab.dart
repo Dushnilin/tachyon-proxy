@@ -8,6 +8,7 @@ import '../../core/app_controller.dart';
 import '../../core/models/app_rules.dart';
 import '../../features/apps/apps_screen.dart';
 import '../../features/connections/connections_screen.dart';
+import '../../features/diagnostics/diagnostics_screen.dart';
 import '../../features/dns/dns_screen.dart';
 import '../../features/logs/logs_screen.dart';
 
@@ -84,6 +85,17 @@ class _SettingsTabState extends State<SettingsTab> {
             child: Column(
               children: [
                 _LinkRow(
+                  icon: Icons.speed_rounded,
+                  title: 'Диагностика и спидтест',
+                  subtitle: 'внешний IP/гео, матрица доступности ТСПУ и замер скорости',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const DiagnosticsScreen(),
+                    ),
+                  ),
+                ),
+                const Hairline(),
+                _LinkRow(
                   icon: Icons.dns_outlined,
                   title: 'DNS и FakeIP',
                   subtitle: settings.dns.servers.isEmpty
@@ -143,6 +155,20 @@ class _SettingsTabState extends State<SettingsTab> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                SwitchRow(
+                  title: 'Умная отказоустойчивость (Smart Failover)',
+                  subtitle: 'Автоматически переключать на лучший сервер при падении текущего',
+                  value: settings.smartFailover,
+                  onChanged: controller.setSmartFailover,
+                ),
+                const Hairline(),
+                SwitchRow(
+                  title: 'Режим «Только прокси» (без VPN TUN)',
+                  subtitle: 'Запускать локальный SOCKS5/HTTP на :2080 без системного VPN',
+                  value: settings.proxyOnly,
+                  onChanged: controller.setProxyOnly,
+                ),
+                const Hairline(),
                 SwitchRow(
                   title: 'Раздавать прокси в локальную сеть (Allow LAN)',
                   subtitle: 'Слушать SOCKS5/HTTP на 0.0.0.0:2080 для домашней сети',

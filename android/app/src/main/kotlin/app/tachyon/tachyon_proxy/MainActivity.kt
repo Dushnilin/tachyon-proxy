@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -16,6 +18,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.tachyon.vpn.QrScannerActivity
 import org.tachyon.vpn.TachyonCore
 import org.tachyon.vpn.TachyonVpnService
 import org.tachyon.vpn.TunnelStateHolder
@@ -41,6 +44,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     /** Запрос, ждущий разрешения на VPN. */
     private var pendingStart: PendingStart? = null
+    private var pendingQrResult: MethodChannel.Result? = null
 
     /**
      * Уведомление о туннеле нужно пользователю, но отказ на него не мешает
@@ -50,6 +54,20 @@ class MainActivity : FlutterFragmentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) {
                 android.util.Log.i("Tachyon", "уведомления запрещены")
+            }
+        }
+
+    /** Результат сканирования QR-кода (камера или галерея). */
+    private val qrScannerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { answer ->
+            val res = pendingQrResult
+            pendingQrResult = null
+            if (res == null) return@registerForActivityResult
+            if (answer.resultCode == RESULT_OK) {
+                val text = answer.data?.getStringExtra(QrScannerActivity.EXTRA_QR_RESULT)
+                res.success(text)
+            } else {
+                res.success(null)
             }
         }
 
@@ -67,6 +85,7 @@ class MainActivity : FlutterFragmentActivity() {
                     pending.disallowedApps,
                     pending.serverName,
                     pending.mtu,
+                    pending.proxyOnly,
                 )
                 pending.result.success(null)
             } else {
@@ -168,6 +187,8 @@ class MainActivity : FlutterFragmentActivity() {
                     "apps" -> handleApps(result)
                     "appIcon" -> handleAppIcon(call, result)
                     "shareText" -> handleShareText(call, result)
+                    "scanQr" -> handleScanQr(call, result)
+                    "networkInfo" -> result.success(currentNetworkType())
                     "filesDir" -> result.success(filesDir.absolutePath)
                     else -> result.notImplemented()
                 }
@@ -231,6 +252,7 @@ class MainActivity : FlutterFragmentActivity() {
         val disallowedApps = call.argument<List<String>>("disallowedApps").orEmpty()
         val serverName = call.argument<String>("serverName").orEmpty()
         val mtu = call.argument<Int>("mtu") ?: 9000
+        val proxyOnly = call.argument<Boolean>("proxyOnly") ?: false
 
         // Проверяем конфигурацию до запроса разрешения: если она невалидна,
         // пользователю незачем показывать диалог VPN.
@@ -247,13 +269,15 @@ class MainActivity : FlutterFragmentActivity() {
             return
         }
 
-        val prepare = VpnService.prepare(this)
-        if (prepare != null) {
-            pendingStart = PendingStart(config, allowedApps, disallowedApps, serverName, mtu, result)
-            vpnPermission.launch(prepare)
-            return
+        if (!proxyOnly) {
+            val prepare = VpnService.prepare(this)
+            if (prepare != null) {
+                pendingStart = PendingStart(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly, result)
+                vpnPermission.launch(prepare)
+                return
+            }
         }
-        startTunnel(config, allowedApps, disallowedApps, serverName, mtu)
+        startTunnel(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly)
         result.success(null)
     }
 
@@ -363,6 +387,30 @@ class MainActivity : FlutterFragmentActivity() {
         result.success(true)
     }
 
+    /** Запускает нативный сканер QR-кода (камера или выбор из галереи). */
+    private fun handleScanQr(call: MethodCall, result: MethodChannel.Result) {
+        val fromGallery = call.argument<Boolean>("fromGallery") ?: false
+        pendingQrResult?.success(null)
+        pendingQrResult = result
+        val intent = Intent(this, QrScannerActivity::class.java).apply {
+            putExtra(QrScannerActivity.EXTRA_GALLERY_ONLY, fromGallery)
+        }
+        qrScannerLauncher.launch(intent)
+    }
+
+    /** Определяет активный тип сети: wifi / cellular / ethernet / none. */
+    private fun currentNetworkType(): String {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return "none"
+        val net = cm.activeNetwork ?: return "none"
+        val caps = cm.getNetworkCapabilities(net) ?: return "none"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            else -> "other"
+        }
+    }
+
     /** Список установленных приложений — для правил по пакетам. */
     private fun handleApps(result: MethodChannel.Result) {
         val manager = packageManager
@@ -393,12 +441,14 @@ class MainActivity : FlutterFragmentActivity() {
         disallowedApps: List<String>,
         serverName: String,
         mtu: Int,
+        proxyOnly: Boolean = false,
     ) {
         val intent = Intent(this, TachyonVpnService::class.java).apply {
             action = TachyonVpnService.ACTION_START
             putExtra(TachyonVpnService.EXTRA_CONFIG, config)
             putExtra(TachyonVpnService.EXTRA_SERVER_NAME, serverName)
             putExtra(TachyonVpnService.EXTRA_MTU, mtu)
+            putExtra(TachyonVpnService.EXTRA_PROXY_ONLY, proxyOnly)
             putStringArrayListExtra(
                 TachyonVpnService.EXTRA_ALLOWED_PACKAGES,
                 ArrayList(allowedApps),
@@ -420,6 +470,7 @@ class MainActivity : FlutterFragmentActivity() {
         val disallowedApps: List<String>,
         val serverName: String,
         val mtu: Int,
+        val proxyOnly: Boolean,
         val result: MethodChannel.Result,
     )
 

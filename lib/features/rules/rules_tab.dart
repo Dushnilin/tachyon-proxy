@@ -70,6 +70,10 @@ class _RulesTabState extends State<RulesTab> {
         children: [
           const SectionLabel('Режим работы'),
           _ModeSelector(controller: controller),
+          if (controller.settings.profiles.length > 1) ...[
+            const SizedBox(height: Space.md),
+            _DetourChainCard(controller: controller),
+          ],
           const SizedBox(height: Space.xl),
           SectionLabel(
             'Пользовательские правила',
@@ -386,7 +390,7 @@ class _CustomRulesSection extends StatelessWidget {
       };
 }
 
-/// Точечный выбор маршрута для популярных сервисов.
+/// Точечный выбор маршрута для популярных сервисов (включая привязку к конкретному серверу).
 class _ServiceRoutesSection extends StatelessWidget {
   const _ServiceRoutesSection({required this.controller});
 
@@ -404,56 +408,176 @@ class _ServiceRoutesSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final routes = controller.settings.serviceRoutes;
+    final profiles = controller.settings.profiles;
 
     return Column(
       children: [
         for (final service in BuiltInService.catalog) ...[
-          HairlineCard(
-            padding: const EdgeInsets.all(Space.md),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+          Builder(
+            builder: (context) {
+              final currentRoute = routes[service.id] ?? 'off';
+              final isCustomServer = currentRoute.startsWith('profile:');
+              final pinnedProfileId =
+                  isCustomServer ? currentRoute.substring('profile:'.length) : '';
+              final pinnedProfile = isCustomServer
+                  ? profiles.where((p) => p.id == pinnedProfileId).firstOrNull
+                  : null;
+
+              return HairlineCard(
+                padding: const EdgeInsets.all(Space.md),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Text(
-                        service.title,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.w600,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            service.title,
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                        ),
+                        if (profiles.isNotEmpty && service.id != 'ru')
+                          GestureDetector(
+                            onTap: () => _pickServerForService(
+                              context,
+                              service,
+                              pinnedProfileId,
                             ),
-                      ),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isCustomServer
+                                    ? tokens.accent.withValues(alpha: 0.16)
+                                    : tokens.raised,
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                  color: isCustomServer ? tokens.accent : tokens.line,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.dns_outlined,
+                                    size: 12,
+                                    color: isCustomServer ? tokens.accent : tokens.muted,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  ConstrainedBox(
+                                    constraints: const BoxConstraints(maxWidth: 130),
+                                    child: Text(
+                                      pinnedProfile?.name ?? 'Свой сервер...',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: isCustomServer
+                                            ? FontWeight.w600
+                                            : FontWeight.w400,
+                                        color:
+                                            isCustomServer ? tokens.accent : tokens.muted,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      service.subtitle,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontSize: 11.5,
+                            color: tokens.faint,
+                          ),
+                    ),
+                    const SizedBox(height: Space.sm),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final (value, label) in _options)
+                          _buildChip(
+                            context,
+                            label: label,
+                            value: value,
+                            selected: currentRoute == value,
+                            onTap: () => controller.setServiceRoute(service.id, value),
+                          ),
+                      ],
                     ),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  service.subtitle,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontSize: 11.5,
-                        color: tokens.faint,
-                      ),
-                ),
-                const SizedBox(height: Space.sm),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final (value, label) in _options)
-                      _buildChip(
-                        context,
-                        label: label,
-                        value: value,
-                        selected: (routes[service.id] ?? 'off') == value,
-                        onTap: () => controller.setServiceRoute(service.id, value),
-                      ),
-                  ],
-                ),
-              ],
-            ),
+              );
+            },
           ),
           const SizedBox(height: Space.sm),
         ],
       ],
+    );
+  }
+
+  Future<void> _pickServerForService(
+    BuildContext context,
+    BuiltInService service,
+    String currentProfileId,
+  ) async {
+    final profiles = controller.sortProfiles(controller.settings.profiles);
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(Space.lg, 0, Space.lg, Space.lg),
+          children: [
+            Text(
+              'Выделенный сервер для ${service.title}',
+              style: Theme.of(ctx).textTheme.titleMedium,
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              'Трафик ${service.title} пойдёт через выбранный сервер независимо от основного профиля.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+            const SizedBox(height: Space.md),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.layers_clear_outlined),
+              title: const Text('Использовать общий прокси (по умолчанию)'),
+              selected: currentProfileId.isEmpty,
+              onTap: () {
+                Navigator.pop(ctx);
+                controller.setServiceRoute(service.id, 'proxy');
+              },
+            ),
+            const Hairline(),
+            for (final p in profiles)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  p.id == currentProfileId
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                ),
+                title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text('${p.fullTransportLabel} · ${p.server}:${p.port}'),
+                selected: p.id == currentProfileId,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  controller.setServiceRoute(service.id, 'profile:${p.id}');
+                },
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -846,34 +970,230 @@ class _DesyncModeCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: Space.xs),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: controller.testingDesync
-                  ? null
-                  : () async {
-                      final chosen = await controller.autoPickDesyncPreset();
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Подобран рецепт DPI: $chosen')),
-                      );
-                    },
-              icon: controller.testingDesync
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.bolt_outlined, size: 16),
-              label: Text(
-                controller.testingDesync
-                    ? controller.desyncTestStatus
-                    : 'Протестировать и подобрать рецепт',
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Разные рецепты для Wi-Fi и Мобильной сети',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      'Wi-Fi: ${desync.wifiPreset} · LTE: ${desync.cellularPreset}',
+                      style: TextStyle(fontSize: 11, color: tokens.faint),
+                    ),
+                  ],
+                ),
               ),
+              Switch(
+                value: controller.settings.perNetworkDesync,
+                onChanged: controller.setPerNetworkDesync,
+              ),
+            ],
+          ),
+          const SizedBox(height: Space.xs),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: controller.testingDesync
+                      ? null
+                      : () async {
+                          final chosen = await controller.autoPickDesyncPreset();
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Подобран рецепт DPI: $chosen')),
+                          );
+                        },
+                  icon: const Icon(Icons.bolt_outlined, size: 16),
+                  label: const Text('Быстрый подбор'),
+                ),
+              ),
+              const SizedBox(width: Space.sm),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: controller.testingDesync
+                      ? null
+                      : () async {
+                          final winner = await controller.scanAllDesyncStrategies();
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                winner != null
+                                    ? 'Снайпер выбрал: ${winner.label} (${winner.avgMs} мс)'
+                                    : 'Сканирование завершено',
+                              ),
+                            ),
+                          );
+                        },
+                  icon: controller.testingDesync
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.radar_rounded, size: 16),
+                  label: const Text('Снайпер (6x)'),
+                ),
+              ),
+            ],
+          ),
+          if (controller.desyncTestStatus.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              controller.desyncTestStatus,
+              style: TextStyle(fontSize: 11.5, color: tokens.accent),
+            ),
+          ],
+          if (controller.desyncScanResults.isNotEmpty) ...[
+            const SizedBox(height: Space.sm),
+            for (final item in controller.desyncScanResults)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    Icon(
+                      item.ok ? Icons.check_circle_outline : Icons.cancel_outlined,
+                      size: 14,
+                      color: item.ok ? tokens.success : tokens.danger,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        item.label,
+                        style: const TextStyle(fontSize: 11.5),
+                      ),
+                    ),
+                    Text(
+                      item.ok
+                          ? 'YT: ${item.youtubeMs >= 0 ? "${item.youtubeMs}мс" : "✗"} · DC: ${item.discordMs >= 0 ? "${item.discordMs}мс" : "✗"}'
+                          : 'Таймаут',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                        color: item.ok ? tokens.success : tokens.faint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Карточка выбора каскадного сервера (Proxy Chain / Detour).
+class _DetourChainCard extends StatelessWidget {
+  const _DetourChainCard({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final detour = controller.settings.detourProfile;
+    final active = detour != null;
+
+    return HairlineCard(
+      onTap: () => _showPickDetourSheet(context),
+      padding: const EdgeInsets.symmetric(horizontal: Space.md, vertical: Space.sm),
+      child: Row(
+        children: [
+          Icon(
+            Icons.route_outlined,
+            size: 20,
+            color: active ? tokens.accent : tokens.muted,
+          ),
+          const SizedBox(width: Space.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Каскад прокси (Proxy Chain / Detour)',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                Text(
+                  active
+                      ? 'Через узел: ${detour.name} (${detour.server})'
+                      : 'Отключено — прямое подключение к выбранному серверу',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: 11.5,
+                        color: active ? tokens.accent : tokens.faint,
+                      ),
+                ),
+              ],
             ),
           ),
+          Icon(Icons.chevron_right, size: 18, color: tokens.faint),
         ],
+      ),
+    );
+  }
+
+  Future<void> _showPickDetourSheet(BuildContext context) async {
+    final currentId = controller.settings.detourProfileId;
+    final selectedMainId = controller.settings.selectedProfileId;
+    final candidates = controller
+        .sortProfiles(controller.settings.profiles)
+        .where((p) => p.id != selectedMainId)
+        .toList();
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(Space.lg, 0, Space.lg, Space.lg),
+          children: [
+            Text(
+              'Каскадирование (Proxy Chain)',
+              style: Theme.of(ctx).textTheme.titleMedium,
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              'Трафик сначала пойдёт на промежуточный сервер (например, российский VDS), '
+              'а из него — на основной зарубежный узел.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+            const SizedBox(height: Space.md),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.link_off_rounded),
+              title: const Text('Без каскада (Напрямую к основному серверу)'),
+              selected: currentId.isEmpty,
+              onTap: () {
+                Navigator.pop(ctx);
+                controller.setDetourProfile('');
+              },
+            ),
+            const Hairline(),
+            for (final p in candidates)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  p.id == currentId
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
+                ),
+                title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text('${p.fullTransportLabel} · ${p.server}:${p.port}'),
+                selected: p.id == currentId,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  controller.setDetourProfile(p.id);
+                },
+              ),
+          ],
+        ),
       ),
     );
   }

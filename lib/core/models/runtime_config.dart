@@ -713,6 +713,9 @@ class DesyncSettings {
     this.preset = 'auto',
     this.fooling = 'autottl',
     this.autoTune = true,
+    this.wifiPreset = 'fake_disorder',
+    this.cellularPreset = 'fake_split',
+    this.customSni = 'www.google.com',
   });
 
   /// Включён ли обход DPI.
@@ -729,17 +732,32 @@ class DesyncSettings {
   /// Адаптивная подстройка рецепта под провайдера (кэш состояния).
   final bool autoTune;
 
+  /// Запомненный рецепт для Wi-Fi сети.
+  final String wifiPreset;
+
+  /// Запомненный рецепт для мобильной сети (LTE/5G).
+  final String cellularPreset;
+
+  /// Фейковый SNI для пакетов приманки.
+  final String customSni;
+
   DesyncSettings copyWith({
     bool? enabled,
     String? preset,
     String? fooling,
     bool? autoTune,
+    String? wifiPreset,
+    String? cellularPreset,
+    String? customSni,
   }) {
     return DesyncSettings(
       enabled: enabled ?? this.enabled,
       preset: preset ?? this.preset,
       fooling: fooling ?? this.fooling,
       autoTune: autoTune ?? this.autoTune,
+      wifiPreset: wifiPreset ?? this.wifiPreset,
+      cellularPreset: cellularPreset ?? this.cellularPreset,
+      customSni: customSni ?? this.customSni,
     );
   }
 
@@ -748,6 +766,9 @@ class DesyncSettings {
         'preset': preset,
         'fooling': fooling,
         'autoTune': autoTune,
+        'wifiPreset': wifiPreset,
+        'cellularPreset': cellularPreset,
+        'customSni': customSni,
       };
 
   static DesyncSettings fromJson(Map<String, dynamic> json) => DesyncSettings(
@@ -755,6 +776,9 @@ class DesyncSettings {
         preset: (json['preset'] as String?) ?? 'auto',
         fooling: (json['fooling'] as String?) ?? 'autottl',
         autoTune: json['autoTune'] != false,
+        wifiPreset: (json['wifiPreset'] as String?) ?? 'fake_disorder',
+        cellularPreset: (json['cellularPreset'] as String?) ?? 'fake_split',
+        customSni: (json['customSni'] as String?) ?? 'www.google.com',
       );
 }
 
@@ -869,6 +893,9 @@ class RuntimeConfig {
     this.serviceRoutes = const {},
     this.customRules = const [],
     this.allowLan = false,
+    this.proxyOnly = false,
+    this.detourProfile,
+    this.extraProfiles = const [],
   });
 
   final Profile profile;
@@ -890,7 +917,7 @@ class RuntimeConfig {
   /// Точечная маршрутизация приложений: packageName → outbound tag.
   final Map<String, String> appRoutes;
 
-  /// Точечная маршрутизация сервисов: serviceId → outbound tag (`desync`, `proxy`, `direct`, `block`).
+  /// Точечная маршрутизация сервисов: serviceId → outbound tag (`desync`, `proxy`, `direct`, `block`, `profile:<id>`).
   final Map<String, String> serviceRoutes;
 
   /// Пользовательские правила (домен, суффикс, ключевое слово, IP/CIDR).
@@ -898,6 +925,15 @@ class RuntimeConfig {
 
   /// Раздавать локальный HTTP/SOCKS5 прокси на 0.0.0.0:2080 в локальную сеть.
   final bool allowLan;
+
+  /// Режим «Только прокси» (:2080) без поднятия системного VPN TUN.
+  final bool proxyOnly;
+
+  /// Каскадный сервер (Proxy Chain / Detour), через который идёт основной прокси.
+  final Profile? detourProfile;
+
+  /// Все доступные профили для привязки конкретных сервисов (`profile:<id>`).
+  final List<Profile> extraProfiles;
 
   /// Есть ли хоть один источник серверов или активный режим DPI.
   bool get hasSources =>
@@ -931,8 +967,21 @@ class RuntimeConfig {
         : subscriptions.where((sub) => sub.enabled).toList(growable: false);
     final hasProxy = hasStatic || enabledSubs.isNotEmpty;
 
+    final dedicatedOutbounds = <String, Map<String, dynamic>>{};
+
     String resolveOutbound(String raw) {
       final target = raw.isEmpty ? 'proxy' : raw;
+      if (target.startsWith('profile:')) {
+        final profId = target.substring('profile:'.length);
+        for (final p in extraProfiles) {
+          if (p.id == profId && p.server.isNotEmpty) {
+            final tag = 'srv-${p.id}';
+            dedicatedOutbounds.putIfAbsent(tag, () => p.toOutbound(tag: tag));
+            return tag;
+          }
+        }
+        return hasProxy ? 'proxy' : 'direct';
+      }
       if (target == 'proxy' && !hasProxy) {
         return (routingMode == RoutingMode.desync || desync.enabled) ? 'desync' : 'direct';
       }
@@ -1130,8 +1179,20 @@ class RuntimeConfig {
       });
     }
 
+    final hasDetour = detourProfile != null &&
+        detourProfile!.server.isNotEmpty &&
+        detourProfile!.id != profile.id;
+
+    Map<String, dynamic> buildMainProfileOutbound({String tag = 'proxy'}) {
+      final out = profile.toOutbound(tag: tag);
+      if (hasDetour) {
+        out['detour'] = 'detour-proxy';
+      }
+      return out;
+    }
+
     final outbounds = <Map<String, dynamic>>[
-      if (subTags.isEmpty && hasStatic) profile.toOutbound(),
+      if (subTags.isEmpty && hasStatic) buildMainProfileOutbound(),
       if (subTags.isNotEmpty)
         {
           'type': 'selector',
@@ -1142,7 +1203,9 @@ class RuntimeConfig {
           ],
           'default': hasStatic ? 'profile' : subTags.first,
         },
-      if (subTags.isNotEmpty && hasStatic) profile.toOutbound(tag: 'profile'),
+      if (subTags.isNotEmpty && hasStatic) buildMainProfileOutbound(tag: 'profile'),
+      if (hasDetour) detourProfile!.toOutbound(tag: 'detour-proxy'),
+      ...dedicatedOutbounds.values,
       {'type': 'direct', 'tag': 'direct'},
       {'type': 'block', 'tag': 'block'},
     ];
@@ -1185,20 +1248,21 @@ class RuntimeConfig {
         'strategy': 'prefer_ipv4',
       },
       'inbounds': [
-        {
-          'type': 'tun',
-          'tag': 'tun-in',
-          'address': ['172.19.0.1/30'],
-          'mtu': mtu,
-          'auto_route': false,
-          'strict_route': false,
-          'stack': 'system',
-        },
-        if (allowLan)
+        if (!proxyOnly)
+          {
+            'type': 'tun',
+            'tag': 'tun-in',
+            'address': ['172.19.0.1/30'],
+            'mtu': mtu,
+            'auto_route': false,
+            'strict_route': false,
+            'stack': 'system',
+          },
+        if (allowLan || proxyOnly)
           {
             'type': 'mixed',
             'tag': 'lan-in',
-            'listen': '0.0.0.0',
+            'listen': allowLan ? '0.0.0.0' : '127.0.0.1',
             'listen_port': 2080,
           },
       ],

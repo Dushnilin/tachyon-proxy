@@ -85,6 +85,7 @@ class TachyonVpnService : VpnService() {
                     intent?.getStringArrayListExtra(EXTRA_DISALLOWED_PACKAGES).orEmpty()
                 var serverName = intent?.getStringExtra(EXTRA_SERVER_NAME).orEmpty()
                 var mtu = intent?.getIntExtra(EXTRA_MTU, MTU) ?: MTU
+                var proxyOnly = intent?.getBooleanExtra(EXTRA_PROXY_ONLY, false) ?: false
 
                 if (config.isNullOrBlank()) {
                     val savedFile = File(filesDir, LAST_SESSION_FILE)
@@ -94,6 +95,7 @@ class TachyonVpnService : VpnService() {
                             config = obj.optString("config")
                             serverName = obj.optString("serverName")
                             mtu = obj.optInt("mtu", MTU)
+                            proxyOnly = obj.optBoolean("proxyOnly", false)
                             allowedPackages = jsonArrayToList(obj.optJSONArray("allowed"))
                             disallowedPackages = jsonArrayToList(obj.optJSONArray("disallowed"))
                         }
@@ -113,7 +115,7 @@ class TachyonVpnService : VpnService() {
                 if (running) {
                     stopTunnel()
                 }
-                startTunnel(config!!, allowedPackages, disallowedPackages, serverName, mtu)
+                startTunnel(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
             }
         }
         return START_STICKY
@@ -138,12 +140,14 @@ class TachyonVpnService : VpnService() {
         disallowedPackages: List<String>,
         serverName: String = "",
         mtu: Int = MTU,
+        proxyOnly: Boolean = false,
     ) {
         if (running) return
 
         currentServerName = serverName
         TunnelStateHolder.serverName = serverName
         TunnelStateHolder.update(TunnelStateHolder.State.Starting, null)
+        runCatching { TachyonAppWidget.updateAll(this) }
 
         // Сохраняем последнюю сессию для запуска из Quick Settings Tile и при загрузке системы.
         runCatching {
@@ -151,6 +155,7 @@ class TachyonVpnService : VpnService() {
                 put("config", config)
                 put("serverName", serverName)
                 put("mtu", mtu)
+                put("proxyOnly", proxyOnly)
                 put("allowed", JSONArray(allowedPackages))
                 put("disallowed", JSONArray(disallowedPackages))
             }
@@ -160,95 +165,108 @@ class TachyonVpnService : VpnService() {
         // Уведомление поднимается сразу: после startForegroundService система
         // даёт несколько секунд на foreground-состояние.
         startForeground(NOTIFICATION_ID, buildNotification())
-
-        // `Builder` - внутренний класс VpnService: создаётся на этом сервисе.
-        // `setSession` в API 36 удалён, поэтому имя сессии не задаём.
-        val builder = Builder()
-            .setMtu(mtu.coerceIn(1280, 9000))
-            .addAddress(TUN_ADDRESS, TUN_PREFIX)
-            .addDnsServer(DNS_SERVER)
-            .addRoute("0.0.0.0", 0)
-
-        if (allowedPackages.isNotEmpty()) {
-            // В туннель попадают только перечисленные приложения (кроме самого VPN-клиента).
-            allowedPackages.filter { it != packageName }.forEach { name ->
-                runCatching { builder.addAllowedApplication(name) }
-                    .onFailure { Log.w(TAG, "не удалось разрешить пакет $name", it) }
-            }
-        } else {
-            // Само приложение всегда исключается: иначе управляющий канал и
-            // журнал ушли бы в туннель.
-            runCatching { builder.addDisallowedApplication(packageName) }
-            // Перечисленные приложения идут мимо туннеля.
-            disallowedPackages.forEach { name ->
-                runCatching { builder.addDisallowedApplication(name) }
-                    .onFailure { Log.w(TAG, "не удалось исключить пакет $name", it) }
-            }
-        }
-
-        // `Builder.establish()` сам поднимает интерфейс и отдаёт null,
-        // если система отказала (API 14+, доступен на всех наших версиях).
-        val descriptor = runCatching { builder.establish() }.getOrNull()
-        if (descriptor == null) {
-            Log.e(TAG, "establish() не выдал дескриптор TUN")
-            TunnelStateHolder.update(
-                TunnelStateHolder.State.Failed,
-                "система не выдала интерфейс VPN",
-            )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
-        tunDescriptor = descriptor
         currentConfig = config
 
-        // Нативный `Tun` закрывает свой `fd` в `Drop` через `libc::close`.
-        // Передача `descriptor.fd` напрямую вызывает SIGABRT от Android `fdsan`,
-        // так как им владеет `ParcelFileDescriptor`. Дублируем и отвязываем (`detachFd`).
-        val coreTunFd = detachTunFd(descriptor)
-        if (coreTunFd == null) {
-            TunnelStateHolder.update(
-                TunnelStateHolder.State.Failed,
-                "не удалось подготовить дескриптор TUN",
-            )
-            closeTun()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
+        val coreTunFd: Int
+        val activeProtectPath: String
 
-        val protectSocket = File(filesDir, PROTECT_SOCKET_NAME)
-        protectSocket.delete()
-        val opened = TachyonCore.protectOpen(protectSocket.absolutePath)
-        if (opened != 0) {
-            Log.e(TAG, "protectOpen вернул $opened: ${TachyonCore.lastError()}")
-            runCatching { ParcelFileDescriptor.adoptFd(coreTunFd).close() }
-            TunnelStateHolder.update(
-                TunnelStateHolder.State.Failed,
-                "не удалось открыть канал защиты сокетов",
-            )
-            closeTun()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
+        if (proxyOnly) {
+            coreTunFd = -1
+            activeProtectPath = ""
+        } else {
+            // `Builder` - внутренний класс VpnService: создаётся на этом сервисе.
+            // `setSession` в API 36 удалён, поэтому имя сессии не задаём.
+            val builder = Builder()
+                .setMtu(mtu.coerceIn(1280, 9000))
+                .addAddress(TUN_ADDRESS, TUN_PREFIX)
+                .addDnsServer(DNS_SERVER)
+                .addRoute("0.0.0.0", 0)
 
-        // Слушатель сокета защиты живёт весь сеанс: пока он работает, ядро
-        // может передавать сокеты на protect().
-        protectThread = Thread({
-            try {
-                TachyonCore.protectLoop(this)
-            } catch (error: Throwable) {
-                Log.e(TAG, "protectLoop прерван", error)
+            if (allowedPackages.isNotEmpty()) {
+                // В туннель попадают только перечисленные приложения (кроме самого VPN-клиента).
+                allowedPackages.filter { it != packageName }.forEach { name ->
+                    runCatching { builder.addAllowedApplication(name) }
+                        .onFailure { Log.w(TAG, "не удалось разрешить пакет $name", it) }
+                }
+            } else {
+                // Само приложение всегда исключается: иначе управляющий канал и
+                // журнал ушли бы в туннель.
+                runCatching { builder.addDisallowedApplication(packageName) }
+                // Перечисленные приложения идут мимо туннеля.
+                disallowedPackages.forEach { name ->
+                    runCatching { builder.addDisallowedApplication(name) }
+                        .onFailure { Log.w(TAG, "не удалось исключить пакет $name", it) }
+                }
             }
-        }, "tachyon-protect").apply {
-            isDaemon = true
-            start()
+
+            // `Builder.establish()` сам поднимает интерфейс и отдаёт null,
+            // если система отказала (API 14+, доступен на всех наших версиях).
+            val descriptor = runCatching { builder.establish() }.getOrNull()
+            if (descriptor == null) {
+                Log.e(TAG, "establish() не выдал дескриптор TUN")
+                TunnelStateHolder.update(
+                    TunnelStateHolder.State.Failed,
+                    "система не выдала интерфейс VPN",
+                )
+                runCatching { TachyonAppWidget.updateAll(this) }
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+            tunDescriptor = descriptor
+
+            // Нативный `Tun` закрывает свой `fd` в `Drop` через `libc::close`.
+            // Передача `descriptor.fd` напрямую вызывает SIGABRT от Android `fdsan`,
+            // так как им владеет `ParcelFileDescriptor`. Дублируем и отвязываем (`detachFd`).
+            val detachedFd = detachTunFd(descriptor)
+            if (detachedFd == null) {
+                TunnelStateHolder.update(
+                    TunnelStateHolder.State.Failed,
+                    "не удалось подготовить дескриптор TUN",
+                )
+                runCatching { TachyonAppWidget.updateAll(this) }
+                closeTun()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+            coreTunFd = detachedFd
+
+            val protectSocket = File(filesDir, PROTECT_SOCKET_NAME)
+            protectSocket.delete()
+            val opened = TachyonCore.protectOpen(protectSocket.absolutePath)
+            if (opened != 0) {
+                Log.e(TAG, "protectOpen вернул $opened: ${TachyonCore.lastError()}")
+                runCatching { ParcelFileDescriptor.adoptFd(coreTunFd).close() }
+                TunnelStateHolder.update(
+                    TunnelStateHolder.State.Failed,
+                    "не удалось открыть канал защиты сокетов",
+                )
+                runCatching { TachyonAppWidget.updateAll(this) }
+                closeTun()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
+            activeProtectPath = protectSocket.absolutePath
+
+            // Слушатель сокета защиты живёт весь сеанс: пока он работает, ядро
+            // может передавать сокеты на protect().
+            protectThread = Thread({
+                try {
+                    TachyonCore.protectLoop(this)
+                } catch (error: Throwable) {
+                    Log.e(TAG, "protectLoop прерван", error)
+                }
+            }, "tachyon-protect").apply {
+                isDaemon = true
+                start()
+            }
         }
 
         val logFile = File(filesDir, LOG_FILE_NAME)
         runCatching { logFile.writeText("") }
-        protectPath = protectSocket.absolutePath
+        protectPath = activeProtectPath
         logPath = logFile.absolutePath
         Log.i(TAG, "CONFIG: $config")
 
@@ -256,17 +274,19 @@ class TachyonVpnService : VpnService() {
             val code = TachyonCore.start(
                 config,
                 coreTunFd,
-                protectSocket.absolutePath,
+                activeProtectPath,
                 logFile.absolutePath,
             )
             if (code != 0) {
                 val error = TachyonCore.lastError() ?: "ядро не стартовало (код $code)"
                 Log.e(TAG, error)
                 TunnelStateHolder.update(TunnelStateHolder.State.Failed, error)
+                runCatching { TachyonAppWidget.updateAll(this) }
                 stopSelf()
             } else {
                 running = true
                 TunnelStateHolder.update(TunnelStateHolder.State.Running, null)
+                runCatching { TachyonAppWidget.updateAll(this) }
                 startStatsLoop()
             }
         }, "tachyon-core").apply {
@@ -305,6 +325,7 @@ class TachyonVpnService : VpnService() {
                     prevAt = now
                     val line = "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с  |  ↑ ${formatBytes(up)} ↓ ${formatBytes(down)} ($conns)"
                     manager?.notify(NOTIFICATION_ID, buildNotification(line))
+                    runCatching { TachyonAppWidget.updateAll(this@TachyonVpnService, "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с") }
                 }
             }
         }, "tachyon-notif-stats").apply {
@@ -439,6 +460,7 @@ class TachyonVpnService : VpnService() {
         currentConfig = null
         closeTun()
         TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null)
+        runCatching { TachyonAppWidget.updateAll(this) }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -554,6 +576,7 @@ class TachyonVpnService : VpnService() {
         const val EXTRA_CONFIG = "config"
         const val EXTRA_SERVER_NAME = "server_name"
         const val EXTRA_MTU = "mtu"
+        const val EXTRA_PROXY_ONLY = "proxy_only"
         const val EXTRA_ALLOWED_PACKAGES = "allowed_packages"
         const val EXTRA_DISALLOWED_PACKAGES = "disallowed_packages"
 

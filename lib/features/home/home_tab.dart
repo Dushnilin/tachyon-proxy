@@ -11,6 +11,7 @@ import '../../core/app_controller.dart';
 import '../../core/models/runtime_config.dart';
 import '../../core/models/tunnel_state.dart';
 import '../connections/connections_screen.dart';
+import '../diagnostics/diagnostics_screen.dart';
 
 /// Главный экран: состояние туннеля и его включение.
 class HomeTab extends StatefulWidget {
@@ -65,7 +66,38 @@ class _HomeTabState extends State<HomeTab> {
         padding: const EdgeInsets.fromLTRB(Space.lg, Space.lg, Space.lg, 0),
         child: Column(
           children: [
-            const Wordmark(subtitle: 'ЗАЩИТА СОЕДИНЕНИЯ'),
+            Row(
+              children: [
+                const Expanded(child: Wordmark(subtitle: 'ЗАЩИТА СОЕДИНЕНИЯ')),
+                IconButton(
+                  tooltip: 'Сканировать QR-код подписки или сервера',
+                  onPressed: () async {
+                    final added = await controller.scanAndImportQr();
+                    if (added == null || !context.mounted) return;
+                    final msg = switch (added) {
+                      -1 => 'Подписка по QR добавлена — серверы загружены',
+                      0 => controller.lastError.isNotEmpty
+                          ? controller.lastError
+                          : 'QR-код не распознан',
+                      _ => 'Импортировано серверов по QR: $added',
+                    };
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      SnackBar(content: Text(msg)),
+                    );
+                  },
+                  icon: const Icon(Icons.qr_code_scanner_rounded, size: 20),
+                ),
+                IconButton(
+                  tooltip: 'Диагностика и спидтест',
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const DiagnosticsScreen(),
+                    ),
+                  ),
+                  icon: const Icon(Icons.speed_rounded, size: 20),
+                ),
+              ],
+            ),
             const SizedBox(height: Space.xl),
             Expanded(
               child: SingleChildScrollView(

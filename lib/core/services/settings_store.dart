@@ -67,6 +67,10 @@ class AppSettings {
     this.autoStart = false,
     this.allowLan = false,
     this.autoUpdateSubs = true,
+    this.proxyOnly = false,
+    this.smartFailover = true,
+    this.detourProfileId = '',
+    this.perNetworkDesync = false,
   });
 
   final List<Profile> profiles;
@@ -120,6 +124,26 @@ class AppSettings {
   /// Автообновление подписок при запуске приложения.
   final bool autoUpdateSubs;
 
+  /// Режим «Только прокси» (:2080 без поднятия системного VPN TUN).
+  final bool proxyOnly;
+
+  /// Умное автопереключение на следующий живой сервер при обрыве туннеля.
+  final bool smartFailover;
+
+  /// ID каскадного профиля (Proxy Chain / Detour).
+  final String detourProfileId;
+
+  /// Автовыбор разного рецепта Desync для Wi-Fi и мобильной сети.
+  final bool perNetworkDesync;
+
+  Profile? get detourProfile {
+    if (detourProfileId.isEmpty) return null;
+    for (final p in profiles) {
+      if (p.id == detourProfileId) return p;
+    }
+    return null;
+  }
+
   Profile? get selectedProfile {
     if (profiles.isEmpty) return null;
     for (final profile in profiles) {
@@ -149,6 +173,10 @@ class AppSettings {
     bool? autoStart,
     bool? allowLan,
     bool? autoUpdateSubs,
+    bool? proxyOnly,
+    bool? smartFailover,
+    String? detourProfileId,
+    bool? perNetworkDesync,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -171,6 +199,10 @@ class AppSettings {
       autoStart: autoStart ?? this.autoStart,
       allowLan: allowLan ?? this.allowLan,
       autoUpdateSubs: autoUpdateSubs ?? this.autoUpdateSubs,
+      proxyOnly: proxyOnly ?? this.proxyOnly,
+      smartFailover: smartFailover ?? this.smartFailover,
+      detourProfileId: detourProfileId ?? this.detourProfileId,
+      perNetworkDesync: perNetworkDesync ?? this.perNetworkDesync,
     );
   }
 
@@ -196,6 +228,10 @@ class AppSettings {
         'autoStart': autoStart,
         'allowLan': allowLan,
         'autoUpdateSubs': autoUpdateSubs,
+        'proxyOnly': proxyOnly,
+        'smartFailover': smartFailover,
+        'detourProfileId': detourProfileId,
+        'perNetworkDesync': perNetworkDesync,
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -248,6 +284,10 @@ class AppSettings {
       autoStart: json['autoStart'] == true,
       allowLan: json['allowLan'] == true,
       autoUpdateSubs: json['autoUpdateSubs'] != false,
+      proxyOnly: json['proxyOnly'] == true,
+      smartFailover: json['smartFailover'] != false,
+      detourProfileId: (json['detourProfileId'] as String?) ?? '',
+      perNetworkDesync: json['perNetworkDesync'] == true,
     );
   }
 }

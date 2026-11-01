@@ -117,6 +117,7 @@ class CoreBridge {
     List<String> disallowedApps = const [],
     String serverName = '',
     int mtu = 9000,
+    bool proxyOnly = false,
   }) async {
     try {
       final error = await _channel.invokeMethod<String>('start', {
@@ -125,6 +126,7 @@ class CoreBridge {
         'disallowedApps': disallowedApps,
         'serverName': serverName,
         'mtu': mtu,
+        'proxyOnly': proxyOnly,
       });
       return error;
     } on PlatformException catch (error) {
@@ -228,6 +230,26 @@ class CoreBridge {
       });
     } on PlatformException {
       // Игнорируем ошибку
+    }
+  }
+
+  /// Запускает нативный сканер QR-кода (с камеры или выбор из галереи).
+  Future<String?> scanQr({bool fromGallery = false}) async {
+    try {
+      return await _channel.invokeMethod<String>('scanQr', {
+        'fromGallery': fromGallery,
+      });
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// Определяет активный тип подключения: `wifi`, `cellular`, `ethernet`, `none`.
+  Future<String> networkType() async {
+    try {
+      return await _channel.invokeMethod<String>('networkInfo') ?? 'none';
+    } on PlatformException {
+      return 'none';
     }
   }
 

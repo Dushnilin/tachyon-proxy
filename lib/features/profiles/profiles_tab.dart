@@ -85,6 +85,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
               icon: const Icon(Icons.network_ping),
             ),
           IconButton(
+            tooltip: 'Сканировать QR-код',
+            onPressed: () => _handleQrScan(context, controller, fromGallery: false),
+            icon: const Icon(Icons.qr_code_scanner_rounded),
+          ),
+          IconButton(
             tooltip: 'Добавить вручную',
             onPressed: () => _showManualDialog(context, controller),
             icon: const Icon(Icons.add),
@@ -101,13 +106,26 @@ class _ProfilesTabState extends State<ProfilesTab> {
               icon: Icons.dns_outlined,
               title: 'Профилей пока нет',
               description:
-                  'Импортируйте подписку или добавьте сервер вручную — '
+                  'Импортируйте подписку по ссылке или QR-коду, либо добавьте сервер вручную — '
                   'ссылки vless, trojan, ss, vmess, hysteria2, tuic, '
                   'anytls и socks понимаются, как и подписки '
                   'по https и сырой JSON аутбаунда sing-box.',
-              action: FilledButton(
-                onPressed: () => _showImportDialog(context, controller),
-                child: const Text('Импортировать подписку'),
+              action: Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => _showImportDialog(context, controller),
+                    icon: const Icon(Icons.file_download_outlined, size: 18),
+                    label: const Text('Импортировать'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _handleQrScan(context, controller, fromGallery: false),
+                    icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+                    label: const Text('Сканировать QR'),
+                  ),
+                ],
               ),
             )
           : ListView(
@@ -214,7 +232,30 @@ class _ProfilesTabState extends State<ProfilesTab> {
     );
   }
 
-  /// Диалог импорта: ссылка или содержимое подписки.
+  Future<void> _handleQrScan(
+    BuildContext context,
+    AppController controller, {
+    required bool fromGallery,
+    BuildContext? closeDialog,
+  }) async {
+    if (closeDialog != null && closeDialog.mounted) {
+      Navigator.of(closeDialog).pop();
+    }
+    final added = await controller.scanAndImportQr(fromGallery: fromGallery);
+    if (added == null || !context.mounted) return;
+    final msg = switch (added) {
+      -1 => 'Подписка по QR добавлена — серверы загружены',
+      0 => controller.lastError.isNotEmpty
+          ? controller.lastError
+          : 'QR-код не содержит поддерживаемых ссылок',
+      _ => 'Импортировано серверов по QR: $added',
+    };
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(msg)),
+    );
+  }
+
+  /// Диалог импорта: ссылка, содержимое подписки или QR-код.
   Future<void> _showImportDialog(
     BuildContext context,
     AppController controller,
@@ -248,7 +289,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
         return StatefulBuilder(
           builder: (ctx, setStateLocal) {
             return AlertDialog(
-              title: const Text('Импорт подписки'),
+              title: const Text('Импорт подписки и QR'),
               content: SizedBox(
                 width: 420,
                 child: Column(
@@ -256,13 +297,41 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Вставьте ссылку на подписку или её содержимое. '
-                      'Поддерживаются vless, trojan, ss, vmess, '
-                      'hysteria2, tuic, anytls, socks; можно вставить '
-                      'https-подписку или JSON аутбаунда sing-box.',
+                      'Отсканируйте QR-код подписки/сервера или вставьте ссылку вручную '
+                      '(https-подписка, vless, trojan, ss, vmess, hysteria2, tuic, anytls, JSON).',
                       style: Theme.of(dialogContext).textTheme.bodyMedium,
                     ),
-                    const SizedBox(height: Space.lg),
+                    const SizedBox(height: Space.md),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => _handleQrScan(
+                              rootContext,
+                              controller,
+                              fromGallery: false,
+                              closeDialog: dialogContext,
+                            ),
+                            icon: const Icon(Icons.qr_code_scanner_rounded, size: 18),
+                            label: const Text('Камера QR'),
+                          ),
+                        ),
+                        const SizedBox(width: Space.sm),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => _handleQrScan(
+                              rootContext,
+                              controller,
+                              fromGallery: true,
+                              closeDialog: dialogContext,
+                            ),
+                            icon: const Icon(Icons.photo_library_outlined, size: 18),
+                            label: const Text('Из галереи'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: Space.md),
                     TextField(
                       controller: textController,
                       maxLines: 5,

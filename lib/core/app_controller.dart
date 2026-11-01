@@ -72,6 +72,12 @@ class AppController extends ChangeNotifier {
   /// Автоподбор рецепта DPI (Desync).
   bool _testingDesync = false;
   String _desyncTestStatus = '';
+  List<DesyncScanEntry> _desyncScanResults = const [];
+
+  /// Счётчики для фонового Smart Failover и автосмены профиля DPI по типу сети.
+  int _pollTickCount = 0;
+  int _consecutiveWatchdogFails = 0;
+  String _lastNetType = '';
 
   AppSettings get settings => _settings;
   TunnelState get tunnel => _tunnel;
@@ -94,6 +100,8 @@ class AppController extends ChangeNotifier {
   bool get testingUrlPing => _testingUrlPing;
   bool get testingDesync => _testingDesync;
   String get desyncTestStatus => _desyncTestStatus;
+  List<DesyncScanEntry> get desyncScanResults => _desyncScanResults;
+  String get activeNetworkType => _lastNetType;
 
   int? pingOf(String id) => _pings[id];
   bool isPinging(String id) => _pingingIds.contains(id);
@@ -778,6 +786,9 @@ class AppController extends ChangeNotifier {
       serviceRoutes: _settings.serviceRoutes,
       customRules: _settings.customRules,
       allowLan: _settings.allowLan,
+      proxyOnly: _settings.proxyOnly,
+      detourProfile: _settings.detourProfile,
+      extraProfiles: _settings.profiles,
     );
   }
 
@@ -824,6 +835,7 @@ class AppController extends ChangeNotifier {
       disallowedApps: _disallowedApps,
       serverName: currentServer,
       mtu: _settings.mtu,
+      proxyOnly: _settings.proxyOnly,
     );
     if (error != null) {
       _tunnel = _tunnel.copyWith(
@@ -965,7 +977,51 @@ class AppController extends ChangeNotifier {
       _prevTrafficAt = null;
     }
     _traffic = next;
+    _pollTickCount++;
+
+    // Автоматическое переключение рецепта Desync при смене Wi-Fi <-> Мобильная сеть
+    if (_settings.perNetworkDesync && _pollTickCount % 5 == 0) {
+      unawaited(_checkNetworkDesyncProfile());
+    }
+
+    // Smart Failover (Watchdog): раз в 30 сек проверяет живой отклик туннеля
+    if (_tunnel.status.isActive &&
+        _settings.smartFailover &&
+        _settings.routingMode != RoutingMode.desync &&
+        _settings.profiles.length > 1 &&
+        _pollTickCount % 15 == 0) {
+      unawaited(_runFailoverCheck());
+    }
+
     notifyListeners();
+  }
+
+  Future<void> _checkNetworkDesyncProfile() async {
+    final net = await bridge.networkType();
+    if (net == _lastNetType || (net != 'wifi' && net != 'cellular')) return;
+    _lastNetType = net;
+    final targetPreset = net == 'wifi'
+        ? _settings.desync.wifiPreset
+        : _settings.desync.cellularPreset;
+    if (targetPreset.isNotEmpty && targetPreset != _settings.desync.preset) {
+      await setDesync(_settings.desync.copyWith(preset: targetPreset));
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _runFailoverCheck() async {
+    if (_testingUrlPing || _pingingAll) return;
+    final ms = await testUrlPing();
+    if (ms < 0) {
+      _consecutiveWatchdogFails++;
+      if (_consecutiveWatchdogFails >= 2) {
+        _consecutiveWatchdogFails = 0;
+        await autoSelectBestServer();
+      }
+    } else {
+      _consecutiveWatchdogFails = 0;
+    }
   }
 
   /// Начинает опрос статистики трафика.
@@ -1004,6 +1060,15 @@ class AppController extends ChangeNotifier {
   /// Открывает системное меню «Поделиться».
   Future<void> shareText(String text, {String subject = ''}) =>
       bridge.shareText(text, subject: subject);
+
+  /// Сканирует QR-код камерой или из галереи и импортирует подписку/профили.
+  /// Возвращает `null`, если сканирование отменено; `-1` при добавлении подписки;
+  /// `> 0` — число добавленных серверов; `0` — ошибка разбора.
+  Future<int?> scanAndImportQr({bool fromGallery = false}) async {
+    final raw = await bridge.scanQr(fromGallery: fromGallery);
+    if (raw == null || raw.trim().isEmpty) return null;
+    return importProfiles(raw.trim());
+  }
 
   /// Проверяет реальный сквозной HTTP 204 пинг через текущий маршрут/туннель.
   Future<int> testUrlPing() async {
@@ -1144,6 +1209,116 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Глубокий сканер (Снайпер) стратегий Desync: тестирует 6 боевых связок
+  /// `preset × fooling` с замером времени TLS/HTTPS рукопожатия.
+  Future<DesyncScanEntry?> scanAllDesyncStrategies() async {
+    if (_testingDesync) return null;
+    _testingDesync = true;
+    _desyncScanResults = const [];
+    _desyncTestStatus = 'Запуск снайпера стратегий DPI (6 профилей)...';
+    notifyListeners();
+
+    const candidates = [
+      ('fake_disorder', 'autottl', 'Fake + Disorder (AutoTTL)'),
+      ('fake_disorder', 'md5', 'Fake + Disorder (MD5 Sig)'),
+      ('fake_split', 'autottl', 'Fake + Split (AutoTTL)'),
+      ('fake_split', 'badseq', 'Fake + Split (BadSeq)'),
+      ('multi_split', 'autottl', 'Multi-Split (Дробление TLS)'),
+      ('tlsrec', 'md5', 'TLS Record Split (До SNI)'),
+    ];
+
+    final results = <DesyncScanEntry>[];
+    DesyncScanEntry? best;
+
+    try {
+      final netType = await bridge.networkType();
+      _lastNetType = netType;
+
+      for (var i = 0; i < candidates.length; i++) {
+        final (preset, fooling, label) = candidates[i];
+        _desyncTestStatus = '[${i + 1}/${candidates.length}] Тест $label...';
+        notifyListeners();
+
+        // Применяем кандидата
+        await _update(_settings.copyWith(
+          desync: _settings.desync.copyWith(
+            enabled: true,
+            preset: preset,
+            fooling: fooling,
+            autoTune: true,
+          ),
+        ));
+        if (_tunnel.status.isActive) {
+          await _restartActiveTunnel();
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+
+        // Замеряем скорость TLS-рукопожатия к YouTube и Discord
+        var ytMs = -1;
+        var dcMs = -1;
+        try {
+          final sw = Stopwatch()..start();
+          final s = await SecureSocket.connect(
+            'www.youtube.com',
+            443,
+            timeout: const Duration(milliseconds: 2200),
+          );
+          sw.stop();
+          await s.close();
+          ytMs = sw.elapsedMilliseconds;
+        } catch (_) {}
+
+        try {
+          final sw = Stopwatch()..start();
+          final s = await SecureSocket.connect(
+            'discord.com',
+            443,
+            timeout: const Duration(milliseconds: 2200),
+          );
+          sw.stop();
+          await s.close();
+          dcMs = sw.elapsedMilliseconds;
+        } catch (_) {}
+
+        final scoreMs = (ytMs >= 0 && dcMs >= 0)
+            ? ((ytMs + dcMs) ~/ 2)
+            : (ytMs >= 0 ? ytMs : dcMs);
+
+        final entry = DesyncScanEntry(
+          preset: preset,
+          fooling: fooling,
+          label: label,
+          youtubeMs: ytMs,
+          discordMs: dcMs,
+          avgMs: scoreMs,
+        );
+        results.add(entry);
+        _desyncScanResults = [...results];
+        if (scoreMs >= 0 && (best == null || scoreMs < best.avgMs)) {
+          best = entry;
+        }
+        notifyListeners();
+      }
+
+      final winnerPreset = best?.preset ?? 'fake_disorder';
+      final winnerFooling = best?.fooling ?? 'autottl';
+      await setDesync(_settings.desync.copyWith(
+        enabled: true,
+        preset: winnerPreset,
+        fooling: winnerFooling,
+        wifiPreset: netType == 'wifi' ? winnerPreset : _settings.desync.wifiPreset,
+        cellularPreset: netType == 'cellular' ? winnerPreset : _settings.desync.cellularPreset,
+      ));
+      _desyncTestStatus = best != null
+          ? 'Лучший: ${best.label} (${best.avgMs} мс)'
+          : 'Применён надёжный профиль: $winnerPreset ($winnerFooling)';
+      return best;
+    } finally {
+      _testingDesync = false;
+      notifyListeners();
+    }
+  }
+
   /// Быстрые шаблоны маршрутизации приложений в 1 клик.
   Future<int> applyAppPreset(String preset, List<InstalledApp> installed) async {
     final routes = Map<String, String>.from(_settings.appRoutes);
@@ -1203,6 +1378,29 @@ class AppController extends ChangeNotifier {
   Future<void> setAutoStart(bool value) => _update(_settings.copyWith(autoStart: value));
   Future<void> setAutoUpdateSubs(bool value) =>
       _update(_settings.copyWith(autoUpdateSubs: value));
+  Future<void> setProxyOnly(bool value) async {
+    await _update(_settings.copyWith(proxyOnly: value));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
+  }
+
+  Future<void> setSmartFailover(bool value) =>
+      _update(_settings.copyWith(smartFailover: value));
+
+  Future<void> setDetourProfile(String profileId) async {
+    await _update(_settings.copyWith(detourProfileId: profileId));
+    if (_tunnel.status.isActive) {
+      await _restartActiveTunnel();
+    }
+  }
+
+  Future<void> setPerNetworkDesync(bool value) async {
+    await _update(_settings.copyWith(perNetworkDesync: value));
+    if (value) {
+      await _checkNetworkDesyncProfile();
+    }
+  }
 
   /// Экспортирует все настройки приложения в форматированный JSON.
   String exportSettingsJson() =>
@@ -1428,4 +1626,25 @@ class ConnectionEntry {
       route: route,
     );
   }
+}
+
+/// Результат тестирования одной связки `preset × fooling` в снайпере DPI.
+class DesyncScanEntry {
+  const DesyncScanEntry({
+    required this.preset,
+    required this.fooling,
+    required this.label,
+    required this.youtubeMs,
+    required this.discordMs,
+    required this.avgMs,
+  });
+
+  final String preset;
+  final String fooling;
+  final String label;
+  final int youtubeMs;
+  final int discordMs;
+  final int avgMs;
+
+  bool get ok => avgMs >= 0;
 }

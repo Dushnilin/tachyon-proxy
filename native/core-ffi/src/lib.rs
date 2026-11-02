@@ -5,33 +5,33 @@
 //!
 //! The config travels as sing-box JSON, validated as written. The pieces the
 //! platform owns are injected *after* `check` (a validated config must not
-//! carry them вЂ” sing-box has no such fields):
+//! carry them — sing-box has no such fields):
 //!
-//! * `fd` on the tun inbound вЂ” the descriptor `VpnService.establish()` hands
+//! * `fd` on the tun inbound — the descriptor `VpnService.establish()` hands
 //!   over; `tun.rs` reads packets from it instead of opening `/dev/net/tun`.
-//! * `protect_path` on every outbound and endpoint вЂ” the unix socket where
+//! * `protect_path` on every outbound and endpoint — the unix socket where
 //!   the Kotlin side answers with `VpnService.protect(fd)`, so core sockets
 //!   bypass the VPN instead of looping back into the tun.
-//! * `log.output` вЂ” the file the app tails for its Logs screen.
+//! * `log.output` — the file the app tails for its Logs screen.
 //!
 //! An `ntp` section is *removed* on Android instead: core's NTP dials a bare
 //! `UdpSocket` with no protect hook, and under the VPN every datagram would be
-//! routed back into our own tun (each hop opening a fresh socket вЂ” an
+//! routed back into our own tun (each hop opening a fresh socket — an
 //! infinite loop). Re-add once core's NTP honours `protect_path`.
 //!
 //! Kotlin class: `org.tachyon.vpn.TachyonCore`, `System.loadLibrary("tachyon")`.
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(unix)]
 use jni::objects::JValue;
 use jni::objects::{JObject, JString};
-#[cfg(unix)]
-use jni::{jni_sig, jni_str};
 use jni::sys::{jboolean, jint, jstring};
 use jni::{Env, EnvUnowned};
+#[cfg(unix)]
+use jni::{jni_sig, jni_str};
 use serde_json::{Value, json};
 
 /// The single running box: its runtime and the instance to shut down.
@@ -64,13 +64,7 @@ fn validate(json: &str) -> Result<Vec<String>, String> {
 /// `tun_fd < 0` means "no tun inbound this time" (proxy-only start); the
 /// inbound then keeps its own bind and fails loudly on Android rather than
 /// silently opening `/dev/net/tun`, which an app can never do.
-fn inject(
-    root: &mut Value,
-    tun_fd: i32,
-    protect_path: &str,
-    log_path: &str,
-    strip_ntp: bool,
-) {
+fn inject(root: &mut Value, tun_fd: i32, protect_path: &str, log_path: &str, strip_ntp: bool) {
     if let Ok(Some(expanded)) = core_config::subscription::expand(root) {
         *root = expanded;
     }
@@ -109,9 +103,7 @@ fn inject(
         obj.remove("ntp");
     }
     if !log_path.is_empty()
-        && let Some(log) = obj
-            .get_mut("log")
-            .and_then(Value::as_object_mut)
+        && let Some(log) = obj.get_mut("log").and_then(Value::as_object_mut)
     {
         log.insert("output".to_owned(), Value::String(log_path.to_owned()));
     }
@@ -145,14 +137,12 @@ fn start_box(
     // working directory. On Android the process starts in the app's root
     // directory, which is read-only - move next to the log file, which the
     // app owns.
-    if !log_path.is_empty() {
-        if let Some(dir) = std::path::Path::new(log_path).parent() {
-            if dir.is_dir() {
-                if let Err(err) = std::env::set_current_dir(dir) {
-                    notes.push(format!("work dir: cannot use {}: {err}", dir.display()));
-                }
-            }
-        }
+    if !log_path.is_empty()
+        && let Some(dir) = std::path::Path::new(log_path).parent()
+        && dir.is_dir()
+        && let Err(err) = std::env::set_current_dir(dir)
+    {
+        notes.push(format!("work dir: cannot use {}: {err}", dir.display()));
     }
 
     let mut guard = CORE.lock().unwrap_or_else(PoisonError::into_inner);
@@ -211,7 +201,8 @@ fn stop_box() -> Result<(), String> {
     if let Some(mut inst) = core.inst.take() {
         core.rt.block_on(inst.shutdown_wait());
     }
-    core.rt.shutdown_timeout(std::time::Duration::from_millis(250));
+    core.rt
+        .shutdown_timeout(std::time::Duration::from_millis(250));
     Ok(())
 }
 
@@ -231,7 +222,7 @@ fn make_jstring(env: &mut Env, value: &str) -> Result<jstring, jni::errors::Erro
 }
 
 /// `start(config: String, tunFd: Int, protectPath: String, logPath: String): Int`
-/// вЂ” 0 on success, -1 with the reason in `lastError()`. Blocking: call it off
+/// — 0 on success, -1 with the reason in `lastError()`. Blocking: call it off
 /// the main thread, never concurrently with `stop`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_start<'caller>(
@@ -258,7 +249,7 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_start<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `stop(): Int` вЂ” drains the box and waits for a clean shutdown. Blocking:
+/// `stop(): Int` — drains the box and waits for a clean shutdown. Blocking:
 /// call it off the main thread.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_stop<'caller>(
@@ -278,7 +269,7 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_stop<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `lastError(): String?` вЂ” detail of the last non-zero result (null only if
+/// `lastError(): String?` — detail of the last non-zero result (null only if
 /// the JVM could not allocate the string).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_lastError<'caller>(
@@ -303,11 +294,11 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_version<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `stats(): String?` вЂ” СЃС‡С‘С‚С‡РёРєРё С‚СЂР°С„РёРєР° Рё СЃРѕСЃС‚РѕСЏРЅРёРµ.
+/// `stats(): String?` — счётчики трафика и состояние.
 ///
-/// Р’РѕР·РІСЂР°С‰Р°РµС‚ JSON: `{"running":true,"up":N,"down":N,"connections":M}`.
-/// РЇРґСЂРѕ СЃС‡РёС‚Р°РµС‚ Р±Р°Р№С‚С‹ РїРѕ РІСЃРµРј СЃРѕРµРґРёРЅРµРЅРёСЏРј СЃ РјРѕРјРµРЅС‚Р° Р·Р°РїСѓСЃРєР°, РїРѕСЌС‚РѕРјСѓ UI
-/// РїРѕРєР°Р·С‹РІР°РµС‚ РёС… РЅР°РїСЂСЏРјСѓСЋ, Р±РµР· СЃРѕР±СЃС‚РІРµРЅРЅРѕРіРѕ СѓС‡С‘С‚Р°.
+/// Возвращает JSON: `{"running":true,"up":N,"down":N,"connections":M}`.
+/// Ядро считает байты по всем соединениям с момента запуска, поэтому UI
+/// показывает их напрямую, без собственного учёта.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_nativeStats<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
@@ -321,8 +312,7 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_nativeStats<'caller>(
             let (up, down) = core_runtime::clash_state::traffic_totals();
             let connections = core_runtime::clash_state::snapshot().0.len();
             let answer = format!(
-                "{{\"running\":{},\"up\":{},\"down\":{},\"connections\":{}}}",
-                running, up, down, connections
+                "{{\"running\":{running},\"up\":{up},\"down\":{down},\"connections\":{connections}}}"
             );
             make_jstring(env, &answer)
         })
@@ -348,9 +338,7 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_check<'caller>(
                 Ok(warnings) => {
                     let list = warnings
                         .iter()
-                        .map(|w| {
-                            serde_json::to_string(w).unwrap_or_else(|_| "\"\"".to_owned())
-                        })
+                        .map(|w| serde_json::to_string(w).unwrap_or_else(|_| "\"\"".to_owned()))
                         .collect::<Vec<_>>()
                         .join(",");
                     format!("{{\"ok\":true,\"warnings\":[{list}]}}")
@@ -397,18 +385,13 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_fetchSubscription<'calle
                 .map_err(|e| format!("tokio runtime: {e}"))
                 .and_then(|rt| {
                     rt.block_on(core_runtime::subscription::fetch_url_standalone(
-                        &url_str,
-                        ua_opt,
-                        send_hwid,
-                        hwid_opt,
-                        insecure,
+                        &url_str, ua_opt, send_hwid, hwid_opt, insecure,
                     ))
                 });
 
             let answer = match res {
                 Ok(fetched) => {
-                    let primary_tags =
-                        core_config::subscription::primary_node_tags(&fetched.nodes);
+                    let primary_tags = core_config::subscription::primary_node_tags(&fetched.nodes);
                     let user_info = fetched.user_info.map(|u| {
                         json!({
                             "upload": u.upload,
@@ -484,11 +467,11 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_parseSubscription<'calle
 /// The listener bound by `protectOpen`, tagged with the generation that
 /// retires it.
 #[cfg(unix)]
-static PROTECT: Mutex<Option<(u64, std::os::unix::net::UnixListener)>> = Mutex::new(None);
+static PROTECT: Mutex<Option<(usize, std::os::unix::net::UnixListener)>> = Mutex::new(None);
 /// Bumped by every `protectOpen`/`protectClose`: closing another thread's
 /// blocked `accept` is not portable, so the loop polls this instead.
 #[cfg(unix)]
-static PROTECT_GEN: AtomicU64 = AtomicU64::new(0);
+static PROTECT_GEN: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
 fn open_protect(path: &str) -> jint {
@@ -517,12 +500,12 @@ fn open_protect(_path: &str) -> jint {
 /// Serve the helper socket until the generation moves on. `decide` runs once
 /// per received descriptor and decides the ack; refusal (or a malformed
 /// message) drops the stream, which is how the client learns the helper said
-/// no. The descriptor arrives as a dup вЂ” closed here either way, the dialer
+/// no. The descriptor arrives as a dup — closed here either way, the dialer
 /// keeps its original.
 #[cfg(unix)]
 fn serve_loop(
     listener: std::os::unix::net::UnixListener,
-    my_gen: u64,
+    my_gen: usize,
     mut decide: impl FnMut(std::os::fd::RawFd) -> bool,
 ) -> usize {
     use std::io::Write as _;
@@ -574,7 +557,7 @@ fn serve(env: &mut Env, service: &JObject) -> jint {
         match res {
             Ok(ok) => ok,
             Err(err) => {
-                let _ = env.exception_clear();
+                env.exception_clear();
                 core_runtime::logging::warn(format_args!("protect({fd}) jni call failed: {err}"));
                 false
             }
@@ -603,7 +586,7 @@ fn close_protect() -> jint {
     0
 }
 
-/// `protectOpen(path: String): Int` вЂ” bind the socket `protect_path` clients
+/// `protectOpen(path: String): Int` — bind the socket `protect_path` clients
 /// connect to. Call before `start` so the first dial already finds a
 /// listener; `protectLoop` serves it from its own thread.
 #[unsafe(no_mangle)]
@@ -613,11 +596,13 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_protectOpen<'caller>(
     path: JString<'caller>,
 ) -> jint {
     unowned_env
-        .with_env(|env| -> jni::errors::Result<jint> { Ok(open_protect(&read_string(env, &path)?)) })
+        .with_env(|env| -> jni::errors::Result<jint> {
+            Ok(open_protect(&read_string(env, &path)?))
+        })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `protectLoop(service: TachyonVpnService): Int` вЂ” blocking accept loop on
+/// `protectLoop(service: TachyonVpnService): Int` — blocking accept loop on
 /// the calling thread; upcalls `service.protectFd(fd)`. Returns -1 with
 /// `lastError()` if `protectOpen` did not run; otherwise runs until
 /// `protectClose`.
@@ -632,7 +617,7 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_protectLoop<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `protectClose(): Int` вЂ” stop serving; the loop thread returns on its own.
+/// `protectClose(): Int` — stop serving; the loop thread returns on its own.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_protectClose<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
@@ -663,7 +648,13 @@ mod tests {
             ],
             "endpoints": [{"type": "wireguard", "tag": "wg"}]
         });
-        inject(&mut root, 7, "/data/data/app/protect.sock", "/l/core.log", true);
+        inject(
+            &mut root,
+            7,
+            "/data/data/app/protect.sock",
+            "/l/core.log",
+            true,
+        );
 
         let obj = root.as_object().unwrap();
         let inbounds = obj["inbounds"].as_array().unwrap();
@@ -675,7 +666,10 @@ mod tests {
             outbounds[1]["protect_path"], "/data/data/app/protect.sock",
             "bare outbound gets protected"
         );
-        assert_eq!(obj["endpoints"][0]["protect_path"], "/data/data/app/protect.sock");
+        assert_eq!(
+            obj["endpoints"][0]["protect_path"],
+            "/data/data/app/protect.sock"
+        );
         assert!(obj.get("ntp").is_none(), "strip_ntp removes the section");
         assert_eq!(obj["log"]["output"], "/l/core.log");
     }
@@ -691,7 +685,10 @@ mod tests {
             obj["ntp"].get("protect_path").is_none(),
             "core NTP ignores the field; only stripping is honoured"
         );
-        assert!(obj.get("inbounds").is_none(), "no tun_fd: nothing to inject");
+        assert!(
+            obj.get("inbounds").is_none(),
+            "no tun_fd: nothing to inject"
+        );
     }
 
     #[test]
@@ -709,7 +706,6 @@ mod tests {
     fn protect_helper_answers_with_one_byte_only_when_accepted() {
         use std::os::fd::AsRawFd as _;
         use std::os::unix::net::UnixStream;
-        use std::sync::atomic::{AtomicUsize, Ordering as _};
 
         static N: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -751,4 +747,3 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 }
-

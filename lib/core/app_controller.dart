@@ -104,7 +104,7 @@ class AppController extends ChangeNotifier {
   String _lastNetType = '';
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.5';
+  static const String appVersion = '0.0.6';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;

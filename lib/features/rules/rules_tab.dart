@@ -174,60 +174,91 @@ class _RulesTabState extends State<RulesTab> {
           title: const Text('Новое правило'),
           content: SizedBox(
             width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DropdownButtonFormField<String>(
-                  initialValue: ruleType,
-                  decoration: const InputDecoration(labelText: 'Тип совпадения'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'domain_suffix',
-                      child: Text('Домен и поддомены (domain_suffix)'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'domain',
-                      child: Text('Точный домен (domain)'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'domain_keyword',
-                      child: Text('Ключевое слово в домене (keyword)'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'ip_cidr',
-                      child: Text('IP / Подсеть (CIDR)'),
-                    ),
-                  ],
-                  onChanged: (v) => setStateLocal(() => ruleType = v ?? ruleType),
-                ),
-                const SizedBox(height: Space.md),
-                TextField(
-                  controller: valueCtrl,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    labelText: ruleType == 'ip_cidr' ? 'IP или CIDR' : 'Домен / слово',
-                    hintText: ruleType == 'ip_cidr' ? '1.1.1.1/32' : 'example.com',
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: ruleType,
+                    decoration: const InputDecoration(labelText: 'Тип совпадения'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'domain_suffix',
+                        child: Text(
+                          'Домен и поддомены (domain_suffix)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'domain',
+                        child: Text(
+                          'Точный домен (domain)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'domain_keyword',
+                        child: Text(
+                          'Ключевое слово в домене (keyword)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'ip_cidr',
+                        child: Text(
+                          'IP / Подсеть (CIDR)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                    onChanged: (v) => setStateLocal(() => ruleType = v ?? ruleType),
                   ),
-                ),
-                const SizedBox(height: Space.md),
-                DropdownButtonFormField<String>(
-                  initialValue: action,
-                  decoration: const InputDecoration(labelText: 'Действие'),
-                  items: const [
-                    DropdownMenuItem(value: 'proxy', child: Text('Через прокси (VPN)')),
-                    DropdownMenuItem(
-                      value: 'desync',
-                      child: Text('Через DPI-обход (Desync)'),
+                  const SizedBox(height: Space.md),
+                  TextField(
+                    controller: valueCtrl,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: ruleType == 'ip_cidr' ? 'IP или CIDR' : 'Домен / слово',
+                      hintText: ruleType == 'ip_cidr' ? '1.1.1.1/32' : 'example.com',
                     ),
-                    DropdownMenuItem(
-                      value: 'direct',
-                      child: Text('Напрямую (в обход VPN)'),
-                    ),
-                    DropdownMenuItem(value: 'block', child: Text('Блокировать')),
-                  ],
-                  onChanged: (v) => setStateLocal(() => action = v ?? action),
-                ),
-              ],
+                  ),
+                  const SizedBox(height: Space.md),
+                  DropdownButtonFormField<String>(
+                    isExpanded: true,
+                    initialValue: action,
+                    decoration: const InputDecoration(labelText: 'Действие'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'proxy',
+                        child: Text(
+                          'Через прокси (VPN)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'desync',
+                        child: Text(
+                          'Через DPI-обход (Desync)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'direct',
+                        child: Text(
+                          'Напрямую (в обход VPN)',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: 'block',
+                        child: Text('Блокировать'),
+                      ),
+                    ],
+                    onChanged: (v) => setStateLocal(() => action = v ?? action),
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
@@ -275,10 +306,10 @@ class _CustomRulesSection extends StatelessWidget {
 
   static const _actions = ['proxy', 'direct', 'desync', 'block'];
   static const _labels = {
-    'proxy': 'ТУННЕЛЬ',
-    'direct': 'НАПРЯМУЮ',
-    'desync': 'ОБХОД DPI',
-    'block': 'БЛОК',
+    'proxy': 'Туннель',
+    'direct': 'Напрямую',
+    'desync': 'Обход DPI',
+    'block': 'Блок',
   };
   static const _typeLabels = {
     'domain_suffix': 'Суффикс домена',
@@ -347,17 +378,17 @@ class _CustomRulesSection extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                     decoration: BoxDecoration(
-                      color: _colorFor(tokens, r.action).withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(4),
+                      color: _colorFor(tokens, r.action).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(Radii.tag),
                       border: Border.all(
-                        color: _colorFor(tokens, r.action).withValues(alpha: 0.45),
+                        color: _colorFor(tokens, r.action).withValues(alpha: 0.35),
                       ),
                     ),
                     child: Text(
-                      _labels[r.action] ?? 'ТУННЕЛЬ',
+                      _labels[r.action] ?? 'Туннель',
                       style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
                         color: _colorFor(tokens, r.action),
                       ),
                     ),
@@ -1211,10 +1242,10 @@ class _ActionPill extends StatelessWidget {
     final tokens = context.tokens;
     const actions = ['proxy', 'direct', 'desync', 'block'];
     const labels = {
-      'proxy': 'ТУННЕЛЬ',
-      'direct': 'НАПРЯМУЮ',
-      'desync': 'ОБХОД DPI',
-      'block': 'БЛОК',
+      'proxy': 'Туннель',
+      'direct': 'Напрямую',
+      'desync': 'Обход DPI',
+      'block': 'Блок',
     };
 
     final current = set.action.isEmpty ? 'proxy' : set.action;
@@ -1222,9 +1253,9 @@ class _ActionPill extends StatelessWidget {
     final Color color;
     switch (current) {
       case 'direct':
-        color = tokens.warning;
+        color = tokens.success;
       case 'desync':
-        color = const Color(0xFFFF8C00);
+        color = tokens.warning;
       case 'block':
         color = tokens.danger;
       default:
@@ -1240,16 +1271,16 @@ class _ActionPill extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: color.withValues(alpha: 0.4)),
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(Radii.tag),
+          border: Border.all(color: color.withValues(alpha: 0.35)),
         ),
         child: Text(
-          labels[current] ?? 'ТУННЕЛЬ',
+          labels[current] ?? 'Туннель',
           style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.6,
+            fontSize: 11,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0,
             color: color,
           ),
         ),

@@ -622,6 +622,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       DropdownButtonFormField<String>(
+                        isExpanded: true,
                         initialValue: type,
                         decoration: const InputDecoration(labelText: 'Протокол'),
                         items: const [
@@ -891,6 +892,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             if (hasStreamTransport)
                               Expanded(
                                 child: DropdownButtonFormField<String>(
+                                  isExpanded: true,
                                   initialValue: transport,
                                   decoration: const InputDecoration(labelText: 'Транспорт'),
                                   items: const [
@@ -906,7 +908,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                     DropdownMenuItem(value: 'quic', child: Text('QUIC')),
                                   ],
                                   onChanged: (v) =>
-                                      setState(() => transport = v ?? transport),
+                                     setState(() => transport = v ?? transport),
                                 ),
                               ),
                             if (hasStreamTransport && hasTlsConfig)
@@ -914,6 +916,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             if (hasTlsConfig)
                               Expanded(
                                 child: DropdownButtonFormField<String>(
+                                  isExpanded: true,
                                   initialValue: security,
                                   decoration:
                                       const InputDecoration(labelText: 'Безопасность'),

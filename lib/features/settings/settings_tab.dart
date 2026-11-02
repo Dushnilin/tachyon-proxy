@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../app/app.dart';
 import '../../app/theme/tokens.dart';
 import '../../app/widgets/morphe.dart';
+import '../../app/widgets/qr_code_view.dart';
 import '../../core/app_controller.dart';
 import '../../core/models/app_rules.dart';
 import '../../features/apps/apps_screen.dart';
@@ -397,7 +398,7 @@ class _SettingsTabState extends State<SettingsTab> {
                 // 1. Отдельно Ядро tachyon-core (libtachyon.so)
                 Row(
                   children: [
-                    Icon(Icons.memory_rounded, size: 20, color: tokens.accent),
+                    Icon(Icons.memory_rounded, size: 18, color: tokens.muted),
                     const SizedBox(width: Space.sm),
                     Expanded(
                       child: Column(
@@ -406,7 +407,7 @@ class _SettingsTabState extends State<SettingsTab> {
                           Text(
                             'Ядро tachyon-core (libtachyon.so)',
                             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                                  fontWeight: FontWeight.w600,
+                                  fontWeight: FontWeight.w500,
                                 ),
                           ),
                           const SizedBox(height: 2),
@@ -427,8 +428,11 @@ class _SettingsTabState extends State<SettingsTab> {
                                     .bodySmall
                                     ?.copyWith(
                                       color: controller.hasCoreUpdate
-                                          ? tokens.success
+                                          ? tokens.accent
                                           : tokens.muted,
+                                      fontFeatures: const [
+                                        FontFeature.tabularFigures(),
+                                      ],
                                     ),
                               );
                             },
@@ -469,8 +473,8 @@ class _SettingsTabState extends State<SettingsTab> {
                   children: [
                     Icon(
                       Icons.install_mobile_rounded,
-                      size: 20,
-                      color: tokens.success,
+                      size: 18,
+                      color: tokens.muted,
                     ),
                     const SizedBox(width: Space.sm),
                     Expanded(
@@ -480,7 +484,7 @@ class _SettingsTabState extends State<SettingsTab> {
                           Text(
                             'Приложение Tachyon Proxy (APK)',
                             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                                  fontWeight: FontWeight.w600,
+                                  fontWeight: FontWeight.w500,
                                 ),
                           ),
                           const SizedBox(height: 2),
@@ -490,8 +494,11 @@ class _SettingsTabState extends State<SettingsTab> {
                                 : 'Версия v${AppController.appVersion} · MTU ${settings.mtu}',
                             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                   color: controller.hasAppUpdate
-                                      ? tokens.success
+                                      ? tokens.accent
                                       : tokens.muted,
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures(),
+                                  ],
                                 ),
                           ),
                         ],
@@ -530,8 +537,8 @@ class _SettingsTabState extends State<SettingsTab> {
                   children: [
                     Icon(
                       Icons.rule_folder_outlined,
-                      size: 20,
-                      color: tokens.warning,
+                      size: 18,
+                      color: tokens.muted,
                     ),
                     const SizedBox(width: Space.sm),
                     Expanded(
@@ -541,7 +548,7 @@ class _SettingsTabState extends State<SettingsTab> {
                           Text(
                             'Списки правил tachyon-lists (.trs)',
                             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                                  fontWeight: FontWeight.w600,
+                                  fontWeight: FontWeight.w500,
                                 ),
                           ),
                           const SizedBox(height: 2),
@@ -621,6 +628,43 @@ class _SettingsTabState extends State<SettingsTab> {
                         )
                       : const Icon(Icons.sync_rounded, size: 17),
                   label: const Text('Проверить обновления на GitHub'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: Space.xl),
+          const SectionLabel('О проекте и поддержка'),
+          HairlineCard(
+            child: Column(
+              children: [
+                _LinkRow(
+                  icon: Icons.favorite_border_rounded,
+                  title: 'Поддержать проект',
+                  subtitle:
+                      'Карты РФ / СБП (CloudTips), Boosty и криптокошельки',
+                  onTap: () => _showDonateDialog(context, controller),
+                ),
+                const Hairline(),
+                _LinkRow(
+                  icon: Icons.send_outlined,
+                  title: 'Telegram-канал Tachyon',
+                  subtitle: 'новости релизов, обсуждение и конфигурации (@tachyon_proxy)',
+                  onTap: () async {
+                    final opened =
+                        await controller.openUrl('https://t.me/tachyon_proxy');
+                    if (!opened && context.mounted) {
+                      Clipboard.setData(
+                        const ClipboardData(text: 'https://t.me/tachyon_proxy'),
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Ссылка https://t.me/tachyon_proxy скопирована в буфер',
+                          ),
+                        ),
+                      );
+                    }
+                  },
                 ),
               ],
             ),
@@ -766,6 +810,319 @@ class _SettingsTabState extends State<SettingsTab> {
         content: Text(
           error == null ? 'Конфигурация принята движком' : 'Ошибка: $error',
         ),
+      ),
+    );
+  }
+
+  Future<void> _showDonateDialog(
+    BuildContext context,
+    AppController controller,
+  ) async {
+    const cloudTipsUrl = 'https://pay.cloudtips.ru/p/449c5ef9';
+    const boostyUrl = 'https://boosty.to/tachyon';
+    const telegramUrl = 'https://t.me/tachyon_proxy';
+    const wallets = <({String name, String address})>[
+      (
+        name: 'Bitcoin (BTC)',
+        address: 'bc1q9ehdv7y9g948jejyflkq7xmau3tytgunxgh35h',
+      ),
+      (
+        name: 'TON',
+        address: 'UQDPhLRjMz5KltDLACAT3YXXHDVEtIDOHky2i33ZIOtsMEoR',
+      ),
+      (
+        name: 'Ethereum (ETH / ERC-20)',
+        address: '0x6CB7a4547eD62EF64990D5C6B5D9fdA58EB223E6',
+      ),
+      (
+        name: 'Solana (SOL)',
+        address: '3csTGaNeU9KjhCKHEKAU3XLS5UfVjEeBVhXihpsETZwh',
+      ),
+    ];
+
+    String? qrTitle;
+    String? qrData;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setStateLocal) {
+          final tokens = ctx.tokens;
+
+          Future<void> openOrCopy(String title, String url) async {
+            final opened = await controller.openUrl(url);
+            if (!opened && ctx.mounted) {
+              Clipboard.setData(ClipboardData(text: url));
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                SnackBar(content: Text('Ссылка $title скопирована: $url')),
+              );
+            }
+          }
+
+          Widget linkTile({
+            required IconData icon,
+            required String title,
+            required String subtitle,
+            required String url,
+          }) {
+            return Container(
+              margin: const EdgeInsets.only(bottom: Space.sm),
+              decoration: BoxDecoration(
+                color: tokens.surface,
+                borderRadius: BorderRadius.circular(Radii.control),
+                border: Border.all(color: tokens.line),
+              ),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(Radii.control),
+                onTap: () => openOrCopy(title, url),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Space.md,
+                    vertical: 10,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(icon, size: 18, color: tokens.accent),
+                      const SizedBox(width: Space.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w500,
+                                color: tokens.ink,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              subtitle,
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: tokens.muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        tooltip: 'Показать QR-код',
+                        icon: Icon(
+                          Icons.qr_code_2_rounded,
+                          size: 18,
+                          color: qrData == url ? tokens.accent : tokens.muted,
+                        ),
+                        onPressed: () => setStateLocal(() {
+                          if (qrData == url) {
+                            qrData = null;
+                            qrTitle = null;
+                          } else {
+                            qrTitle = title;
+                            qrData = url;
+                          }
+                        }),
+                      ),
+                      Icon(
+                        Icons.open_in_new_rounded,
+                        size: 16,
+                        color: tokens.faint,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(
+                  Icons.favorite_border_rounded,
+                  size: 20,
+                  color: tokens.accent,
+                ),
+                const SizedBox(width: Space.sm),
+                const Expanded(
+                  child: Text('Поддержать проект'),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Если Tachyon помогает вам и делает работу в сети комфортной, вы можете поддержать развитие проекта и автора:',
+                      style: Theme.of(ctx).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: Space.md),
+                    if (qrData != null) ...[
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: Space.md),
+                        padding: const EdgeInsets.all(Space.md),
+                        decoration: BoxDecoration(
+                          color: tokens.surface,
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          border: Border.all(
+                            color: tokens.accent.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              qrTitle ?? '',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w600,
+                                color: tokens.ink,
+                              ),
+                            ),
+                            const SizedBox(height: Space.sm),
+                            QrCodeView(data: qrData!, size: 176),
+                            const SizedBox(height: Space.xs),
+                            Text(
+                              qrData!,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontFamily: 'monospace',
+                                color: tokens.muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    linkTile(
+                      icon: Icons.credit_card_rounded,
+                      title: 'Карты РФ / СБП / Tinkoff Pay',
+                      subtitle: 'pay.cloudtips.ru/p/449c5ef9',
+                      url: cloudTipsUrl,
+                    ),
+                    linkTile(
+                      icon: Icons.star_outline_rounded,
+                      title: 'Boosty (подписки и донаты)',
+                      subtitle: 'boosty.to/tachyon',
+                      url: boostyUrl,
+                    ),
+                    linkTile(
+                      icon: Icons.send_outlined,
+                      title: 'Telegram-канал проекта',
+                      subtitle: 't.me/tachyon_proxy',
+                      url: telegramUrl,
+                    ),
+                    const SizedBox(height: Space.sm),
+                    Text(
+                      'Криптовалюта (нажмите для копирования):',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: tokens.muted,
+                      ),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    for (final w in wallets)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        decoration: BoxDecoration(
+                          color: tokens.surface,
+                          borderRadius: BorderRadius.circular(Radii.control),
+                          border: Border.all(color: tokens.line),
+                        ),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(Radii.control),
+                          onTap: () {
+                            Clipboard.setData(ClipboardData(text: w.address));
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              SnackBar(
+                                content: Text('Адрес ${w.name} скопирован'),
+                              ),
+                            );
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: Space.md,
+                              vertical: 8,
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        w.name,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w500,
+                                          color: tokens.ink,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        w.address,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontFamily: 'monospace',
+                                          color: tokens.muted,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                IconButton(
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: 'QR-код кошелька',
+                                  icon: Icon(
+                                    Icons.qr_code_2_rounded,
+                                    size: 18,
+                                    color: qrData == w.address
+                                        ? tokens.accent
+                                        : tokens.muted,
+                                  ),
+                                  onPressed: () => setStateLocal(() {
+                                    if (qrData == w.address) {
+                                      qrData = null;
+                                      qrTitle = null;
+                                    } else {
+                                      qrTitle = w.name;
+                                      qrData = w.address;
+                                    }
+                                  }),
+                                ),
+                                Icon(
+                                  Icons.copy_rounded,
+                                  size: 15,
+                                  color: tokens.faint,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogCtx),
+                child: const Text('Закрыть'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

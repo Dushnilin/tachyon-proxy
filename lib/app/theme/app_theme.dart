@@ -19,7 +19,7 @@ abstract final class TachyonTheme {
     ).copyWith(
       primary: t.accent,
       onPrimary: brightness == Brightness.dark
-          ? const Color(0xFF15121F)
+          ? const Color(0xFF06131C)
           : Colors.white,
       surface: t.surface,
       onSurface: t.ink,
@@ -176,15 +176,26 @@ abstract final class TachyonTheme {
         backgroundColor: t.surface,
         surfaceTintColor: Colors.transparent,
         indicatorColor: t.accentSoft,
+        indicatorShape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Radii.control),
+          side: BorderSide(color: t.accent.withValues(alpha: 0.25)),
+        ),
         elevation: 0,
-        height: 66,
+        height: 64,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        labelTextStyle: WidgetStatePropertyAll(
-          TextStyle(fontSize: 11, color: t.muted, letterSpacing: 0.2),
+        labelTextStyle: WidgetStateProperty.resolveWith(
+          (states) => TextStyle(
+            fontSize: 11.5,
+            fontWeight: states.contains(WidgetState.selected)
+                ? FontWeight.w600
+                : FontWeight.w500,
+            color: states.contains(WidgetState.selected) ? t.ink : t.muted,
+            letterSpacing: 0,
+          ),
         ),
         iconTheme: WidgetStateProperty.resolveWith(
           (states) => IconThemeData(
-            size: 22,
+            size: 20,
             color: states.contains(WidgetState.selected) ? t.accent : t.muted,
           ),
         ),
@@ -196,34 +207,35 @@ abstract final class TachyonTheme {
     return base
         .copyWith(
           displaySmall: base.displaySmall?.copyWith(
-            fontSize: 34,
+            fontSize: 32,
             fontWeight: FontWeight.w600,
-            letterSpacing: -0.5,
+            letterSpacing: -0.6,
             color: t.ink,
           ),
           headlineSmall: base.headlineSmall?.copyWith(
-            fontSize: 22,
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.3,
+            color: t.ink,
+          ),
+          titleLarge: base.titleLarge?.copyWith(
+            fontSize: 17,
             fontWeight: FontWeight.w600,
             letterSpacing: -0.2,
             color: t.ink,
           ),
-          titleLarge: base.titleLarge?.copyWith(
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-            color: t.ink,
-          ),
           titleMedium: base.titleMedium?.copyWith(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
+            fontSize: 14.5,
+            fontWeight: FontWeight.w500,
             color: t.ink,
           ),
           bodyLarge: base.bodyLarge?.copyWith(
-            fontSize: 15,
+            fontSize: 14.5,
             height: 1.45,
             color: t.ink,
           ),
           bodyMedium: base.bodyMedium?.copyWith(
-            fontSize: 13.5,
+            fontSize: 13,
             height: 1.45,
             color: t.muted,
           ),
@@ -234,15 +246,15 @@ abstract final class TachyonTheme {
           ),
           labelLarge: base.labelLarge?.copyWith(
             fontSize: 13,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.2,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0,
             color: t.ink,
           ),
           labelSmall: base.labelSmall?.copyWith(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.1,
-            color: t.faint,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0,
+            color: t.muted,
           ),
         )
         .apply(bodyColor: t.ink, displayColor: t.ink);

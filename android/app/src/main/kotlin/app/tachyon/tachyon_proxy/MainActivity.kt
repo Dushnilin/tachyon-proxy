@@ -228,6 +228,7 @@ class MainActivity : FlutterFragmentActivity() {
                     "apps" -> handleApps(result)
                     "appIcon" -> handleAppIcon(call, result)
                     "shareText" -> handleShareText(call, result)
+                    "openUrl" -> handleOpenUrl(call, result)
                     "scanQr" -> handleScanQr(call, result)
                     "networkInfo" -> result.success(currentNetworkType())
                     "filesDir" -> result.success(filesDir.absolutePath)
@@ -472,6 +473,23 @@ class MainActivity : FlutterFragmentActivity() {
             startActivity(Intent.createChooser(sendIntent, subject.ifEmpty { "Поделиться" }))
         }
         result.success(true)
+    }
+
+    /** Открывает внешнюю ссылку в браузере (или приложении по умолчанию). */
+    private fun handleOpenUrl(call: MethodCall, result: MethodChannel.Result) {
+        val url = call.argument<String>("url").orEmpty().trim()
+        if (url.isEmpty()) {
+            result.success(false)
+            return
+        }
+        val opened = runCatching {
+            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            true
+        }.getOrDefault(false)
+        result.success(opened)
     }
 
     /** Запускает нативный сканер QR-кода (камера или выбор из галереи). */

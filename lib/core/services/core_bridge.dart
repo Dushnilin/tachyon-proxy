@@ -277,6 +277,15 @@ class CoreBridge {
     }
   }
 
+  /// Открывает URL в системном браузере. Возвращает `true`, если браузер найден и открыт.
+  Future<bool> openUrl(String url) async {
+    try {
+      return await _channel.invokeMethod<bool>('openUrl', {'url': url}) ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   /// Запускает нативный сканер QR-кода (с камеры или выбор из галереи).
   Future<String?> scanQr({bool fromGallery = false}) async {
     try {

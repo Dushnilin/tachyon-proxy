@@ -69,7 +69,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       title: 'ChatGPT / OpenAI',
       subtitle: 'chatgpt.com',
       url: 'https://chatgpt.com',
-      icon: Icons.auto_awesome_outlined,
+      icon: Icons.terminal_rounded,
     ),
     _ProbeTarget(
       id: 'cloudflare',
@@ -418,8 +418,9 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                                       ? _ipInfo!.ip
                                       : 'IP не определён',
                                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                        fontWeight: FontWeight.w700,
+                                        fontWeight: FontWeight.w600,
                                         fontFamily: 'monospace',
+                                        fontFeatures: const [FontFeature.tabularFigures()],
                                       ),
                                 ),
                                 const SizedBox(height: 2),
@@ -486,8 +487,10 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                     Text(
                       _speedMbps.toStringAsFixed(1),
                       style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                            fontWeight: FontWeight.w800,
-                            color: tokens.accent,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: -0.5,
+                            color: tokens.ink,
+                            fontFeatures: const [FontFeature.tabularFigures()],
                           ),
                     ),
                     const SizedBox(width: 6),
@@ -495,7 +498,9 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                       padding: const EdgeInsets.only(bottom: 6),
                       child: Text(
                         'Мбит/с  (${(_speedMbps / 8).toStringAsFixed(2)} МБ/с)',
-                        style: Theme.of(context).textTheme.bodySmall,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              fontFeatures: const [FontFeature.tabularFigures()],
+                            ),
                       ),
                     ),
                     const Spacer(),
@@ -504,7 +509,11 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                         padding: const EdgeInsets.only(bottom: 6),
                         child: Text(
                           'Пик: ${_peakMbps.toStringAsFixed(1)} Мбит/с',
-                          style: TextStyle(color: tokens.success, fontSize: 12),
+                          style: TextStyle(
+                            color: tokens.accent,
+                            fontSize: 12,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                          ),
                         ),
                       ),
                   ],

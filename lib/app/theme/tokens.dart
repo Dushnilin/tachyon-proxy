@@ -47,31 +47,31 @@ class TachyonTokens extends ThemeExtension<TachyonTokens> {
   final Color danger;
 
   static const dark = TachyonTokens(
-    ink: Color(0xFFF2F2F3),
-    muted: Color(0xFFA8A8AD),
-    faint: Color(0xFF70707A),
-    line: Color(0xFF26262B),
-    surface: Color(0xFF0B0B0D),
-    raised: Color(0xFF141417),
-    accent: Color(0xFFB9A8FF),
-    accentSoft: Color(0xFF2A2440),
-    success: Color(0xFF6FD08C),
-    warning: Color(0xFFE5C07B),
-    danger: Color(0xFFE06C75),
+    ink: Color(0xFFF1F5F9),
+    muted: Color(0xFF94A3B8),
+    faint: Color(0xFF64748B),
+    line: Color(0xFF1E222A),
+    surface: Color(0xFF0A0B0D),
+    raised: Color(0xFF121418),
+    accent: Color(0xFF38BDF8),
+    accentSoft: Color(0xFF112636),
+    success: Color(0xFF10B981),
+    warning: Color(0xFFF59E0B),
+    danger: Color(0xFFEF4444),
   );
 
   static const light = TachyonTokens(
-    ink: Color(0xFF131316),
-    muted: Color(0xFF5A5A62),
-    faint: Color(0xFF8A8A93),
-    line: Color(0xFFE4E4E7),
-    surface: Color(0xFFFAFAFA),
+    ink: Color(0xFF0F172A),
+    muted: Color(0xFF475569),
+    faint: Color(0xFF64748B),
+    line: Color(0xFFE2E8F0),
+    surface: Color(0xFFF4F6F8),
     raised: Color(0xFFFFFFFF),
-    accent: Color(0xFF5B47C7),
-    accentSoft: Color(0xFFEDEAFF),
-    success: Color(0xFF2E7D4F),
-    warning: Color(0xFF9A6B00),
-    danger: Color(0xFFB3261E),
+    accent: Color(0xFF0284C7),
+    accentSoft: Color(0xFFE0F2FE),
+    success: Color(0xFF059669),
+    warning: Color(0xFFD97706),
+    danger: Color(0xFFDC2626),
   );
 
   @override
@@ -133,10 +133,11 @@ abstract final class Space {
   static const xxl = 40.0;
 }
 
-/// Радиусы скруглений.
+/// Радиусы скруглений (инструментальная шкала).
 abstract final class Radii {
-  static const card = 18.0;
-  static const control = 14.0;
+  static const tag = 6.0;
+  static const control = 8.0;
+  static const card = 14.0;
   static const pill = 999.0;
 }
 

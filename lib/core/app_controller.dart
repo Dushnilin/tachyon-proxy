@@ -79,7 +79,7 @@ class AppController extends ChangeNotifier {
   String _exitIp = '';
   String _exitCountry = '';
   String _exitCity = '';
-  String _exitFlag = '⚡';
+  String _exitFlag = '';
   String _exitIsp = '';
   bool _refreshingExitGeo = false;
 
@@ -104,7 +104,7 @@ class AppController extends ChangeNotifier {
   String _lastNetType = '';
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.6';
+  static const String appVersion = '0.0.7';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -1548,6 +1548,9 @@ class AppController extends ChangeNotifier {
   Future<void> shareText(String text, {String subject = ''}) =>
       bridge.shareText(text, subject: subject);
 
+  /// Открывает внешнюю ссылку в системном браузере.
+  Future<bool> openUrl(String url) => bridge.openUrl(url);
+
   /// Сканирует QR-код камерой или из галереи и импортирует подписку/профили.
   /// Возвращает `null`, если сканирование отменено; `-1` при добавлении подписки;
   /// `> 0` — число добавленных серверов; `0` — ошибка разбора.
@@ -1688,11 +1691,11 @@ class AppController extends ChangeNotifier {
   }
 
   String _countryCodeToFlag(String code) {
-    if (code.length != 2) return '🌐';
+    if (code.length != 2) return '';
     final a = code.codeUnitAt(0);
     final b = code.codeUnitAt(1);
-    if (a < 65 || a > 90 || b < 65 || b > 90) return '🌐';
-    return String.fromCharCodes([0x1F1E6 + (a - 65), 0x1F1E6 + (b - 65)]);
+    if (a < 65 || a > 90 || b < 65 || b > 90) return '';
+    return code;
   }
 
   /// Автоподбор оптимального MTU для туннеля (по аналогии с MtuAutoScan в MSN-GUARD).
@@ -1778,7 +1781,7 @@ class AppController extends ChangeNotifier {
       final warpSub = SubscriptionEntry(
         id: subId,
         url: 'https://api.cloudflareclient.com/warp',
-        name: '⚡ Cloudflare WARP (AmneziaWG)',
+        name: 'Cloudflare WARP (AmneziaWG)',
         updatedAt: DateTime.now().millisecondsSinceEpoch,
       );
       final previousSelectedId = _settings.selectedProfileId;
@@ -1854,7 +1857,7 @@ class AppController extends ChangeNotifier {
       final shardSub = SubscriptionEntry(
         id: subId,
         url: FreeNodesService.shardSources.first,
-        name: '⚡ Бесплатный пул (SHARD · CF Edge)',
+        name: 'Бесплатный пул (SHARD · CF Edge)',
         updatedAt: DateTime.now().millisecondsSinceEpoch,
       );
       final otherProfiles = _settings.profiles

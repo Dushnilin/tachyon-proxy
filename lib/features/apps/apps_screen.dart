@@ -488,8 +488,8 @@ class _RouteChip extends StatelessWidget {
               label,
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 9,
-                fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                fontSize: 9.5,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
                 color: active ? color : context.tokens.faint,
               ),
             ),

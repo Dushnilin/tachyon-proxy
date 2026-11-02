@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// Заголовок раздела: мелкие капсы и hairline-линия справа.
+/// Заголовок раздела: спокойный sentence-case и hairline-линия справа.
 ///
 /// Так разделы выглядят одинаково на всех экранах и не спорят с содержимым.
 class SectionLabel extends StatelessWidget {
@@ -18,7 +18,15 @@ class SectionLabel extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: Space.md),
       child: Row(
         children: [
-          Text(text.toUpperCase(), style: Theme.of(context).textTheme.labelSmall),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0,
+              color: tokens.muted,
+            ),
+          ),
           const SizedBox(width: Space.md),
           Expanded(child: Divider(color: tokens.line, height: 1)),
           if (trailing != null) ...[
@@ -83,7 +91,7 @@ class _HairlineCardState extends State<HairlineCard> {
   }
 }
 
-/// Небольшой бейдж: серая подложка, мелкий текст.
+/// Технический бейдж (тег): строгий радиус 6px, табличные цифры.
 class Pill extends StatelessWidget {
   const Pill({
     super.key,
@@ -104,28 +112,35 @@ class Pill extends StatelessWidget {
     final tone = color ?? tokens.muted;
     return Container(
       padding: EdgeInsets.symmetric(
-        horizontal: icon == null ? Space.sm + 2 : Space.sm,
+        horizontal: icon == null ? Space.sm : Space.sm - 1,
         vertical: 3,
       ),
       decoration: BoxDecoration(
-        color: filled ? tone.withValues(alpha: 0.14) : Colors.transparent,
-        borderRadius: BorderRadius.circular(Radii.pill),
-        border: Border.all(color: tone.withValues(alpha: filled ? 0.32 : 0.5)),
+        color: filled ? tone.withValues(alpha: 0.12) : Colors.transparent,
+        borderRadius: BorderRadius.circular(Radii.tag),
+        border: Border.all(
+          color: tone.withValues(alpha: filled ? 0.28 : 0.36),
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
             Icon(icon, size: 12, color: tone),
-            const SizedBox(width: 5),
+            const SizedBox(width: 4),
           ],
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-              color: tone,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 0,
+                color: tone,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
             ),
           ),
         ],
@@ -164,10 +179,11 @@ class DetailRow extends StatelessWidget {
               value,
               textAlign: TextAlign.right,
               style: TextStyle(
-                fontSize: 13.5,
+                fontSize: 13,
                 height: 1.4,
                 color: valueColor ?? tokens.ink,
                 fontFamily: monospace ? 'monospace' : null,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
           ),
@@ -192,7 +208,7 @@ class Hairline extends StatelessWidget {
   }
 }
 
-/// Фирменный двухгранный 3D-знак молнии Tachyon (как на иконке приложения).
+/// Строгий геометрический знак Tachyon без неонового размытия.
 class TachyonBoltIcon extends StatelessWidget {
   const TachyonBoltIcon({
     super.key,
@@ -215,9 +231,8 @@ class TachyonBoltIcon extends StatelessWidget {
       height: size,
       child: CustomPaint(
         painter: _TachyonBoltPainter(
-          primary: primaryColor ?? Colors.white,
+          primary: primaryColor ?? tokens.ink,
           secondary: secondaryColor ?? tokens.accent,
-          glow: glow,
         ),
       ),
     );
@@ -228,25 +243,22 @@ class _TachyonBoltPainter extends CustomPainter {
   _TachyonBoltPainter({
     required this.primary,
     required this.secondary,
-    required this.glow,
   });
 
   final Color primary;
   final Color secondary;
-  final bool glow;
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
 
-    // Точные пропорции двухгранной молнии из иконки Tachyon
-    final p0 = Offset(w * 0.575, h * 0.10); // Top peak
-    final p1 = Offset(w * 0.220, h * 0.545); // Left wing
-    final p2 = Offset(w * 0.468, h * 0.545); // Left inner notch
-    final p3 = Offset(w * 0.425, h * 0.90); // Bottom peak
-    final p4 = Offset(w * 0.780, h * 0.455); // Right wing
-    final p5 = Offset(w * 0.532, h * 0.455); // Right inner notch
+    final p0 = Offset(w * 0.575, h * 0.10);
+    final p1 = Offset(w * 0.220, h * 0.545);
+    final p2 = Offset(w * 0.468, h * 0.545);
+    final p3 = Offset(w * 0.425, h * 0.90);
+    final p4 = Offset(w * 0.780, h * 0.455);
+    final p5 = Offset(w * 0.532, h * 0.455);
 
     final fullBolt = Path()
       ..moveTo(p0.dx, p0.dy)
@@ -264,60 +276,16 @@ class _TachyonBoltPainter extends CustomPainter {
       ..lineTo(p5.dx, p5.dy)
       ..close();
 
-    if (glow) {
-      canvas.drawPath(
-        fullBolt,
-        Paint()
-          ..color = secondary.withValues(alpha: 0.55)
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, w * 0.18),
-      );
-    }
-
-    // Падающая тень под молнией
-    canvas.save();
-    canvas.translate(0, h * 0.032);
-    canvas.drawPath(
-      fullBolt,
-      Paint()..color = Colors.black.withValues(alpha: 0.42),
-    );
-    canvas.restore();
-
-    // Правая/основная грань с градиентом
-    final rect = Offset.zero & size;
-    canvas.drawPath(
-      fullBolt,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color.lerp(primary, secondary, 0.28)!,
-            Color.lerp(secondary, const Color(0xFF60A5FA), 0.45)!,
-          ],
-        ).createShader(rect),
-    );
-
-    // Левая светлая 3D-грань (Top-Left Specular Facet)
-    canvas.drawPath(
-      leftFacet,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white,
-            Color.lerp(Colors.white, primary, 0.35)!,
-          ],
-        ).createShader(rect),
-    );
+    canvas.drawPath(fullBolt, Paint()..color = secondary);
+    canvas.drawPath(leftFacet, Paint()..color = primary);
   }
 
   @override
   bool shouldRepaint(covariant _TachyonBoltPainter old) =>
-      old.primary != primary || old.secondary != secondary || old.glow != glow;
+      old.primary != primary || old.secondary != secondary;
 }
 
-/// Центрированный логотип приложения: двухгранная молния Tachyon и разрежённые капитель.
+/// Заголовок приложения в приборном стиле без разрежённого капслока.
 class Wordmark extends StatelessWidget {
   const Wordmark({super.key, this.subtitle});
 
@@ -326,42 +294,52 @@ class Wordmark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
-    return Column(
+    return Row(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Row(
+        Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: tokens.raised,
+            borderRadius: BorderRadius.circular(Radii.tag),
+            border: Border.all(color: tokens.line),
+          ),
+          alignment: Alignment.center,
+          child: TachyonBoltIcon(
+            size: 16,
+            primaryColor: tokens.ink,
+            secondaryColor: tokens.accent,
+          ),
+        ),
+        const SizedBox(width: Space.sm + 2),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            TachyonBoltIcon(
-              size: 22,
-              primaryColor: Colors.white,
-              secondaryColor: tokens.accent,
-              glow: true,
-            ),
-            const SizedBox(width: Space.xs + 2),
             Text(
-              'TACHYON',
+              'Tachyon',
               style: TextStyle(
-                fontSize: 19,
+                fontSize: 16,
                 fontWeight: FontWeight.w600,
-                letterSpacing: 4.5,
+                letterSpacing: -0.3,
+                height: 1.15,
                 color: tokens.ink,
               ),
             ),
+            if (subtitle != null)
+              Text(
+                subtitle!,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w400,
+                  letterSpacing: 0,
+                  color: tokens.muted,
+                ),
+              ),
           ],
         ),
-        if (subtitle != null) ...[
-          const SizedBox(height: Space.xs),
-          Text(
-            subtitle!,
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 1.4,
-              color: tokens.faint,
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -458,7 +436,7 @@ class SwitchRow extends StatelessWidget {
   }
 }
 
-/// Статистика в виде сетки: крупное число и подпись под ним.
+/// Статистика в виде сетки: чистая цифра с табличным выравниванием и спокойная подпись (без лишних иконок).
 class StatTile extends StatelessWidget {
   const StatTile({
     super.key,
@@ -480,21 +458,25 @@ class StatTile extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (icon != null) ...[
-          Icon(icon, size: 15, color: tone),
-          const SizedBox(height: Space.sm),
-        ],
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w400,
+            color: tokens.muted,
+          ),
+        ),
+        const SizedBox(height: 4),
         Text(
           value,
           style: TextStyle(
-            fontSize: 19,
+            fontSize: 17,
             fontWeight: FontWeight.w600,
-            letterSpacing: -0.2,
+            letterSpacing: -0.3,
             color: tone,
+            fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
-        const SizedBox(height: 2),
-        Text(label, style: Theme.of(context).textTheme.bodySmall),
       ],
     );
   }

@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../../app/theme/tokens.dart';
-import '../../app/widgets/morphe.dart';
 import '../../app/widgets/qr_code_view.dart';
 import '../../core/app_controller.dart';
 
@@ -360,22 +359,69 @@ class _TvReceiveDialogState extends State<_TvReceiveDialog> {
         ],
       ),
       content: SizedBox(
-        width: 440,
-        child: _errorText != null
-            ? Text(_errorText!, style: TextStyle(color: tokens.danger))
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _statusText,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                  const SizedBox(height: Space.lg),
-                  if (url != null) ...[
-                    QrCodeView(data: url, size: 196),
+        width: 400,
+        child: SingleChildScrollView(
+          child: _errorText != null
+              ? Text(_errorText!, style: TextStyle(color: tokens.danger))
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _statusText,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: Space.md),
+                    if (url != null) ...[
+                      QrCodeView(data: url, size: 184),
+                      const SizedBox(height: Space.md),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.md,
+                          vertical: Space.sm,
+                        ),
+                        decoration: BoxDecoration(
+                          color: tokens.surface,
+                          borderRadius: BorderRadius.circular(Radii.control),
+                          border: Border.all(
+                            color: tokens.accent.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.wifi_rounded,
+                                size: 16, color: tokens.accent),
+                            const SizedBox(width: Space.sm),
+                            Flexible(
+                              child: Text(
+                                url,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  fontFamily: 'monospace',
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures(),
+                                  ],
+                                  color: tokens.ink,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ] else
+                      const Padding(
+                        padding: EdgeInsets.all(Space.xl),
+                        child: CircularProgressIndicator(),
+                      ),
+                    if (_importing) ...[
+                      const SizedBox(height: Space.md),
+                      const LinearProgressIndicator(),
+                    ],
                     const SizedBox(height: Space.md),
                     Container(
+                      width: double.infinity,
                       padding: const EdgeInsets.symmetric(
                         horizontal: Space.md,
                         vertical: Space.sm,
@@ -383,47 +429,20 @@ class _TvReceiveDialogState extends State<_TvReceiveDialog> {
                       decoration: BoxDecoration(
                         color: tokens.surface,
                         borderRadius: BorderRadius.circular(Radii.control),
-                        border: Border.all(
-                          color: tokens.accent.withValues(alpha: 0.45),
+                        border: Border.all(color: tokens.line),
+                      ),
+                      child: Text(
+                        '1. Наведите камеру на QR-код\n2. Вставьте ссылку подписки или сервера\n3. Нажмите «Отправить в Tachyon»',
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.45,
+                          color: tokens.muted,
                         ),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.wifi_rounded,
-                              size: 16, color: tokens.accent),
-                          const SizedBox(width: Space.sm),
-                          Flexible(
-                            child: Text(
-                              url,
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                fontFamily: 'monospace',
-                                color: tokens.ink,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
-                  ] else
-                    const Padding(
-                      padding: EdgeInsets.all(Space.xl),
-                      child: CircularProgressIndicator(),
-                    ),
-                  if (_importing) ...[
-                    const SizedBox(height: Space.md),
-                    const LinearProgressIndicator(),
                   ],
-                  const SizedBox(height: Space.md),
-                  const Pill(
-                    label:
-                        '1. Наведите камеру телефона на QR   2. Вставьте ссылку   3. Нажмите Отправить',
-                    icon: Icons.phonelink_rounded,
-                  ),
-                ],
-              ),
+                ),
+        ),
       ),
       actions: [
         FilledButton(

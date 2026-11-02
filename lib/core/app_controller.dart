@@ -2728,6 +2728,8 @@ class AppController extends ChangeNotifier {
       final soFile = File('${updateDir.path}/libtachyon.so');
       final candidateUrls = <String>[
         if (_latestCoreSoUrl.isNotEmpty) _latestCoreSoUrl,
+        'https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
+        'https://ghfast.top/https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
         'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',
         'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
         'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',

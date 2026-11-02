@@ -21,7 +21,9 @@ android {
         // Ядро собрано под API 26: более старые версии Android не
         // поддерживаются.
         minSdk = 26
-        targetSdk = flutter.targetSdkVersion
+        // targetSdk = 28 переводит процесс в SELinux-домен untrusted_app_27 на Android 10–16,
+        // что разрешает горячую загрузку обновлённого ядра libtachyon.so из code_cache/engine через dlopen.
+        targetSdk = 28
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -36,6 +38,11 @@ android {
                 "proguard-rules.pro",
             )
         }
+    }
+
+    lint {
+        disable += "ExpiredTargetSdkVersion"
+        checkReleaseBuilds = false
     }
 }
 

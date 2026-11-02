@@ -13,6 +13,7 @@ import '../../core/models/runtime_config.dart';
 import '../../core/models/tunnel_state.dart';
 import '../connections/connections_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
+import '../profiles/tv_receive_dialog.dart';
 
 /// Главный экран: состояние туннеля и его включение.
 class HomeTab extends StatefulWidget {
@@ -62,6 +63,202 @@ class _HomeTabState extends State<HomeTab> {
     final tunnel = controller.tunnel;
     final isDesyncMode = controller.settings.routingMode == RoutingMode.desync;
 
+    final isWideTv = MediaQuery.sizeOf(context).width >= 780;
+
+    final dialAndModeColumn = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: Space.xs),
+        _PowerDial(
+          status: tunnel.status,
+          downSpeed: controller.downSpeed,
+          upSpeed: controller.upSpeed,
+          pingMs: controller.urlTestPing,
+          onPressed: (controller.canConnect ||
+                  controller.settings.subscriptions.isNotEmpty)
+              ? controller.toggleTunnel
+              : null,
+        ),
+        const SizedBox(height: Space.md),
+        _StatusLine(
+          tunnel: tunnel,
+          fallbackServerName: isDesyncMode
+              ? 'Режим Обход DPI (Desync)'
+              : (controller.selectedProfile?.name ?? ''),
+        ),
+        if (tunnel.error.isNotEmpty) ...[
+          const SizedBox(height: Space.md),
+          HairlineCard(
+            padding: const EdgeInsets.all(Space.md),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.error_outline,
+                  size: 16,
+                  color: tokens.danger,
+                ),
+                const SizedBox(width: Space.sm),
+                Expanded(
+                  child: Text(
+                    tunnel.error,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.4,
+                      color: tokens.danger,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: Space.lg),
+        _QuickRoutingBar(controller: controller),
+      ],
+    );
+
+    final detailsListChildren = <Widget>[
+      if (tunnel.status.isActive) ...[
+        if (!isWideTv) const SizedBox(height: Space.lg),
+        _ExitNodeCard(controller: controller),
+        const SizedBox(height: Space.lg),
+      ] else if (!isWideTv) ...[
+        const SizedBox(height: Space.lg),
+      ],
+      _TrafficRow(controller: controller),
+      const SizedBox(height: Space.lg),
+      _StatsRow(controller: controller),
+      const SizedBox(height: Space.lg),
+      _ProfileCard(controller: controller),
+      const SizedBox(height: Space.lg),
+      _FreeTunnelsCard(controller: controller),
+      if (controller.settings.profiles.isNotEmpty) ...[
+        const SizedBox(height: Space.lg),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                onChanged: (v) => setState(() => _searchQuery = v),
+                decoration: const InputDecoration(
+                  hintText: 'Поиск сервера или страны...',
+                  prefixIcon: Icon(Icons.search, size: 18),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: Space.sm),
+            FilledButton.tonalIcon(
+              onPressed: controller.pingingAll
+                  ? null
+                  : () async {
+                      final best = await controller.autoSelectBestServer();
+                      if (!context.mounted || best == null) return;
+                      final ms = controller.pingOf(best.id);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Выбран лучший сервер: ${best.name} (${ms}ms)',
+                          ),
+                        ),
+                      );
+                    },
+              icon: controller.pingingAll
+                  ? SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: tokens.accent,
+                      ),
+                    )
+                  : const Icon(Icons.auto_awesome, size: 16),
+              label: const Text('Лучший'),
+            ),
+          ],
+        ),
+        const SizedBox(height: Space.md),
+        if (controller.settings.subscriptions.isNotEmpty) ...[
+          for (final sub in controller.settings.subscriptions) ...[
+            _buildSubscriptionSection(context, controller, sub),
+            const SizedBox(height: Space.md),
+          ],
+          if (controller.settings.profiles
+              .any((p) => p.subscriptionId.isEmpty)) ...[
+            SectionLabel(
+              'Пользовательские серверы',
+              trailing: Text(
+                '${controller.settings.profiles.where((p) => p.subscriptionId.isEmpty).length}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+            for (final p in _filter(controller.sortProfiles(
+              controller.settings.profiles
+                  .where((p) => p.subscriptionId.isEmpty)
+                  .toList(),
+            ))) ...[
+              _DashboardServerTile(
+                profile: p,
+                selected: p.id == controller.settings.selectedProfileId,
+                ping: controller.pingOf(p.id),
+                isPinging: controller.isPinging(p.id),
+                onSelect: () => controller.selectProfile(p.id),
+                onPing: () => controller.pingProfile(p.id),
+              ),
+              const SizedBox(height: Space.sm),
+            ],
+          ],
+        ] else ...[
+          SectionLabel(
+            'Серверы',
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Сортировать по пингу',
+                  icon: Icon(
+                    Icons.sort_rounded,
+                    size: 18,
+                    color: controller.sortByPing ? tokens.accent : tokens.muted,
+                  ),
+                  onPressed: controller.toggleSortByPing,
+                ),
+                IconButton(
+                  tooltip: 'Пропинговать все',
+                  icon: controller.pingingAll
+                      ? SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: tokens.accent,
+                          ),
+                        )
+                      : const Icon(Icons.network_ping, size: 18),
+                  onPressed: controller.pingingAll
+                      ? null
+                      : () => controller.pingAllProfiles(),
+                ),
+              ],
+            ),
+          ),
+          for (final p in _filter(
+              controller.sortProfiles(controller.settings.profiles))) ...[
+            _DashboardServerTile(
+              profile: p,
+              selected: p.id == controller.settings.selectedProfileId,
+              ping: controller.pingOf(p.id),
+              isPinging: controller.isPinging(p.id),
+              onSelect: () => controller.selectProfile(p.id),
+              onPing: () => controller.pingProfile(p.id),
+            ),
+            const SizedBox(height: Space.sm),
+          ],
+        ],
+      ],
+      const SizedBox(height: Space.lg),
+    ];
+
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(Space.lg, Space.lg, Space.lg, 0),
@@ -70,6 +267,11 @@ class _HomeTabState extends State<HomeTab> {
             Row(
               children: [
                 const Expanded(child: Wordmark(subtitle: 'ЗАЩИТА СОЕДИНЕНИЯ')),
+                IconButton(
+                  tooltip: 'Принять подписку с телефона по Wi-Fi (Android TV)',
+                  onPressed: () => showTvReceiveDialog(context, controller),
+                  icon: const Icon(Icons.tv_rounded, size: 20),
+                ),
                 IconButton(
                   tooltip: 'Сканировать QR-код подписки или сервера',
                   onPressed: () async {
@@ -101,197 +303,32 @@ class _HomeTabState extends State<HomeTab> {
             ),
             const SizedBox(height: Space.xl),
             Expanded(
-              child: SingleChildScrollView(
-                child: Column(
-                  children: [
-                    const SizedBox(height: Space.xs),
-                    _PowerDial(
-                      status: tunnel.status,
-                      downSpeed: controller.downSpeed,
-                      upSpeed: controller.upSpeed,
-                      pingMs: controller.urlTestPing,
-                      onPressed: (controller.canConnect ||
-                              controller.settings.subscriptions.isNotEmpty)
-                          ? controller.toggleTunnel
-                          : null,
-                    ),
-                    const SizedBox(height: Space.md),
-                    _StatusLine(
-                      tunnel: tunnel,
-                      fallbackServerName: isDesyncMode
-                          ? 'Режим Обход DPI (Desync)'
-                          : (controller.selectedProfile?.name ?? ''),
-                    ),
-                    if (tunnel.error.isNotEmpty) ...[
-                      const SizedBox(height: Space.md),
-                      HairlineCard(
-                        padding: const EdgeInsets.all(Space.md),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Icon(
-                              Icons.error_outline,
-                              size: 16,
-                              color: tokens.danger,
-                            ),
-                            const SizedBox(width: Space.sm),
-                            Expanded(
-                              child: Text(
-                                tunnel.error,
-                                style: TextStyle(
-                                  fontSize: 12.5,
-                                  height: 1.4,
-                                  color: tokens.danger,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: Space.lg),
-                    _QuickRoutingBar(controller: controller),
-                    if (tunnel.status.isActive) ...[
-                      const SizedBox(height: Space.lg),
-                      _ExitNodeCard(controller: controller),
-                    ],
-                    const SizedBox(height: Space.lg),
-                    _TrafficRow(controller: controller),
-                    const SizedBox(height: Space.lg),
-                    _StatsRow(controller: controller),
-                    const SizedBox(height: Space.lg),
-                    _ProfileCard(controller: controller),
-                    const SizedBox(height: Space.lg),
-                    _FreeTunnelsCard(controller: controller),
-                    if (controller.settings.profiles.isNotEmpty) ...[
-                      const SizedBox(height: Space.lg),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              onChanged: (v) => setState(() => _searchQuery = v),
-                              decoration: const InputDecoration(
-                                hintText: 'Поиск сервера или страны...',
-                                prefixIcon: Icon(Icons.search, size: 18),
-                                isDense: true,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: Space.sm),
-                          FilledButton.tonalIcon(
-                            onPressed: controller.pingingAll
-                                ? null
-                                : () async {
-                                    final best = await controller.autoSelectBestServer();
-                                    if (!context.mounted || best == null) return;
-                                    final ms = controller.pingOf(best.id);
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          'Выбран лучший сервер: ${best.name} (${ms}ms)',
-                                        ),
-                                      ),
-                                    );
-                                  },
-                            icon: controller.pingingAll
-                                ? SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: tokens.accent,
-                                    ),
-                                  )
-                                : const Icon(Icons.auto_awesome, size: 16),
-                            label: const Text('Лучший'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: Space.md),
-                      if (controller.settings.subscriptions.isNotEmpty) ...[
-                        for (final sub in controller.settings.subscriptions) ...[
-                          _buildSubscriptionSection(context, controller, sub),
-                          const SizedBox(height: Space.md),
-                        ],
-                        if (controller.settings.profiles
-                            .any((p) => p.subscriptionId.isEmpty)) ...[
-                          SectionLabel(
-                            'Пользовательские серверы',
-                            trailing: Text(
-                              '${controller.settings.profiles.where((p) => p.subscriptionId.isEmpty).length}',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ),
-                          for (final p in _filter(controller.sortProfiles(
-                            controller.settings.profiles
-                                .where((p) => p.subscriptionId.isEmpty)
-                                .toList(),
-                          ))) ...[
-                            _DashboardServerTile(
-                              profile: p,
-                              selected: p.id == controller.settings.selectedProfileId,
-                              ping: controller.pingOf(p.id),
-                              isPinging: controller.isPinging(p.id),
-                              onSelect: () => controller.selectProfile(p.id),
-                              onPing: () => controller.pingProfile(p.id),
-                            ),
-                            const SizedBox(height: Space.sm),
-                          ],
-                        ],
-                      ] else ...[
-                        SectionLabel(
-                          'Серверы',
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: 'Сортировать по пингу',
-                                icon: Icon(
-                                  Icons.sort_rounded,
-                                  size: 18,
-                                  color: controller.sortByPing
-                                      ? tokens.accent
-                                      : tokens.muted,
-                                ),
-                                onPressed: controller.toggleSortByPing,
-                              ),
-                              IconButton(
-                                tooltip: 'Пропинговать все',
-                                icon: controller.pingingAll
-                                    ? SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: tokens.accent,
-                                        ),
-                                      )
-                                    : const Icon(Icons.network_ping, size: 18),
-                                onPressed: controller.pingingAll
-                                    ? null
-                                    : () => controller.pingAllProfiles(),
-                              ),
-                            ],
+              child: isWideTv
+                  ? Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 340,
+                          child: SingleChildScrollView(
+                            child: dialAndModeColumn,
                           ),
                         ),
-                        for (final p in _filter(
-                            controller.sortProfiles(controller.settings.profiles))) ...[
-                          _DashboardServerTile(
-                            profile: p,
-                            selected: p.id == controller.settings.selectedProfileId,
-                            ping: controller.pingOf(p.id),
-                            isPinging: controller.isPinging(p.id),
-                            onSelect: () => controller.selectProfile(p.id),
-                            onPing: () => controller.pingProfile(p.id),
+                        const SizedBox(width: Space.xl),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            child: Column(children: detailsListChildren),
                           ),
-                          const SizedBox(height: Space.sm),
-                        ],
+                        ),
                       ],
-                    ],
-                    const SizedBox(height: Space.lg),
-                  ],
-                ),
-              ),
+                    )
+                  : SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          dialAndModeColumn,
+                          ...detailsListChildren,
+                        ],
+                      ),
+                    ),
             ),
           ],
         ),
@@ -483,6 +520,7 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
   late final AnimationController _loopController;
   late final AnimationController _revealController;
   bool _pressed = false;
+  bool _focused = false;
 
   @override
   void initState() {
@@ -568,112 +606,137 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
         ? _shortSpeed(widget.downSpeed + widget.upSpeed)
         : '';
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: widget.onPressed == null
-          ? null
-          : (_) {
-              HapticFeedback.lightImpact();
-              setState(() => _pressed = true);
-            },
-      onTapCancel: () {
-        if (_pressed) setState(() => _pressed = false);
+    return FocusableActionDetector(
+      autofocus: true,
+      enabled: widget.onPressed != null,
+      onShowFocusHighlight: (f) {
+        if (_focused != f) setState(() => _focused = f);
       },
-      onTapUp: widget.onPressed == null
-          ? null
-          : (_) {
-              setState(() => _pressed = false);
-              HapticFeedback.mediumImpact();
-              widget.onPressed?.call();
-            },
-      child: AnimatedScale(
-        scale: _pressed ? 0.958 : 1.0,
-        duration: Duration(milliseconds: _pressed ? 95 : 190),
-        curve: _pressed ? Curves.easeOutQuad : Curves.elasticOut,
-        child: SizedBox(
-          width: 256,
-          height: 256,
-          child: AnimatedBuilder(
-            animation: Listenable.merge([_loopController, _revealController]),
-            builder: (context, child) {
-              return CustomPaint(
-                painter: _TachyonDialPainter(
-                  status: widget.status,
-                  phase: _loopController.value,
-                  reveal: CurvedAnimation(
-                    parent: _revealController,
-                    curve: Curves.easeOutCubic,
-                  ).value,
-                  primaryColor: primary,
-                  secondaryColor: secondary,
-                  surfaceColor: tokens.raised,
-                  lineColor: tokens.line,
-                  inkColor: tokens.ink,
-                  downSpeed: widget.downSpeed,
-                ),
-                child: child,
-              );
-            },
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 260),
-                    transitionBuilder: (child, anim) => ScaleTransition(
-                      scale: anim,
-                      child: FadeTransition(opacity: anim, child: child),
+      actions: <Type, Action<Intent>>{
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            HapticFeedback.mediumImpact();
+            widget.onPressed?.call();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: widget.onPressed == null
+            ? null
+            : (_) {
+                HapticFeedback.lightImpact();
+                setState(() => _pressed = true);
+              },
+        onTapCancel: () {
+          if (_pressed) setState(() => _pressed = false);
+        },
+        onTapUp: widget.onPressed == null
+            ? null
+            : (_) {
+                setState(() => _pressed = false);
+                HapticFeedback.mediumImpact();
+                widget.onPressed?.call();
+              },
+        child: AnimatedScale(
+          scale: _pressed ? 0.958 : (_focused ? 1.04 : 1.0),
+          duration: Duration(milliseconds: _pressed ? 95 : 190),
+          curve: _pressed ? Curves.easeOutQuad : Curves.elasticOut,
+          child: Container(
+            width: 256,
+            height: 256,
+            decoration: _focused
+                ? BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: tokens.accent.withValues(alpha: 0.85),
+                      width: 2.2,
                     ),
-                    child: TachyonBoltIcon(
-                      key: ValueKey<VpnStatus>(widget.status),
-                      size: widget.status == VpnStatus.connected ? 62 : 56,
-                      primaryColor: widget.status == VpnStatus.disconnected
-                          ? tokens.ink.withValues(alpha: 0.9)
-                          : Colors.white,
-                      secondaryColor: widget.status == VpnStatus.disconnected
-                          ? const Color(0xFF60A5FA)
-                          : primary,
-                      glow: widget.status.isActive || widget.status.isBusy,
-                    ),
+                  )
+                : null,
+            child: AnimatedBuilder(
+              animation: Listenable.merge([_loopController, _revealController]),
+              builder: (context, child) {
+                return CustomPaint(
+                  painter: _TachyonDialPainter(
+                    status: widget.status,
+                    phase: _loopController.value,
+                    reveal: CurvedAnimation(
+                      parent: _revealController,
+                      curve: Curves.easeOutCubic,
+                    ).value,
+                    primaryColor: primary,
+                    secondaryColor: secondary,
+                    surfaceColor: tokens.raised,
+                    lineColor: tokens.line,
+                    inkColor: tokens.ink,
+                    downSpeed: widget.downSpeed,
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    label.toUpperCase(),
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1.7,
-                      color: widget.status == VpnStatus.disconnected
-                          ? tokens.muted
-                          : primary,
-                    ),
-                  ),
-                  if (liveSpeed.isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      '⚡ $liveSpeed',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'monospace',
-                        color: tokens.ink.withValues(alpha: 0.9),
+                  child: child,
+                );
+              },
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 260),
+                      transitionBuilder: (child, anim) => ScaleTransition(
+                        scale: anim,
+                        child: FadeTransition(opacity: anim, child: child),
+                      ),
+                      child: TachyonBoltIcon(
+                        key: ValueKey<VpnStatus>(widget.status),
+                        size: widget.status == VpnStatus.connected ? 62 : 56,
+                        primaryColor: widget.status == VpnStatus.disconnected
+                            ? tokens.ink.withValues(alpha: 0.9)
+                            : Colors.white,
+                        secondaryColor: widget.status == VpnStatus.disconnected
+                            ? const Color(0xFF60A5FA)
+                            : primary,
+                        glow: widget.status.isActive || widget.status.isBusy,
                       ),
                     ),
-                  ] else if (widget.status == VpnStatus.connected &&
-                      widget.pingMs != null &&
-                      widget.pingMs! > 0) ...[
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 6),
                     Text(
-                      '${widget.pingMs} мс',
+                      label.toUpperCase(),
                       style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'monospace',
-                        color: tokens.muted,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.7,
+                        color: widget.status == VpnStatus.disconnected
+                            ? tokens.muted
+                            : primary,
                       ),
                     ),
+                    if (liveSpeed.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '⚡ $liveSpeed',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          fontFamily: 'monospace',
+                          color: tokens.ink.withValues(alpha: 0.9),
+                        ),
+                      ),
+                    ] else if (widget.status == VpnStatus.connected &&
+                        widget.pingMs != null &&
+                        widget.pingMs! > 0) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '${widget.pingMs} мс',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          fontFamily: 'monospace',
+                          color: tokens.muted,
+                        ),
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -1976,39 +2039,44 @@ class _QuickRoutingBar extends StatelessWidget {
         children: [
           for (final mode in RoutingMode.values)
             Expanded(
-              child: GestureDetector(
-                onTap: () => controller.setRoutingMode(mode),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                  decoration: BoxDecoration(
-                    color: current == mode
-                        ? (mode == RoutingMode.desync
-                            ? tokens.warning.withValues(alpha: 0.16)
-                            : tokens.accent.withValues(alpha: 0.16))
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(8),
-                    border: current == mode
-                        ? Border.all(
-                            color: mode == RoutingMode.desync
-                                ? tokens.warning.withValues(alpha: 0.5)
-                                : tokens.accent.withValues(alpha: 0.5),
-                          )
-                        : null,
-                  ),
-                  child: Text(
-                    mode == RoutingMode.bypass ? 'Исключения' : mode.label,
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      fontWeight:
-                          current == mode ? FontWeight.w600 : FontWeight.w400,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => controller.setRoutingMode(mode),
+                  borderRadius: BorderRadius.circular(8),
+                  focusColor: tokens.accent.withValues(alpha: 0.24),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                    decoration: BoxDecoration(
                       color: current == mode
                           ? (mode == RoutingMode.desync
-                              ? tokens.warning
-                              : tokens.accent)
-                          : tokens.muted,
+                              ? tokens.warning.withValues(alpha: 0.16)
+                              : tokens.accent.withValues(alpha: 0.16))
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                      border: current == mode
+                          ? Border.all(
+                              color: mode == RoutingMode.desync
+                                  ? tokens.warning.withValues(alpha: 0.5)
+                                  : tokens.accent.withValues(alpha: 0.5),
+                            )
+                          : null,
+                    ),
+                    child: Text(
+                      mode == RoutingMode.bypass ? 'Исключения' : mode.label,
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight:
+                            current == mode ? FontWeight.w600 : FontWeight.w400,
+                        color: current == mode
+                            ? (mode == RoutingMode.desync
+                                ? tokens.warning
+                                : tokens.accent)
+                            : tokens.muted,
+                      ),
                     ),
                   ),
                 ),
@@ -2085,41 +2153,46 @@ class _DashboardServerTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Space.sm),
-          GestureDetector(
-            onTap: onPing,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: tokens.raised,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: tokens.line),
-              ),
-              child: isPinging
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: tokens.accent,
-                      ),
-                    )
-                  : ping == null
-                      ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
-                      : Text(
-                          ping! < 0 ? '✗' : '${ping}ms',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            fontFamily: 'monospace',
-                            color: ping! < 0
-                                ? tokens.danger
-                                : ping! < 150
-                                    ? tokens.success
-                                    : ping! < 400
-                                        ? tokens.warning
-                                        : tokens.danger,
-                          ),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onPing,
+              borderRadius: BorderRadius.circular(6),
+              focusColor: tokens.accent.withValues(alpha: 0.24),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: tokens.raised,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: tokens.line),
+                ),
+                child: isPinging
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: tokens.accent,
                         ),
+                      )
+                    : ping == null
+                        ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
+                        : Text(
+                            ping! < 0 ? '✗' : '${ping}ms',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              fontFamily: 'monospace',
+                              color: ping! < 0
+                                  ? tokens.danger
+                                  : ping! < 150
+                                      ? tokens.success
+                                      : ping! < 400
+                                          ? tokens.warning
+                                          : tokens.danger,
+                            ),
+                          ),
+              ),
             ),
           ),
         ],

@@ -104,7 +104,7 @@ class AppController extends ChangeNotifier {
   String _lastNetType = '';
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.4';
+  static const String appVersion = '0.0.5';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -2758,11 +2758,19 @@ class AppController extends ChangeNotifier {
       }
       final res = await bridge.installEngineSo(soFile.path);
       if (res == 'ok') {
+        if (_latestCoreVersion.isNotEmpty) {
+          _installedCoreVersion = _latestCoreVersion;
+        }
         _updateProgress = 1.0;
-        _updateStatusText = 'Ядро tachyon-core успешно обновлено — перезапуск...';
-      } else if (res == 'requires_apk') {
         _updateStatusText =
-            'Политика SELinux вашей прошивки блокирует подмену .so из кэша — используйте «APK»';
+            'Ядро tachyon-core v$_installedCoreVersion успешно обновлено — перезапуск...';
+      } else if (res == 'requires_apk') {
+        _updatingEngine = false;
+        _updateStatusText =
+            'Загрузчик .so требует обновления базового пакета — скачиваем и запускаем установку APK...';
+        notifyListeners();
+        await updateAppOnly();
+        return;
       } else {
         _updateStatusText = 'Ошибка установки ядра: $res';
       }

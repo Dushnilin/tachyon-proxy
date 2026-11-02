@@ -56,7 +56,7 @@ jobs:
             echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            if [ -n "$PRIVATE_TOKEN" ] && [ "$current_core" != "$latest_core" ] && GH_TOKEN="$PRIVATE_TOKEN" gh api user >/dev/null 2>&1; then
+            if [ -n "$PRIVATE_TOKEN" ] && ( [ "$current_core" != "$latest_core" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] ); then
               echo "rebuild_core=true" >> "$GITHUB_OUTPUT"
             else
               echo "rebuild_core=false" >> "$GITHUB_OUTPUT"
@@ -175,6 +175,7 @@ jobs:
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/tachyon-proxy-armeabi-v7a.apk
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/tachyon-proxy-x86_64.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-universal.apk
+          cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-android-tv.apk
           cp android/app/src/main/jniLibs/arm64-v8a/libtachyon.so dist/libtachyon-arm64-v8a.so
           cp android/app/src/main/jniLibs/armeabi-v7a/libtachyon.so dist/libtachyon-armeabi-v7a.so
           cp android/app/src/main/jniLibs/x86_64/libtachyon.so dist/libtachyon-x86_64.so
@@ -189,6 +190,7 @@ jobs:
             "apk_arm64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-arm64-v8a.apk",
             "apk_armv7": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-armeabi-v7a.apk",
             "apk_x86_64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-x86_64.apk",
+            "apk_android_tv": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-android-tv.apk",
             "so_arm64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-arm64-v8a.so",
             "so_armv7": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-armeabi-v7a.so",
             "so_x86_64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-x86_64.so"
@@ -214,9 +216,10 @@ jobs:
           body: |
             Автоматическая сборка **Tachyon Proxy v${{ steps.core_check.outputs.app_ver }}** со встроенным ядром **`tachyon-core v${{ steps.core_check.outputs.latest_core }}`** (${{ github.sha }}).
 
-            ### 📦 Установочные пакеты Android (APK)
-            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных Android-устройств (64-bit ARM)
-            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и ТВ-приставок
+            ### 📦 Установочные пакеты Android и Android TV (APK)
+            - **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (32-bit `armeabi-v7a` + 64-bit `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок с телефона по Wi-Fi QR)
+            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных смартфонов и планшетов (64-bit ARM)
+            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и лёгких приставок
             - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
             - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
 

@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <!-- Тёмно-обсидиановый фон баннера Android TV -->
+    <path
+        android:pathData="M0,0 H320 V180 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="320"
+                android:endY="180"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#0C0F1D" />
+                <item android:offset="0.5" android:color="#11162B" />
+                <item android:offset="1.0" android:color="#080A14" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Мягкое энергетическое свечение вокруг эмблемы -->
+    <path
+        android:pathData="M78,34 A56,56 0 1,1 77.99,34 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="78"
+                android:centerY="90"
+                android:gradientRadius="56"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#333B82F6" />
+                <item android:offset="0.6" android:color="#1410B981" />
+                <item android:offset="1.0" android:color="#00080A14" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Бирюзово-синее энергетическое кольцо Tachyon -->
+    <path
+        android:pathData="M78,50 A40,40 0 1,1 77.99,50"
+        android:strokeWidth="4.5">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="38"
+                android:startY="50"
+                android:endX="118"
+                android:endY="130"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#3B82F6" />
+                <item android:offset="1.0" android:color="#10B981" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Тёмный внутренний диск ядра -->
+    <path
+        android:pathData="M78,54 A36,36 0 1,1 77.99,54 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="78"
+                android:centerY="90"
+                android:gradientRadius="36"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#17325C" />
+                <item android:offset="1.0" android:color="#090D1A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Тень под двухгранной молнией -->
+    <path
+        android:fillColor="#66000000"
+        android:pathData="M84.0,61.0 L58.0,95.5 H75.7 L72.0,123.5 L98.0,89.0 H80.3 Z" />
+
+    <!-- Полный контур молнии (правая голубая грань) -->
+    <path
+        android:pathData="M84.0,58.5 L58.0,93.0 H75.7 L72.0,121.0 L98.0,86.5 H80.3 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="65"
+                android:startY="58"
+                android:endX="95"
+                android:endY="121"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#DBEAFE" />
+                <item android:offset="1.0" android:color="#60A5FA" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Левая светлая 3D-грань молнии -->
+    <path
+        android:pathData="M84.0,58.5 L58.0,93.0 H75.7 L80.3,86.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="58"
+                android:startY="58"
+                android:endX="80"
+                android:endY="93"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFFFF" />
+                <item android:offset="1.0" android:color="#E0F2FE" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Геометрическая надпись TACHYON справа от эмблемы -->
+    <!-- T -->
+    <path android:fillColor="#F4F1FA" android:pathData="M136,72 H152 V76 H146 V96 H142 V76 H136 Z" />
+    <!-- A -->
+    <path android:fillColor="#F4F1FA" android:pathData="M164,72 H168 L176,96 H172 L170.2,90 H161.8 L160,96 H156 Z M163,86 H169 L166,76.5 Z" />
+    <!-- C -->
+    <path android:fillColor="#F4F1FA" android:pathData="M196,76 H186 V92 H196 V96 H182 V72 H196 Z" />
+    <!-- H -->
+    <path android:fillColor="#F4F1FA" android:pathData="M203,72 H207 V82 H217 V72 H221 V96 H217 V86 H207 V96 H203 Z" />
+    <!-- Y -->
+    <path android:fillColor="#F4F1FA" android:pathData="M227,72 H231.5 L236.5,82 L241.5,72 H246 L238.5,86 V96 H234.5 V86 Z" />
+    <!-- O -->
+    <path android:fillColor="#F4F1FA" android:pathData="M252,72 H268 V96 H252 Z M256,76 V92 H264 V76 Z" />
+    <!-- N -->
+    <path android:fillColor="#F4F1FA" android:pathData="M275,72 H279.5 L289,88.5 V72 H293 V96 H288.5 L279,79.5 V96 H275 Z" />
+
+    <!-- Декоративная градиентная линия под названием -->
+    <path
+        android:pathData="M136,106 H293 V108.5 H136 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="136"
+                android:startY="106"
+                android:endX="293"
+                android:endY="106"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#3B82F6" />
+                <item android:offset="0.5" android:color="#A78BFA" />
+                <item android:offset="1.0" android:color="#10B981" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

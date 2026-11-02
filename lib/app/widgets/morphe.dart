@@ -31,8 +31,9 @@ class SectionLabel extends StatelessWidget {
   }
 }
 
-/// Карточка с hairline-границей: без тени, без заливки-градиента.
-class HairlineCard extends StatelessWidget {
+/// Карточка с hairline-границей: без тени, без заливки-градиента,
+/// с поддержкой подсветки фокуса для пульта Android TV (D-pad).
+class HairlineCard extends StatefulWidget {
   const HairlineCard({
     super.key,
     required this.child,
@@ -45,21 +46,35 @@ class HairlineCard extends StatelessWidget {
   final VoidCallback? onTap;
 
   @override
+  State<HairlineCard> createState() => _HairlineCardState();
+}
+
+class _HairlineCardState extends State<HairlineCard> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
-    final content = Padding(padding: padding, child: child);
+    final content = Padding(padding: widget.padding, child: widget.child);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: tokens.raised,
         borderRadius: BorderRadius.circular(Radii.card),
-        border: Border.all(color: tokens.line),
+        border: Border.all(
+          color: _focused ? tokens.accent : tokens.line,
+          width: _focused ? 1.8 : 1.0,
+        ),
       ),
-      child: onTap == null
+      child: widget.onTap == null
           ? content
           : Material(
               color: Colors.transparent,
               child: InkWell(
-                onTap: onTap,
+                onTap: widget.onTap,
+                onFocusChange: (f) {
+                  if (_focused != f) setState(() => _focused = f);
+                },
+                focusColor: tokens.accent.withValues(alpha: 0.14),
                 borderRadius: BorderRadius.circular(Radii.card),
                 child: content,
               ),

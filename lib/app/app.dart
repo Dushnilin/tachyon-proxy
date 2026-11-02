@@ -49,6 +49,16 @@ class TachyonApp extends StatelessWidget {
             title: 'Tachyon',
             debugShowCheckedModeBanner: false,
             theme: isDark ? TachyonTheme.dark() : TachyonTheme.light(),
+            shortcuts: <ShortcutActivator, Intent>{
+              ...WidgetsApp.defaultShortcuts,
+              // Пульт Android TV / D-pad центральная клавиша OK (KEYCODE_DPAD_CENTER / BUTTON_A)
+              const SingleActivator(LogicalKeyboardKey.select):
+                  const ActivateIntent(),
+              const SingleActivator(LogicalKeyboardKey.gameButtonA):
+                  const ActivateIntent(),
+              const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                  const ActivateIntent(),
+            },
             home: const RootShell(),
           );
         },

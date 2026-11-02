@@ -36,6 +36,9 @@ abstract final class TachyonTheme {
 
     return base.copyWith(
       extensions: [t],
+      focusColor: t.accent.withValues(alpha: 0.24),
+      hoverColor: t.accent.withValues(alpha: 0.12),
+      highlightColor: t.accent.withValues(alpha: 0.16),
       textTheme: _text(base.textTheme, t),
       dividerTheme: DividerThemeData(color: t.line, thickness: 1, space: 1),
       appBarTheme: AppBarTheme(

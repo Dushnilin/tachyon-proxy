@@ -9,6 +9,7 @@ import '../../app/widgets/morphe.dart';
 import '../../app/widgets/qr_code_view.dart';
 import '../../core/app_controller.dart';
 import '../../core/models/runtime_config.dart';
+import 'tv_receive_dialog.dart';
 
 /// Экран профилей: список серверов и импорт подписки.
 class ProfilesTab extends StatefulWidget {
@@ -85,6 +86,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
               icon: const Icon(Icons.network_ping),
             ),
           IconButton(
+            tooltip: 'Принять с телефона по Wi-Fi (Android TV)',
+            onPressed: () => showTvReceiveDialog(context, controller),
+            icon: const Icon(Icons.tv_rounded),
+          ),
+          IconButton(
             tooltip: 'Сканировать QR-код',
             onPressed: () => _handleQrScan(context, controller, fromGallery: false),
             icon: const Icon(Icons.qr_code_scanner_rounded),
@@ -120,6 +126,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     onPressed: () => _showImportDialog(context, controller),
                     icon: const Icon(Icons.file_download_outlined, size: 18),
                     label: const Text('Импортировать'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => showTvReceiveDialog(context, controller),
+                    icon: const Icon(Icons.tv_rounded, size: 18),
+                    label: const Text('Принять на ТВ (Wi-Fi)'),
                   ),
                   OutlinedButton.icon(
                     onPressed: () => _handleQrScan(context, controller, fromGallery: false),
@@ -351,6 +362,18 @@ class _ProfilesTabState extends State<ProfilesTab> {
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: Space.sm),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.of(dialogContext).pop();
+                          showTvReceiveDialog(rootContext, controller);
+                        },
+                        icon: const Icon(Icons.tv_rounded, size: 18),
+                        label: const Text('Принять с телефона по Wi-Fi (Android TV)'),
+                      ),
                     ),
                     const SizedBox(height: Space.md),
                     TextField(

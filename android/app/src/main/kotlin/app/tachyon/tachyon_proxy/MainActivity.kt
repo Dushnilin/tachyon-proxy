@@ -116,6 +116,16 @@ class MainActivity : FlutterFragmentActivity() {
     private val iconCache = LruCache<String, ByteArray>(256)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        runCatching {
+            @Suppress("DEPRECATION")
+            val pkgInfo = packageManager.getPackageInfo(packageName, 0)
+            val customSo = File(TachyonCore.CUSTOM_SO_PATH)
+            if (customSo.exists() && customSo.lastModified() < pkgInfo.lastUpdateTime) {
+                customSo.setWritable(true, true)
+                customSo.delete()
+                File(TachyonCore.CUSTOM_STAMP_PATH).delete()
+            }
+        }
         super.onCreate(savedInstanceState)
         intent?.getStringExtra("cmd")?.let { cmd ->
             if (cmd == "dump_log") {
@@ -562,16 +572,11 @@ class MainActivity : FlutterFragmentActivity() {
 
                 runOnUiThread {
                     result.success("ok")
-                    // Перезапускаем процесс приложения, чтобы TachyonCore загрузил новый .so с нуля
+                    // Перезапускаем процесс через RestartActivity (:restart), чтобы TachyonCore загрузил новый .so с нуля
                     window.decorView.postDelayed({
-                        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                        }
-                        if (launchIntent != null) {
-                            startActivity(launchIntent)
-                        }
-                        Runtime.getRuntime().exit(0)
-                    }, 400)
+                        runCatching { stopService(Intent(this, TachyonVpnService::class.java)) }
+                        org.tachyon.vpn.RestartActivity.triggerRebirth(this)
+                    }, 300)
                 }
             } catch (e: Throwable) {
                 runOnUiThread { result.success("requires_apk") }

@@ -410,17 +410,28 @@ class _SettingsTabState extends State<SettingsTab> {
                                 ),
                           ),
                           const SizedBox(height: 2),
-                          Text(
-                            _version.isEmpty
-                                ? 'Чтение версии нативного движка...'
-                                : (controller.hasCoreUpdate
-                                    ? 'Установлено: $_version · Доступно: v${controller.latestCoreVersion}'
-                                    : 'Установлено: $_version (горячая замена .so)'),
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: controller.hasCoreUpdate
-                                      ? tokens.success
-                                      : tokens.muted,
-                                ),
+                          Builder(
+                            builder: (context) {
+                              final shownVer =
+                                  controller.installedCoreVersion.isNotEmpty
+                                      ? controller.installedCoreVersion
+                                      : _version;
+                              return Text(
+                                shownVer.isEmpty
+                                    ? 'Чтение версии нативного движка...'
+                                    : (controller.hasCoreUpdate
+                                        ? 'Установлено: $shownVer · Доступно: v${controller.latestCoreVersion}'
+                                        : 'Установлено: $shownVer (горячая замена .so)'),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: controller.hasCoreUpdate
+                                          ? tokens.success
+                                          : tokens.muted,
+                                    ),
+                              );
+                            },
                           ),
                         ],
                       ),

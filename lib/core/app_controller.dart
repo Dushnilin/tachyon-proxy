@@ -2730,10 +2730,6 @@ class AppController extends ChangeNotifier {
         if (_latestCoreSoUrl.isNotEmpty) _latestCoreSoUrl,
         'https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
         'https://ghfast.top/https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-$abiSuffix.so',
-        'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',
-        'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
-        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/libtachyon-$abiSuffix.so',
-        'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/libtachyon-$abiSuffix.so',
       ];
 
       var downloaded = false;

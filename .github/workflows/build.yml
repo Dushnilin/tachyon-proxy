@@ -12,11 +12,10 @@ on:
   repository_dispatch:
     types: [core-updated]
   workflow_dispatch:
-    inputs:
-      force_rebuild_core:
-        description: 'Принудительно пересобрать libtachyon.so из tachyon-core-src'
-        required: false
-        default: 'false'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -32,125 +31,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check tachyon-core version & decide whether to run
+      - name: Check latest tachyon-core release
         id: core_check
         env:
           GH_TOKEN: ${{ github.token }}
-          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
-          current_core=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
           latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null | tr -d '\r' || true)
-          if [[ ! "$latest_tag" =~ ^v[0-9]+\.[0-9]+ ]]; then
-            latest_tag="v${current_core}"
+          if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+            echo "::error::Не удалось получить последний релиз из Dushnilin/tachyon-core"
+            exit 1
           fi
           latest_core="${latest_tag#v}"
           app_ver=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f1 | tr -d '\r')
-          echo "current_core=${current_core}" >> "$GITHUB_OUTPUT"
+          prev_core=$(curl -fsSL "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json" 2>/dev/null | jq -r '.core_version // empty' || true)
+
           echo "latest_core=${latest_core}" >> "$GITHUB_OUTPUT"
           echo "latest_tag=${latest_tag}" >> "$GITHUB_OUTPUT"
           echo "app_ver=${app_ver}" >> "$GITHUB_OUTPUT"
 
-          # Проверяем также, изменился ли бинарник libtachyon-arm64-v8a.so в релизе tachyon-core
-          local_sha=$(sha256sum android/app/src/main/jniLibs/arm64-v8a/libtachyon.so 2>/dev/null | awk '{print $1}' || true)
-          remote_sha=$(curl -fsSL "https://github.com/Dushnilin/tachyon-core/releases/download/${latest_tag}/SHA256SUMS" 2>/dev/null | grep 'libtachyon-arm64-v8a\.so' | awk '{print $1}' | head -n 1 || true)
-
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$current_core" = "$latest_core" ] && ( [ -z "$remote_sha" ] || [ "$local_sha" = "$remote_sha" ] ); then
-            echo "Ядро уже актуально (${current_core}), пропускаем плановую сборку."
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$prev_core" = "$latest_core" ]; then
+            echo "Ядро в релизе уже актуально (${latest_core}), пропускаем плановую сборку."
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "sync_core=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            if [ "$current_core" != "$latest_core" ] || [ "${{ github.event_name }}" = "repository_dispatch" ] || [ "${{ github.event.inputs.force_rebuild_core }}" = "true" ] || ( [ -n "$remote_sha" ] && [ "$local_sha" != "$remote_sha" ] ); then
-              echo "sync_core=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "sync_core=false" >> "$GITHUB_OUTPUT"
-            fi
           fi
 
-      - name: Download prebuilt libtachyon.so from Dushnilin/tachyon-core release
-        id: dl_core
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.sync_core == 'true'
+      - name: Download libtachyon-*.so from Dushnilin/tachyon-core release
+        if: steps.core_check.outputs.skip != 'true'
         run: |
           latest_tag="${{ steps.core_check.outputs.latest_tag }}"
-          latest_core="${{ steps.core_check.outputs.latest_core }}"
           base_url="https://github.com/Dushnilin/tachyon-core/releases/download/${latest_tag}"
           mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/armeabi-v7a android/app/src/main/jniLibs/x86_64
-          if curl -fsSL --retry 3 -o android/app/src/main/jniLibs/arm64-v8a/libtachyon.so "${base_url}/libtachyon-arm64-v8a.so" && \
-             curl -fsSL --retry 3 -o android/app/src/main/jniLibs/armeabi-v7a/libtachyon.so "${base_url}/libtachyon-armeabi-v7a.so" && \
-             curl -fsSL --retry 3 -o android/app/src/main/jniLibs/x86_64/libtachyon.so "${base_url}/libtachyon-x86_64.so"; then
-            sed -i "s/^version = \".*\"/version = \"${latest_core}\"/" native/core-ffi/Cargo.toml
-            echo "downloaded=true" >> "$GITHUB_OUTPUT"
-            echo "Готовые libtachyon-*.so успешно скачаны из релиза Dushnilin/tachyon-core (${latest_tag})."
-          else
-            echo "downloaded=false" >> "$GITHUB_OUTPUT"
-            echo "В релизе ${latest_tag} нет готовых .so — потребуется сборка из исходников."
-          fi
-
-      - name: Checkout tachyon-core-src (fallback when prebuilt .so not in release)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.sync_core == 'true' && steps.dl_core.outputs.downloaded != 'true' && env.PRIVATE_TOKEN != ''
-        env:
-          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        uses: actions/checkout@v4
-        with:
-          repository: Dushnilin/tachyon-core-src
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          ref: ${{ steps.core_check.outputs.latest_tag }}
-          path: .core-src
-
-      - name: Install Rust toolchain for Android NDK (fallback)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.sync_core == 'true' && steps.dl_core.outputs.downloaded != 'true' && env.PRIVATE_TOKEN != ''
-        env:
-          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-
-      - name: Compile libtachyon.so for all Android ABIs (fallback)
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.sync_core == 'true' && steps.dl_core.outputs.downloaded != 'true' && env.PRIVATE_TOKEN != ''
-        env:
-          PRIVATE_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          latest_core="${{ steps.core_check.outputs.latest_core }}"
-          sed -i "s/^version = \".*\"/version = \"${latest_core}\"/" native/core-ffi/Cargo.toml
-
-          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}}"
-          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
-            ndk=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -n 1)
-          fi
-          bin_dir="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export AR="$bin_dir/llvm-ar"
-
-          build_abi() {
-            local triple="$1"
-            local abi="$2"
-            local clang="$bin_dir/$3"
-            local upper=$(echo "$triple" | tr 'a-z-' 'A-Z_')
-            local lower=$(echo "$triple" | tr '-' '_')
-            export "CARGO_TARGET_${upper}_LINKER=$clang"
-            export "CARGO_TARGET_${upper}_AR=$bin_dir/llvm-ar"
-            export "CC_${lower}=$clang"
-            export "AR_${lower}=$bin_dir/llvm-ar"
-            cargo rustc -p core-ffi --release --target "$triple" --crate-type cdylib --manifest-path .core-src/Cargo.toml
-            mkdir -p "android/app/src/main/jniLibs/$abi"
-            cp ".core-src/target/$triple/release/libtachyon.so" "android/app/src/main/jniLibs/$abi/libtachyon.so"
-          }
-
-          build_abi "aarch64-linux-android" "arm64-v8a" "aarch64-linux-android24-clang"
-          build_abi "armv7-linux-androideabi" "armeabi-v7a" "armv7a-linux-androideabi24-clang"
-          build_abi "x86_64-linux-android" "x86_64" "x86_64-linux-android24-clang"
-          rm -rf .core-src
-
-      - name: Commit updated libtachyon.so to main
-        if: steps.core_check.outputs.skip != 'true' && steps.core_check.outputs.sync_core == 'true' && github.ref == 'refs/heads/main'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add native/core-ffi/Cargo.toml android/app/src/main/jniLibs/
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(core): автообновление ядра tachyon-core до v${{ steps.core_check.outputs.latest_core }}"
-            git push origin HEAD:main
-          fi
+          curl -fsSL --retry 3 -o android/app/src/main/jniLibs/arm64-v8a/libtachyon.so "${base_url}/libtachyon-arm64-v8a.so"
+          curl -fsSL --retry 3 -o android/app/src/main/jniLibs/armeabi-v7a/libtachyon.so "${base_url}/libtachyon-armeabi-v7a.so"
+          curl -fsSL --retry 3 -o android/app/src/main/jniLibs/x86_64/libtachyon.so "${base_url}/libtachyon-x86_64.so"
+          ls -lh android/app/src/main/jniLibs/*/libtachyon.so
 
       - name: Set up JDK 21
         if: steps.core_check.outputs.skip != 'true'
@@ -186,7 +101,7 @@ jobs:
         if: steps.core_check.outputs.skip != 'true'
         run: flutter build apk --release
 
-      - name: Prepare release artifacts (APKs + .so + version.json)
+      - name: Prepare release artifacts (APKs + version.json)
         if: steps.core_check.outputs.skip != 'true'
         run: |
           mkdir -p dist
@@ -195,11 +110,8 @@ jobs:
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/tachyon-proxy-x86_64.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-universal.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-android-tv.apk
-          cp android/app/src/main/jniLibs/arm64-v8a/libtachyon.so dist/libtachyon-arm64-v8a.so
-          cp android/app/src/main/jniLibs/armeabi-v7a/libtachyon.so dist/libtachyon-armeabi-v7a.so
-          cp android/app/src/main/jniLibs/x86_64/libtachyon.so dist/libtachyon-x86_64.so
 
-          core_ver=$(grep -m1 '^version = ' native/core-ffi/Cargo.toml | cut -d '"' -f2 | tr -d '\r')
+          core_ver="${{ steps.core_check.outputs.latest_core }}"
           app_ver="${{ steps.core_check.outputs.app_ver }}"
           cat > dist/version.json <<EOF
           {
@@ -216,7 +128,7 @@ jobs:
           }
           EOF
 
-          cd dist && sha256sum *.apk *.so version.json > SHA256SUMS.txt
+          cd dist && sha256sum *.apk version.json > SHA256SUMS.txt
 
       - name: Upload APK artifacts
         if: steps.core_check.outputs.skip != 'true'
@@ -242,8 +154,8 @@ jobs:
             - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
             - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
 
-            ### ⚡ Модули движка для встроенного обновления (`libtachyon-*.so`)
-            - **`libtachyon-arm64-v8a.so`**, **`libtachyon-armeabi-v7a.so`**, **`libtachyon-x86_64.so`**, **`version.json`**
+            ### ⚡ Нативное ядро (`libtachyon-*.so`)
+            Берётся напрямую из релизов [`Dushnilin/tachyon-core`](https://github.com/Dushnilin/tachyon-core/releases/latest).
           files: dist/*
           prerelease: false
           make_latest: false

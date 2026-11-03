@@ -361,9 +361,9 @@ class _HomeTabState extends State<HomeTab> {
       padding: const EdgeInsets.all(Space.sm),
       child: Column(
         children: [
-          InkWell(
-            onTap: () => controller.toggleSubCollapsed(sub.id),
+          FocusableTap(
             borderRadius: BorderRadius.circular(Radii.card),
+            onTap: () => controller.toggleSubCollapsed(sub.id),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: Space.sm, vertical: Space.xs),
               child: Row(
@@ -1598,11 +1598,11 @@ class _ProfileCard extends StatelessWidget {
                   ),
                 ),
               ),
-              InkWell(
+              FocusableTap(
+                borderRadius: BorderRadius.circular(8),
                 onTap: controller.testingUrlPing
                     ? null
                     : () => controller.testUrlPing(),
-                borderRadius: BorderRadius.circular(8),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
@@ -1844,44 +1844,42 @@ class _QuickRoutingBar extends StatelessWidget {
         children: [
           for (final mode in RoutingMode.values)
             Expanded(
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => controller.setRoutingMode(mode),
-                  borderRadius: BorderRadius.circular(8),
-                  focusColor: tokens.accent.withValues(alpha: 0.24),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                    decoration: BoxDecoration(
+              child: FocusableTap(
+                borderRadius: BorderRadius.circular(8),
+                focusBorderColor:
+                    mode == RoutingMode.desync ? tokens.warning : tokens.accent,
+                onTap: () => controller.setRoutingMode(mode),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: current == mode
+                        ? (mode == RoutingMode.desync
+                            ? tokens.warning.withValues(alpha: 0.16)
+                            : tokens.accent.withValues(alpha: 0.16))
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(8),
+                    border: current == mode
+                        ? Border.all(
+                            color: mode == RoutingMode.desync
+                                ? tokens.warning.withValues(alpha: 0.5)
+                                : tokens.accent.withValues(alpha: 0.5),
+                          )
+                        : null,
+                  ),
+                  child: Text(
+                    mode == RoutingMode.bypass ? 'Исключения' : mode.label,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight:
+                          current == mode ? FontWeight.w600 : FontWeight.w400,
                       color: current == mode
                           ? (mode == RoutingMode.desync
-                              ? tokens.warning.withValues(alpha: 0.16)
-                              : tokens.accent.withValues(alpha: 0.16))
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                      border: current == mode
-                          ? Border.all(
-                              color: mode == RoutingMode.desync
-                                  ? tokens.warning.withValues(alpha: 0.5)
-                                  : tokens.accent.withValues(alpha: 0.5),
-                            )
-                          : null,
-                    ),
-                    child: Text(
-                      mode == RoutingMode.bypass ? 'Исключения' : mode.label,
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight:
-                            current == mode ? FontWeight.w600 : FontWeight.w400,
-                        color: current == mode
-                            ? (mode == RoutingMode.desync
-                                ? tokens.warning
-                                : tokens.accent)
-                            : tokens.muted,
-                      ),
+                              ? tokens.warning
+                              : tokens.accent)
+                          : tokens.muted,
                     ),
                   ),
                 ),
@@ -1958,46 +1956,42 @@ class _DashboardServerTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Space.sm),
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: onPing,
-              borderRadius: BorderRadius.circular(6),
-              focusColor: tokens.accent.withValues(alpha: 0.24),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: tokens.raised,
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: tokens.line),
-                ),
-                child: isPinging
-                    ? SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 1.5,
-                          color: tokens.accent,
-                        ),
-                      )
-                    : ping == null
-                        ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
-                        : Text(
-                            ping! < 0 ? '✗' : '${ping}ms',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              fontFamily: 'monospace',
-                              color: ping! < 0
-                                  ? tokens.danger
-                                  : ping! < 150
-                                      ? tokens.success
-                                      : ping! < 400
-                                          ? tokens.warning
-                                          : tokens.danger,
-                            ),
-                          ),
+          FocusableTap(
+            borderRadius: BorderRadius.circular(6),
+            onTap: onPing,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: tokens.raised,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: tokens.line),
               ),
+              child: isPinging
+                  ? SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: tokens.accent,
+                      ),
+                    )
+                  : ping == null
+                      ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
+                      : Text(
+                          ping! < 0 ? '✗' : '${ping}ms',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            fontFamily: 'monospace',
+                            color: ping! < 0
+                                ? tokens.danger
+                                : ping! < 150
+                                    ? tokens.success
+                                    : ping! < 400
+                                        ? tokens.warning
+                                        : tokens.danger,
+                          ),
+                        ),
             ),
           ),
         ],

@@ -89,7 +89,7 @@ object WifiSsidHelper {
 
     /**
      * Подписывается на системные события Wi-Fi с флагом `FLAG_INCLUDE_LOCATION_INFO` (Android 12+),
-     * чтобы получать реальный SSID и BSSID без цензуры синхронного `getNetworkCapabilities`.
+     * чтобы получать реальный SSID и BSSID без маскирования синхронного `getNetworkCapabilities`.
      */
     @Suppress("DEPRECATION", "MissingPermission")
     @Synchronized

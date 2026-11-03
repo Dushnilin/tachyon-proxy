@@ -1284,7 +1284,8 @@ class _ProfileTile extends StatelessWidget {
               ],
             ),
           ),
-          GestureDetector(
+          FocusableTap(
+            borderRadius: BorderRadius.circular(4),
             onTap: onPing,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
@@ -1538,9 +1539,9 @@ class _CollapsibleSubCard extends StatelessWidget {
       padding: const EdgeInsets.all(Space.sm),
       child: Column(
         children: [
-          InkWell(
-            onTap: onToggleCollapse,
+          FocusableTap(
             borderRadius: BorderRadius.circular(Radii.card),
+            onTap: onToggleCollapse,
             child: Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: Space.sm,

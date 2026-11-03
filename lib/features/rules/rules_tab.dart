@@ -345,6 +345,7 @@ class _CustomRulesSection extends StatelessWidget {
       children: [
         for (final r in rules) ...[
           HairlineCard(
+            onTap: () => controller.toggleCustomRule(r.id),
             padding: const EdgeInsets.symmetric(horizontal: Space.md, vertical: Space.xs),
             child: Row(
               children: [
@@ -369,7 +370,9 @@ class _CustomRulesSection extends StatelessWidget {
                     ],
                   ),
                 ),
-                GestureDetector(
+                FocusableTap(
+                  borderRadius: BorderRadius.circular(Radii.tag),
+                  focusBorderColor: _colorFor(tokens, r.action),
                   onTap: () {
                     final idx = _actions.indexOf(r.action);
                     final next = _actions[(idx + 1) % _actions.length];
@@ -394,9 +397,11 @@ class _CustomRulesSection extends StatelessWidget {
                     ),
                   ),
                 ),
-                Switch(
-                  value: r.enabled,
-                  onChanged: (_) => controller.toggleCustomRule(r.id),
+                ExcludeFocus(
+                  child: Switch(
+                    value: r.enabled,
+                    onChanged: (_) => controller.toggleCustomRule(r.id),
+                  ),
                 ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
@@ -470,7 +475,8 @@ class _ServiceRoutesSection extends StatelessWidget {
                           ),
                         ),
                         if (profiles.isNotEmpty && service.id != 'ru')
-                          GestureDetector(
+                          FocusableTap(
+                            borderRadius: BorderRadius.circular(6),
                             onTap: () => _pickServerForService(
                               context,
                               service,
@@ -628,7 +634,9 @@ class _ServiceRoutesSection extends StatelessWidget {
       _ => tokens.muted,
     };
 
-    return GestureDetector(
+    return FocusableTap(
+      borderRadius: BorderRadius.circular(6),
+      focusBorderColor: activeColor == tokens.muted ? tokens.accent : activeColor,
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -669,7 +677,8 @@ class _ModeSelector extends StatelessWidget {
         children: [
           for (final option in RoutingMode.values)
             Expanded(
-              child: GestureDetector(
+              child: FocusableTap(
+                borderRadius: BorderRadius.circular(Radii.control),
                 onTap: () => controller.setRoutingMode(option),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 160),
@@ -772,6 +781,7 @@ class _RuleSetTile extends StatelessWidget {
     final downloaded = set.sizeBytes > 0;
 
     return HairlineCard(
+      onTap: () => controller.toggleRuleSet(set.id),
       padding: const EdgeInsets.symmetric(
         horizontal: Space.md,
         vertical: Space.sm,
@@ -822,9 +832,11 @@ class _RuleSetTile extends StatelessWidget {
               onPressed: () => controller.downloadList(set.id),
               icon: Icon(Icons.download_outlined, size: 20, color: tokens.muted),
             ),
-          Switch(
-            value: set.enabled,
-            onChanged: (_) => controller.toggleRuleSet(set.id),
+          ExcludeFocus(
+            child: Switch(
+              value: set.enabled,
+              onChanged: (_) => controller.toggleRuleSet(set.id),
+            ),
           ),
         ],
       ),
@@ -886,31 +898,13 @@ class _DesyncModeCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Весь остальной трафик через DPI',
-                      style: Theme.of(context).textTheme.bodyLarge,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Рецепт: ${desync.preset} · Обман: ${desync.fooling}',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
-              Switch(
-                value: enabled,
-                onChanged: (_) => controller.setDesync(
-                  desync.copyWith(enabled: !enabled),
-                ),
-              ),
-            ],
+          SwitchRow(
+            title: 'Весь остальной трафик через DPI',
+            subtitle: 'Рецепт: ${desync.preset} · Обман: ${desync.fooling}',
+            value: enabled,
+            onChanged: (v) => controller.setDesync(
+              desync.copyWith(enabled: v),
+            ),
           ),
           const Divider(height: 20),
           Text(
@@ -923,7 +917,9 @@ class _DesyncModeCard extends StatelessWidget {
             runSpacing: 6,
             children: [
               for (final (value, label) in _presets)
-                GestureDetector(
+                FocusableTap(
+                  borderRadius: BorderRadius.circular(6),
+                  focusBorderColor: tokens.warning,
                   onTap: () => controller.setDesync(desync.copyWith(preset: value)),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -960,7 +956,8 @@ class _DesyncModeCard extends StatelessWidget {
             runSpacing: 6,
             children: [
               for (final (value, label) in _foolings)
-                GestureDetector(
+                FocusableTap(
+                  borderRadius: BorderRadius.circular(6),
                   onTap: () => controller.setDesync(desync.copyWith(fooling: value)),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -987,42 +984,16 @@ class _DesyncModeCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: Space.sm),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Адаптивный автоподбор под провайдера',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-              Switch(
-                value: desync.autoTune,
-                onChanged: (v) => controller.setDesync(desync.copyWith(autoTune: v)),
-              ),
-            ],
+          SwitchRow(
+            title: 'Адаптивный автоподбор под провайдера',
+            value: desync.autoTune,
+            onChanged: (v) => controller.setDesync(desync.copyWith(autoTune: v)),
           ),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Разные рецепты для Wi-Fi и Мобильной сети',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                    Text(
-                      'Wi-Fi: ${desync.wifiPreset} · LTE: ${desync.cellularPreset}',
-                      style: TextStyle(fontSize: 11, color: tokens.faint),
-                    ),
-                  ],
-                ),
-              ),
-              Switch(
-                value: controller.settings.perNetworkDesync,
-                onChanged: controller.setPerNetworkDesync,
-              ),
-            ],
+          SwitchRow(
+            title: 'Разные рецепты для Wi-Fi и Мобильной сети',
+            subtitle: 'Wi-Fi: ${desync.wifiPreset} · LTE: ${desync.cellularPreset}',
+            value: controller.settings.perNetworkDesync,
+            onChanged: controller.setPerNetworkDesync,
           ),
           const SizedBox(height: Space.xs),
           Row(
@@ -1262,7 +1233,9 @@ class _ActionPill extends StatelessWidget {
         color = tokens.accent;
     }
 
-    return GestureDetector(
+    return FocusableTap(
+      borderRadius: BorderRadius.circular(Radii.tag),
+      focusBorderColor: color,
       onTap: () {
         final idx = actions.indexOf(current);
         final next = actions[(idx + 1) % actions.length];

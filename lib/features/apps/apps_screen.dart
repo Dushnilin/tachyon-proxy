@@ -468,7 +468,9 @@ class _RouteChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return FocusableTap(
+      borderRadius: BorderRadius.circular(6),
+      focusBorderColor: color,
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),

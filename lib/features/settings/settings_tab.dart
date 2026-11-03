@@ -217,7 +217,7 @@ class _SettingsTabState extends State<SettingsTab> {
                   runSpacing: Space.xs,
                   children: [
                     for (final mtu in const [1360, 1400, 1420, 1500, 9000])
-                      GestureDetector(
+                      FocusableTap(
                         onTap: () => controller.setMtu(mtu),
                         child: Pill(
                           label: '$mtu',
@@ -258,31 +258,14 @@ class _SettingsTabState extends State<SettingsTab> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Включить обход',
-                            style: Theme.of(context).textTheme.bodyLarge,
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'Нативный desync-аутбаунд ядра: обман DPI на первых пакетах',
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                    Switch(
-                      value: settings.desync.enabled,
-                      onChanged: (value) => controller.setDesync(
-                        settings.desync.copyWith(enabled: value),
-                      ),
-                    ),
-                  ],
+                SwitchRow(
+                  title: 'Включить обход',
+                  subtitle:
+                      'Нативный desync-аутбаунд ядра: обман DPI на первых пакетах',
+                  value: settings.desync.enabled,
+                  onChanged: (value) => controller.setDesync(
+                    settings.desync.copyWith(enabled: value),
+                  ),
                 ),
                 if (settings.desync.enabled) ...[
                   const SizedBox(height: Space.sm),
@@ -306,7 +289,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         'fake',
                         'oob',
                       ])
-                        GestureDetector(
+                        FocusableTap(
                           onTap: () => controller.setDesync(
                             settings.desync.copyWith(preset: preset),
                           ),
@@ -337,7 +320,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         'badseq',
                         'badsum',
                       ])
-                        GestureDetector(
+                        FocusableTap(
                           onTap: () => controller.setDesync(
                             settings.desync.copyWith(fooling: fooling),
                           ),
@@ -352,21 +335,12 @@ class _SettingsTabState extends State<SettingsTab> {
                     ],
                   ),
                   const SizedBox(height: Space.md),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Адаптивная подстройка',
-                          style: Theme.of(context).textTheme.bodyMedium,
-                        ),
-                      ),
-                      Switch(
-                        value: settings.desync.autoTune,
-                        onChanged: (value) => controller.setDesync(
-                          settings.desync.copyWith(autoTune: value),
-                        ),
-                      ),
-                    ],
+                  SwitchRow(
+                    title: 'Адаптивная подстройка',
+                    value: settings.desync.autoTune,
+                    onChanged: (value) => controller.setDesync(
+                      settings.desync.copyWith(autoTune: value),
+                    ),
                   ),
                   const SizedBox(height: Space.sm),
                 ],
@@ -382,7 +356,7 @@ class _SettingsTabState extends State<SettingsTab> {
                 spacing: Space.sm,
                 children: [
                   for (final level in const ['error', 'warn', 'info', 'debug'])
-                    GestureDetector(
+                    FocusableTap(
                       onTap: () => controller.setLogLevel(level),
                       child: Pill(
                         label: level.toUpperCase(),
@@ -1139,8 +1113,8 @@ class _SettingsTabState extends State<SettingsTab> {
   }
 }
 
-/// Строка-ссылка на другой экран.
-class _LinkRow extends StatelessWidget {
+/// Строка-ссылка на другой экран (с явной рамкой фокуса для пульта Android TV).
+class _LinkRow extends StatefulWidget {
   const _LinkRow({
     required this.icon,
     required this.title,
@@ -1154,29 +1128,68 @@ class _LinkRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_LinkRow> createState() => _LinkRowState();
+}
+
+class _LinkRowState extends State<_LinkRow> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final radius = BorderRadius.circular(Radii.control);
 
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: Space.md),
-        child: Row(
-          children: [
-            Icon(icon, size: 17, color: tokens.muted),
-            const SizedBox(width: Space.md),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: Theme.of(context).textTheme.bodyLarge),
-                  const SizedBox(height: 2),
-                  Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
-                ],
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: widget.onTap,
+        onFocusChange: (f) {
+          if (_focused != f) setState(() => _focused = f);
+        },
+        borderRadius: radius,
+        focusColor: tokens.accent.withValues(alpha: 0.14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.xs,
+            vertical: Space.md,
+          ),
+          decoration: _focused
+              ? BoxDecoration(
+                  borderRadius: radius,
+                  border: Border.all(
+                    color: tokens.accent.withValues(alpha: 0.75),
+                    width: 1.4,
+                  ),
+                )
+              : null,
+          child: Row(
+            children: [
+              Icon(
+                widget.icon,
+                size: 17,
+                color: _focused ? tokens.accent : tokens.muted,
               ),
-            ),
-            Icon(Icons.chevron_right, size: 18, color: tokens.faint),
-          ],
+              const SizedBox(width: Space.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.title, style: Theme.of(context).textTheme.bodyLarge),
+                    const SizedBox(height: 2),
+                    Text(
+                      widget.subtitle,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: _focused ? tokens.accent : tokens.faint,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1525,7 +1538,7 @@ class _HomeWifiSettingsCard extends StatelessWidget {
               runSpacing: Space.xs,
               children: [
                 for (final near in nearbySuggestions.take(8))
-                  GestureDetector(
+                  FocusableTap(
                     onTap: () => controller.addTrustedWifiSsid(near),
                     child: Pill(
                       label: '+ $near',

@@ -209,7 +209,7 @@ void main() {
     });
   });
 
-  group('обход DPI', () {
+  group('десинхронизация (desync)', () {
     test('выключенный desync не попадает в конфиг', () {
       final config = RuntimeConfig(
         profile: _vlessProfile(),

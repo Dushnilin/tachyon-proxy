@@ -654,6 +654,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
 
     return ListTile(
       dense: true,
+      onTap: () {},
       leading: Icon(
         target.icon,
         color: ok ? tokens.accent : tokens.muted,

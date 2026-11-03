@@ -51,12 +51,14 @@ class TachyonApp extends StatelessWidget {
             theme: isDark ? TachyonTheme.dark() : TachyonTheme.light(),
             shortcuts: <ShortcutActivator, Intent>{
               ...WidgetsApp.defaultShortcuts,
-              // Пульт Android TV / D-pad центральная клавиша OK (KEYCODE_DPAD_CENTER / BUTTON_A)
+              // Пульт Android TV / D-pad центральная клавиша OK (KEYCODE_DPAD_CENTER / BUTTON_A / ENTER)
               const SingleActivator(LogicalKeyboardKey.select):
                   const ActivateIntent(),
               const SingleActivator(LogicalKeyboardKey.gameButtonA):
                   const ActivateIntent(),
               const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                  const ActivateIntent(),
+              const SingleActivator(LogicalKeyboardKey.enter):
                   const ActivateIntent(),
             },
             home: const RootShell(),
@@ -177,7 +179,7 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
     ];
 
     return Scaffold(
-      body: IndexedStack(index: _index, children: pages),
+      body: pages[_index],
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (index) => setState(() => _index = index),

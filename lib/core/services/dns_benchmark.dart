@@ -173,7 +173,7 @@ abstract final class DnsCandidates {
       type: 'udp',
       address: '92.223.109.31',
       ip: '92.223.109.31',
-      tag: 'обход блокировок',
+      tag: 'умная маршрутизация',
     ),
     DnsCandidate(
       id: 'comss_doh',
@@ -181,7 +181,7 @@ abstract final class DnsCandidates {
       type: 'https',
       address: 'https://dns.comss.one/dns-query',
       ip: '92.223.109.31',
-      tag: 'DoH обход блокировок',
+      tag: 'DoH маршрутизация',
     ),
     DnsCandidate(
       id: 'controld_udp',

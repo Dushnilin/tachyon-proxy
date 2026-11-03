@@ -124,6 +124,12 @@ abstract final class TachyonTheme {
             fontWeight: FontWeight.w600,
             letterSpacing: 0.2,
           ),
+        ).copyWith(
+          side: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? BorderSide(color: t.ink, width: 1.8)
+                : null,
+          ),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -136,12 +142,39 @@ abstract final class TachyonTheme {
             borderRadius: BorderRadius.circular(Radii.control),
           ),
           textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        ).copyWith(
+          side: WidgetStateProperty.resolveWith(
+            (states) => BorderSide(
+              color: states.contains(WidgetState.focused) ? t.accent : t.line,
+              width: states.contains(WidgetState.focused) ? 1.8 : 1.0,
+            ),
+          ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: t.accent,
           textStyle: const TextStyle(fontWeight: FontWeight.w500),
+        ).copyWith(
+          side: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? BorderSide(color: t.accent, width: 1.4)
+                : BorderSide.none,
+          ),
+        ),
+      ),
+      iconButtonTheme: IconButtonThemeData(
+        style: ButtonStyle(
+          shape: WidgetStatePropertyAll(
+            RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.control),
+            ),
+          ),
+          side: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.focused)
+                ? BorderSide(color: t.accent, width: 1.6)
+                : BorderSide.none,
+          ),
         ),
       ),
       snackBarTheme: SnackBarThemeData(
@@ -178,7 +211,12 @@ abstract final class TachyonTheme {
         indicatorColor: t.accentSoft,
         indicatorShape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(Radii.control),
-          side: BorderSide(color: t.accent.withValues(alpha: 0.25)),
+          side: BorderSide(color: t.accent.withValues(alpha: 0.45)),
+        ),
+        overlayColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.focused)
+              ? t.accent.withValues(alpha: 0.22)
+              : null,
         ),
         elevation: 0,
         height: 64,
@@ -186,17 +224,24 @@ abstract final class TachyonTheme {
         labelTextStyle: WidgetStateProperty.resolveWith(
           (states) => TextStyle(
             fontSize: 11.5,
-            fontWeight: states.contains(WidgetState.selected)
+            fontWeight: (states.contains(WidgetState.selected) ||
+                    states.contains(WidgetState.focused))
                 ? FontWeight.w600
                 : FontWeight.w500,
-            color: states.contains(WidgetState.selected) ? t.ink : t.muted,
+            color: (states.contains(WidgetState.selected) ||
+                    states.contains(WidgetState.focused))
+                ? t.ink
+                : t.muted,
             letterSpacing: 0,
           ),
         ),
         iconTheme: WidgetStateProperty.resolveWith(
           (states) => IconThemeData(
             size: 20,
-            color: states.contains(WidgetState.selected) ? t.accent : t.muted,
+            color: (states.contains(WidgetState.selected) ||
+                    states.contains(WidgetState.focused))
+                ? t.accent
+                : t.muted,
           ),
         ),
       ),

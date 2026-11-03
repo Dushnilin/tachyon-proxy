@@ -4,8 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml"><img src="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml/badge.svg" alt="Build &amp; Release Tachyon Proxy"></a>
-  <a href="https://github.com/Dushnilin/tachyon-proxy/releases/tag/latest"><img src="https://img.shields.io/badge/release-v0.0.8%20%2F%20latest-38bdf8?labelColor=19191b" alt="Latest Release"></a>
-  <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20v0.3.1-232325?labelColor=19191b" alt="Engine: tachyon-core"></a>
+  <a href="https://github.com/Dushnilin/tachyon-proxy/releases/tag/latest"><img src="https://img.shields.io/badge/release-v0.0.11%20%2F%20latest-38bdf8?labelColor=19191b" alt="Latest Release"></a>
+  <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20v0.3.2-232325?labelColor=19191b" alt="Engine: tachyon-core"></a>
   <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/lists-143%20categories%20(.trs)-232325?labelColor=19191b" alt="Rules: tachyon-lists"></a>
   <img src="https://img.shields.io/badge/targets-Android%20%C2%B7%20TV%20%C2%B7%20iOS%2015%2B-232325?labelColor=19191b" alt="Targets: Android, Android TV, iOS 15+">
 </p>

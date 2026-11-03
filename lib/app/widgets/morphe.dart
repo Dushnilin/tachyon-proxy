@@ -395,8 +395,61 @@ class EmptyState extends StatelessWidget {
   }
 }
 
-/// Переключатель-строка в стиле списка настроек.
-class SwitchRow extends StatelessWidget {
+/// Нажимаемый и фокусируемый (для пульта Android TV / D-pad) контейнер
+/// с визуальной подсветкой активного фокуса.
+class FocusableTap extends StatefulWidget {
+  const FocusableTap({
+    super.key,
+    required this.child,
+    required this.onTap,
+    this.borderRadius,
+    this.focusBorderColor,
+  });
+
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius? borderRadius;
+  final Color? focusBorderColor;
+
+  @override
+  State<FocusableTap> createState() => _FocusableTapState();
+}
+
+class _FocusableTapState extends State<FocusableTap> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final radius = widget.borderRadius ?? BorderRadius.circular(Radii.tag);
+    final borderColor = widget.focusBorderColor ?? tokens.accent;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: widget.onTap,
+        onFocusChange: (f) {
+          if (_focused != f) setState(() => _focused = f);
+        },
+        borderRadius: radius,
+        focusColor: borderColor.withValues(alpha: 0.18),
+        child: DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: _focused
+              ? BoxDecoration(
+                  borderRadius: radius,
+                  border: Border.all(color: borderColor, width: 1.8),
+                )
+              : const BoxDecoration(),
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Переключатель-строка в стиле списка настроек (полностью фокусируемая для Android TV / D-pad).
+class SwitchRow extends StatefulWidget {
   const SwitchRow({
     super.key,
     required this.title,
@@ -411,26 +464,67 @@ class SwitchRow extends StatelessWidget {
   final ValueChanged<bool> onChanged;
 
   @override
+  State<SwitchRow> createState() => _SwitchRowState();
+}
+
+class _SwitchRowState extends State<SwitchRow> {
+  bool _focused = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Space.xs),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: Theme.of(context).textTheme.bodyLarge),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ],
-            ),
+    final tokens = context.tokens;
+    final radius = BorderRadius.circular(Radii.control);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => widget.onChanged(!widget.value),
+        onFocusChange: (f) {
+          if (_focused != f) setState(() => _focused = f);
+        },
+        borderRadius: radius,
+        focusColor: tokens.accent.withValues(alpha: 0.14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Space.xs,
+            vertical: Space.xs,
           ),
-          const SizedBox(width: Space.md),
-          Switch(value: value, onChanged: onChanged),
-        ],
+          decoration: _focused
+              ? BoxDecoration(
+                  borderRadius: radius,
+                  border: Border.all(
+                    color: tokens.accent.withValues(alpha: 0.75),
+                    width: 1.4,
+                  ),
+                )
+              : null,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.title, style: Theme.of(context).textTheme.bodyLarge),
+                    if (widget.subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.subtitle!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: Space.md),
+              ExcludeFocus(
+                child: Switch(
+                  value: widget.value,
+                  onChanged: widget.onChanged,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -103,7 +103,7 @@ class AppSettings {
   final String logLevel;
   final int mtu;
 
-  /// Обход DPI.
+  /// Пакетная десинхронизация (Desync).
   final DesyncSettings desync;
 
   /// Подписки: URL, которые ядро качает и обновляет само.

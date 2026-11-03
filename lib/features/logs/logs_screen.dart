@@ -177,15 +177,30 @@ class _LogsScreenState extends State<LogsScreen> {
                         itemCount: filtered.length,
                         itemBuilder: (context, index) {
                           final line = filtered[index];
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2),
-                            child: Text(
-                              line,
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                height: 1.45,
-                                fontFamily: 'monospace',
-                                color: _colorFor(context, line),
+                          return FocusableTap(
+                            borderRadius: BorderRadius.circular(4),
+                            onTap: () {
+                              Clipboard.setData(ClipboardData(text: line));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Строка скопирована'),
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 3,
+                              ),
+                              child: Text(
+                                line,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  height: 1.45,
+                                  fontFamily: 'monospace',
+                                  color: _colorFor(context, line),
+                                ),
                               ),
                             ),
                           );

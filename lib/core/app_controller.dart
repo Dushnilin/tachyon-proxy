@@ -111,7 +111,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.10';
+  static const String appVersion = '0.0.11';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;

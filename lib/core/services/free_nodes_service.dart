@@ -16,7 +16,7 @@ class FreeNodesService {
   static const String _warpPeerPublicKey =
       'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
 
-  /// Кандидаты эндпоинтов Cloudflare WARP, наиболее устойчивые к фильтрации ТСПУ.
+  /// Кандидаты эндпоинтов Cloudflare WARP, устойчивые к фильтрации на транзитных узлах.
   static const List<(String host, int port, String label)> warpEndpoints = [
     ('188.114.97.6', 2408, 'CF Edge #1 (188.114.97.6)'),
     ('188.114.96.96', 890, 'CF Edge #2 (188.114.96.96)'),
@@ -140,7 +140,7 @@ class FreeNodesService {
   }
 
   /// Регистрирует новое бесплатное устройство Cloudflare WARP и подбирает живые эндпоинты
-  /// с параметрами обфускации AmneziaWG (для обхода ТСПУ).
+  /// с параметрами обфускации AmneziaWG (для работы через транзитные сетевые фильтры).
   Future<List<Profile>> generateWarpProfiles({
     bool useLocalProxy = false,
     void Function(String status)? onStatus,
@@ -193,7 +193,7 @@ class FreeNodesService {
             'local_address': addresses,
             if (reserved != null && reserved.length == 3) 'reserved': reserved,
             'mtu': 1280,
-            // Параметры обфускации AmneziaWG 1.5 для пробития ТСПУ на Cloudflare WARP
+            // Параметры обфускации AmneziaWG 1.5 для установки сессий Cloudflare WARP
             'jc': 4,
             'jmin': 40,
             'jmax': 70,

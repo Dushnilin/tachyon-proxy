@@ -1,23 +1,48 @@
 package org.tachyon.vpn
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.Settings
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Помощник определения текущего SSID Wi-Fi, сканирования доступных сетей
  * и проверки списка доверенных домашних/офисных Wi-Fi сетей.
  */
 object WifiSsidHelper {
+
+    @Volatile
+    private var registered = false
+
+    @Volatile
+    private var cachedCallbackSsid: String = ""
+
+    @Volatile
+    private var cachedCallbackBssid: String = ""
+
+    @Volatile
+    private var onWifiEvent: (() -> Unit)? = null
+
+    /** Кэш BSSID -> SSID, чтобы мгновенно узнавать сеть даже при задержке выдачи SSID в фоне. */
+    private val bssidToSsid = ConcurrentHashMap<String, String>()
+
+    fun setOnWifiEventListener(listener: (() -> Unit)?) {
+        onWifiEvent = listener
+    }
 
     fun cleanSsid(raw: String?): String {
         if (raw.isNullOrBlank()) return ""
@@ -32,6 +57,135 @@ object WifiSsidHelper {
             return ""
         }
         return s
+    }
+
+    private fun cleanBssid(raw: String?): String {
+        val b = raw?.trim()?.lowercase().orEmpty()
+        if (b.isEmpty() || b == "02:00:00:00:00:00" || b == "00:00:00:00:00:00") return ""
+        return b
+    }
+
+    private fun rememberWifiInfo(ssidRaw: String?, bssidRaw: String?): String {
+        val ssid = cleanSsid(ssidRaw)
+        val bssid = cleanBssid(bssidRaw)
+        if (bssid.isNotEmpty()) {
+            cachedCallbackBssid = bssid
+        }
+        if (ssid.isNotEmpty()) {
+            cachedCallbackSsid = ssid
+            if (bssid.isNotEmpty()) {
+                bssidToSsid[bssid] = ssid
+            }
+            return ssid
+        }
+        if (bssid.isNotEmpty()) {
+            bssidToSsid[bssid]?.let { known ->
+                cachedCallbackSsid = known
+                return known
+            }
+        }
+        return ""
+    }
+
+    /**
+     * Подписывается на системные события Wi-Fi с флагом `FLAG_INCLUDE_LOCATION_INFO` (Android 12+),
+     * чтобы получать реальный SSID и BSSID без цензуры синхронного `getNetworkCapabilities`.
+     */
+    @Suppress("DEPRECATION", "MissingPermission")
+    @Synchronized
+    fun ensureRegistered(context: Context) {
+        if (registered) return
+        val appCtx = context.applicationContext ?: context
+        try {
+            val cm = appCtx.getSystemService(ConnectivityManager::class.java)
+            if (cm != null) {
+                val request = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+
+                val callback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
+                        override fun onAvailable(network: Network) {
+                            onWifiEvent?.invoke()
+                        }
+
+                        override fun onCapabilitiesChanged(
+                            network: Network,
+                            networkCapabilities: NetworkCapabilities,
+                        ) {
+                            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                            val info = networkCapabilities.transportInfo as? WifiInfo
+                            rememberWifiInfo(info?.ssid, info?.bssid)
+                            onWifiEvent?.invoke()
+                        }
+
+                        override fun onLost(network: Network) {
+                            if (!isWifiConnected(appCtx)) {
+                                cachedCallbackSsid = ""
+                                cachedCallbackBssid = ""
+                            }
+                            onWifiEvent?.invoke()
+                        }
+                    }
+                } else {
+                    object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                            onWifiEvent?.invoke()
+                        }
+
+                        override fun onCapabilitiesChanged(
+                            network: Network,
+                            networkCapabilities: NetworkCapabilities,
+                        ) {
+                            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                val info = networkCapabilities.transportInfo as? WifiInfo
+                                rememberWifiInfo(info?.ssid, info?.bssid)
+                            }
+                            onWifiEvent?.invoke()
+                        }
+
+                        override fun onLost(network: Network) {
+                            if (!isWifiConnected(appCtx)) {
+                                cachedCallbackSsid = ""
+                                cachedCallbackBssid = ""
+                            }
+                            onWifiEvent?.invoke()
+                        }
+                    }
+                }
+                cm.registerNetworkCallback(request, callback)
+            }
+        } catch (_: Throwable) {}
+
+        try {
+            val filter = IntentFilter().apply {
+                addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+                addAction(WifiManager.SUPPLICANT_STATE_CHANGED_ACTION)
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent?.getParcelableExtra(WifiManager.EXTRA_WIFI_INFO, WifiInfo::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent?.getParcelableExtra(WifiManager.EXTRA_WIFI_INFO) as? WifiInfo
+                    }
+                    if (info != null) {
+                        rememberWifiInfo(info.ssid, info.bssid)
+                    }
+                    onWifiEvent?.invoke()
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appCtx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                appCtx.registerReceiver(receiver, filter)
+            }
+        } catch (_: Throwable) {}
+
+        registered = true
     }
 
     fun hasLocationPermission(context: Context): Boolean {
@@ -89,9 +243,15 @@ object WifiSsidHelper {
      */
     @Suppress("DEPRECATION", "MissingPermission")
     fun getCurrentWifiSsid(context: Context): String {
-        if (!isWifiConnected(context)) return ""
+        ensureRegistered(context)
+        if (!isWifiConnected(context)) {
+            cachedCallbackSsid = ""
+            cachedCallbackBssid = ""
+            return ""
+        }
         return try {
             val cm = context.getSystemService(ConnectivityManager::class.java)
+            var activeBssid = cachedCallbackBssid
             if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 for (net in cm.allNetworks) {
                     val caps = cm.getNetworkCapabilities(net) ?: continue
@@ -99,33 +259,49 @@ object WifiSsidHelper {
                         !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
                     ) {
                         val info = caps.transportInfo as? WifiInfo
-                        val fromCaps = cleanSsid(info?.ssid)
+                        val b = cleanBssid(info?.bssid)
+                        if (b.isNotEmpty()) activeBssid = b
+                        val fromCaps = rememberWifiInfo(info?.ssid, info?.bssid)
                         if (fromCaps.isNotEmpty()) return fromCaps
                     }
                 }
             }
 
             val wm = context.applicationContext.getSystemService(WifiManager::class.java)
-            val conn = wm?.connectionInfo
-            val fromConn = cleanSsid(conn?.ssid)
+            val conn = runCatching { wm?.connectionInfo }.getOrNull()
+            val connBssid = cleanBssid(conn?.bssid)
+            if (connBssid.isNotEmpty()) activeBssid = connBssid
+            val fromConn = rememberWifiInfo(conn?.ssid, conn?.bssid)
             if (fromConn.isNotEmpty()) return fromConn
 
+            if (cachedCallbackSsid.isNotEmpty()) {
+                return cachedCallbackSsid
+            }
+
+            if (activeBssid.isNotEmpty()) {
+                bssidToSsid[activeBssid]?.let { return it }
+            }
+
             // Фоллбэк по BSSID через результаты сканирования Wi-Fi (актуально для ряда прошивок HyperOS/MIUI)
-            val bssid = conn?.bssid?.trim().orEmpty()
-            if (bssid.isNotEmpty() &&
-                !bssid.equals("02:00:00:00:00:00", ignoreCase = true) &&
-                !bssid.equals("00:00:00:00:00:00", ignoreCase = true) &&
-                wm != null &&
-                hasLocationPermission(context)
-            ) {
-                val match = runCatching { wm.scanResults }.getOrNull()
-                    ?.firstOrNull { it.BSSID != null && it.BSSID.equals(bssid, ignoreCase = true) }
-                val fromScan = cleanSsid(match?.SSID)
-                if (fromScan.isNotEmpty()) return fromScan
+            if (wm != null && hasLocationPermission(context)) {
+                val scans = runCatching { wm.scanResults }.getOrNull().orEmpty()
+                for (sr in scans) {
+                    val srSsid = cleanSsid(sr.SSID)
+                    val srBssid = cleanBssid(sr.BSSID)
+                    if (srSsid.isNotEmpty() && srBssid.isNotEmpty()) {
+                        bssidToSsid[srBssid] = srSsid
+                    }
+                }
+                if (activeBssid.isNotEmpty()) {
+                    bssidToSsid[activeBssid]?.let { found ->
+                        cachedCallbackSsid = found
+                        return found
+                    }
+                }
             }
             ""
         } catch (_: Throwable) {
-            ""
+            cachedCallbackSsid
         }
     }
 
@@ -135,6 +311,7 @@ object WifiSsidHelper {
      */
     @Suppress("DEPRECATION", "MissingPermission")
     fun getNearbySsids(context: Context): List<String> {
+        ensureRegistered(context)
         val result = LinkedHashSet<String>()
         val current = getCurrentWifiSsid(context)
         if (current.isNotEmpty()) {
@@ -148,8 +325,12 @@ object WifiSsidHelper {
             val scans = runCatching { wm?.scanResults }.getOrNull().orEmpty()
             scans.sortedByDescending { it.level }.forEach { sr ->
                 val ssid = cleanSsid(sr.SSID)
+                val bssid = cleanBssid(sr.BSSID)
                 if (ssid.isNotEmpty()) {
                     result.add(ssid)
+                    if (bssid.isNotEmpty()) {
+                        bssidToSsid[bssid] = ssid
+                    }
                 }
             }
         } catch (_: Throwable) {}

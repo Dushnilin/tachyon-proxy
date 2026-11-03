@@ -138,6 +138,7 @@ class MainActivity : FlutterFragmentActivity() {
             }
         }
         super.onCreate(savedInstanceState)
+        WifiSsidHelper.ensureRegistered(applicationContext)
         intent?.getStringExtra("cmd")?.let { cmd ->
             if (cmd == "dump_log") {
                 dumpDiagnostics()

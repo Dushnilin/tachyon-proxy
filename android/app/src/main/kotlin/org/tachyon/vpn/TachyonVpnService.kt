@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -59,6 +60,10 @@ class TachyonVpnService : VpnService() {
     @Volatile
     private var running = false
 
+    /** Флаг активности фонового наблюдателя Wi-Fi (живёт всё время, пока сервис не остановлен пользователем). */
+    @Volatile
+    private var watcherActive = false
+
     /** Сервис находится в режиме авто-паузы в домашней Wi-Fi сети. */
     @Volatile
     private var pausedByWifi = false
@@ -70,6 +75,12 @@ class TachyonVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        WifiSsidHelper.ensureRegistered(applicationContext)
+        WifiSsidHelper.setOnWifiEventListener {
+            if (watcherActive || running || pausedByWifi) {
+                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-wifi-evt").start()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,7 +98,7 @@ class TachyonVpnService : VpnService() {
                 return START_STICKY
             }
             ACTION_RECHECK_WIFI -> {
-                if (running || pausedByWifi) {
+                if (watcherActive || running || pausedByWifi) {
                     Thread({ evaluateHomeWifiState() }, "tachyon-wifi-recheck").start()
                     return START_STICKY
                 } else {
@@ -209,6 +220,31 @@ class TachyonVpnService : VpnService() {
         return list
     }
 
+    private fun startVpnForeground(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val types = if (WifiSsidHelper.hasLocationPermission(this)) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            }
+            try {
+                startForeground(NOTIFICATION_ID, notification, types)
+                return
+            } catch (_: Throwable) {
+                runCatching {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                    )
+                }
+                return
+            }
+        }
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
     /**
      * Переводит сервис в режим ожидания домашней Wi-Fi сети:
      * закрывает TUN и останавливает ядро, но оставляет фоновый наблюдатель.
@@ -218,7 +254,7 @@ class TachyonVpnService : VpnService() {
         pausedByWifi = true
         TunnelStateHolder.serverName = currentServerName
         TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = ssid)
-        startForeground(NOTIFICATION_ID, buildHomeWifiStandbyNotification(ssid))
+        startVpnForeground(buildHomeWifiStandbyNotification(ssid))
         runCatching { TachyonAppWidget.updateAll(this, "🏠 Пауза в Wi-Fi: $ssid") }
     }
 
@@ -237,22 +273,25 @@ class TachyonVpnService : VpnService() {
             currentMtu,
             currentProxyOnly,
         )
+        startWifiWatcher()
     }
 
     /**
      * Фоновый наблюдатель за текущим SSID Wi-Fi и настройками «Домашнего интернета».
      */
     private fun startWifiWatcher() {
+        watcherActive = true
+        WifiSsidHelper.ensureRegistered(applicationContext)
         watchNetwork()
         if (wifiWatchThread?.isAlive == true) return
         wifiWatchThread = Thread({
-            while ((running || pausedByWifi) && !Thread.currentThread().isInterrupted) {
+            while (watcherActive && !Thread.currentThread().isInterrupted) {
                 try {
-                    Thread.sleep(2000)
+                    Thread.sleep(1500)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (!running && !pausedByWifi) break
+                if (!watcherActive) break
                 runCatching { evaluateHomeWifiState() }
             }
         }, "tachyon-wifi-watch").apply {
@@ -262,6 +301,7 @@ class TachyonVpnService : VpnService() {
     }
 
     private fun stopWifiWatcher() {
+        watcherActive = false
         wifiWatchThread?.interrupt()
         wifiWatchThread = null
         networkCallback?.let { callback ->
@@ -274,7 +314,7 @@ class TachyonVpnService : VpnService() {
 
     @Synchronized
     private fun evaluateHomeWifiState() {
-        if (!running && !pausedByWifi) return
+        if (!watcherActive && !running && !pausedByWifi) return
         val (homeWifiMode, trustedSsids) = WifiSsidHelper.readHomeWifiConfig(filesDir)
         val currentSsid = WifiSsidHelper.getCurrentWifiSsid(this)
 
@@ -290,7 +330,7 @@ class TachyonVpnService : VpnService() {
             !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
 
         if (shouldPause) {
-            if (running) {
+            if (running || !pausedByWifi) {
                 Log.i(TAG, "Домашний Wi-Fi '$currentSsid' обнаружен — ставим маршрутизацию на авто-паузу")
                 enterHomeWifiPause(currentSsid)
             } else if (pausedByWifi && TunnelStateHolder.pausedByWifiSsid != currentSsid) {
@@ -326,7 +366,7 @@ class TachyonVpnService : VpnService() {
 
         // Уведомление поднимается сразу: после startForegroundService система
         // даёт несколько секунд на foreground-состояние.
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startVpnForeground(buildNotification())
         currentConfig = config
 
         val coreTunFd: Int
@@ -422,6 +462,8 @@ class TachyonVpnService : VpnService() {
         logPath = logFile.absolutePath
         Log.i(TAG, "CONFIG: $config")
 
+        running = true
+        pausedByWifi = false
         coreThread = Thread({
             val code = TachyonCore.start(
                 config,
@@ -430,6 +472,7 @@ class TachyonVpnService : VpnService() {
                 logFile.absolutePath,
             )
             if (code != 0) {
+                running = false
                 val error = TachyonCore.lastError() ?: "ядро не стартовало (код $code)"
                 Log.e(TAG, error)
                 TunnelStateHolder.update(TunnelStateHolder.State.Failed, error, pausedWifi = "")

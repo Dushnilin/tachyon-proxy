@@ -111,7 +111,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.9';
+  static const String appVersion = '0.0.10';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -1703,7 +1703,7 @@ class AppController extends ChangeNotifier {
         try {
           final req = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 4));
           req.headers.set('Accept', 'application/json');
-          req.headers.set('User-Agent', 'Tachyon/0.0.9');
+          req.headers.set('User-Agent', 'Tachyon/0.0.10');
           final resp = await req.close().timeout(const Duration(seconds: 4));
           if (resp.statusCode != 200) {
             await resp.drain<void>();
@@ -2284,8 +2284,9 @@ class AppController extends ChangeNotifier {
       await bridge.requestWifiPermission();
     }
     final info = await bridge.wifiInfo();
-    final changed = _currentWifiSsid != info.ssid ||
-        _isWifiConnected != info.isWifi ||
+    final ssidOrNetChanged =
+        _currentWifiSsid != info.ssid || _isWifiConnected != info.isWifi;
+    final changed = ssidOrNetChanged ||
         _hasWifiPermission != info.hasPermission ||
         _wifiLocationEnabled != info.locationEnabled ||
         _nearbyWifiSsids.length != info.nearbySsids.length ||
@@ -2297,6 +2298,9 @@ class AppController extends ChangeNotifier {
     _nearbyWifiSsids = info.nearbySsids;
     if (_tunnel.pausedWifiSsid != info.pausedWifiSsid) {
       _tunnel = _tunnel.copyWith(pausedWifiSsid: info.pausedWifiSsid);
+    }
+    if (ssidOrNetChanged && _settings.homeWifiMode) {
+      unawaited(bridge.recheckHomeWifi());
     }
     if (changed || requestPermission) {
       notifyListeners();

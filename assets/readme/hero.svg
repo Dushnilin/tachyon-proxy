@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg"
      width="1200" height="400" viewBox="0 0 1200 400"
      role="img" aria-labelledby="title desc">
-  <title id="title">tachyon-proxy — кроссплатформенный VPN-клиент и пакетный десинхронизатор DPI</title>
-  <desc id="desc">Клиент маршрутизации, туннелирования и пакетного обхода ТСПУ (DPI Desync) на базе Rust-движка tachyon-core для Android, Android TV и iOS / iPadOS.</desc>
+  <title id="title">tachyon-proxy — кроссплатформенный клиент маршрутизации и туннелирования</title>
+  <desc id="desc">Клиент селективной маршрутизации, туннелирования и адаптивной сегментации трафика на базе Rust-движка tachyon-core для Android, Android TV и iOS / iPadOS.</desc>
 
   <!-- Canvas -->
   <rect width="1200" height="400" rx="16" fill="#141415"/>
@@ -17,7 +17,7 @@
 
     <!-- Title & description -->
     <text x="0" y="76" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="48" font-weight="500" letter-spacing="-1">tachyon-proxy</text>
-    <text x="0" y="112" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="18" font-weight="400">Клиент маршрутизации, туннелирования и пакетного обхода ТСПУ</text>
+    <text x="0" y="112" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="18" font-weight="400">Клиент селективной маршрутизации, туннелирования и шейпинга</text>
     <text x="0" y="136" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="18" font-weight="400">поверх нативного Rust-движка tachyon-core для мобильных ОС и ТВ</text>
 
     <!-- Target protocols & modules -->
@@ -58,8 +58,8 @@
     <!-- Routing action legend -->
     <g transform="translate(0, 304)">
       <circle cx="6" cy="8" r="4" fill="#38bdf8"/>
-      <text x="18" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Proxy / DPI</text>
-      <text x="108" y="12" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">обход блокировок</text>
+      <text x="18" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Proxy / Desync</text>
+      <text x="128" y="12" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">туннель и шейпинг</text>
 
       <circle cx="244" cy="8" r="4" fill="#4cc38a"/>
       <text x="256" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Direct</text>

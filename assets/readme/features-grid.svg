@@ -2,7 +2,7 @@
      width="1200" height="332" viewBox="0 0 1200 332"
      role="img" aria-labelledby="title desc">
   <title id="title">Шесть ключевых подсистем клиента tachyon-proxy</title>
-  <desc id="desc">Сетка из 6 инженерных модулей tachyon-proxy: протоколы и транспорты, пакетный обход ТСПУ (Desync), каталог правил .trs, DNS и FakeIP, системная интеграция для Android/TV/iOS и диагностика соединений.</desc>
+  <desc id="desc">Сетка из 6 инженерных модулей tachyon-proxy: протоколы и транспорты, адаптивная сегментация пакетов (Desync), каталог правил .trs, DNS и FakeIP, системная интеграция для Android/TV/iOS и диагностика соединений.</desc>
 
   <rect width="1200" height="332" rx="16" fill="#141415"/>
   <rect x="0.5" y="0.5" width="1199" height="331" rx="15.5" fill="none" stroke="#2e2e32" stroke-width="1"/>
@@ -23,7 +23,7 @@
   <!-- Module 2: DPI Desync -->
   <g transform="translate(416, 24)">
     <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.5"/>
-    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Пакетный обход ТСПУ · Desync</text>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Адаптивная сегментация · Desync</text>
     <circle cx="296" cy="23" r="3" fill="#38bdf8"/>
     <text x="306" y="27" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="500">Desync</text>
     <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">fake_split · fake_disorder · tlsrec</text>

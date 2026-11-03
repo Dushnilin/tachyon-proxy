@@ -7,20 +7,23 @@
   <a href="https://github.com/Dushnilin/tachyon-proxy/releases"><img src="https://img.shields.io/badge/APK-Releases-B9A8FF?style=flat-square&labelColor=141417" alt="Releases"></a>
   <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20(Rust)-B9A8FF?style=flat-square&labelColor=141417" alt="Engine: tachyon-core"></a>
   <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/rules-tachyon--lists%20(.trs)-6FD08C?style=flat-square&labelColor=141417" alt="Rules: tachyon-lists"></a>
-  <img src="https://img.shields.io/badge/Android-8.0%2B%20(API%2026)-A8A8AD?style=flat-square&labelColor=141417" alt="Android 8.0+">
+  <img src="https://img.shields.io/badge/Android-8.0%2B_%7C_Android_TV-A8A8AD?style=flat-square&labelColor=141417" alt="Android 8.0+ & Android TV">
+  <img src="https://img.shields.io/badge/iOS-15.0%2B%20(arm64)-38BDF8?style=flat-square&labelColor=141417" alt="iOS 15.0+">
 </p>
 
-**`tachyon-proxy`** — самостоятельный Android VPN-клиент и пакетный десинхронизатор ТСПУ (DPI) на Flutter, построенный поверх нативного Rust-движка [`tachyon-core`](https://github.com/Dushnilin/tachyon-core).
+**`tachyon-proxy`** — самостоятельный VPN-клиент и пакетный десинхронизатор ТСПУ (DPI) для **Android**, **Android TV** и **iOS / iPadOS** на Flutter, построенный поверх нативного Rust-движка [`tachyon-core`](https://github.com/Dushnilin/tachyon-core).
 
-Приложение формирует конфигурацию `sing-box`-совместимого ядра, поднимает системный `VpnService` (TUN), защищает исходящие сокеты от петель маршрутизации через локальный Unix-сокет `protect_path` и передаёт управление трафиком в `libtachyon.so` по JNI.
+Приложение формирует конфигурацию `sing-box`-совместимого ядра, поднимает системный туннель (`VpnService` на Android и `NEPacketTunnelProvider` на iOS), защищает исходящие сокеты от петель маршрутизации и передаёт управление трафиком в нативное ядро (`libtachyon.so` по JNI / `TachyonCore.xcframework` по C-ABI).
 
 ---
 
-## Скачать APK
+## Скачать APK и IPA
 
 Готовые сборки автоматически публикуются через GitHub Actions в разделе **[Releases](https://github.com/Dushnilin/tachyon-proxy/releases)**:
 
-- **`tachyon-proxy-arm64-v8a.apk`** — основной пакет для современных смартфонов (`64-bit ARM`)
+- **`tachyon-proxy-ios.ipa`** — сборка для **iPhone и iPad (`iOS / iPadOS 15.0+`, `arm64`)** с вшитыми правами `NEPacketTunnelProvider` (установка через TrollStore, SideStore, AltStore, Sideloadly, ESign, Feather)
+- **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (`armeabi-v7a` + `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок по Wi-Fi QR)
+- **`tachyon-proxy-arm64-v8a.apk`** — основной пакет для современных смартфонов Android (`64-bit ARM`)
 - **`tachyon-proxy-armeabi-v7a.apk`** — для `32-bit ARM` устройств и ТВ-боксов
 - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и `x86_64` систем
 - **`tachyon-proxy-universal.apk`** — универсальный APK со всеми архитектурами
@@ -47,7 +50,8 @@
 | **Контроллер и конфигуратор** | `lib/core/app_controller.dart`, `lib/core/models/runtime_config.dart` | Парсинг подписок (`Subscription-Userinfo`, `Profile-Title`, Base64/URI), генерация JSON для ядра, TCP/HTTP пинг, автоподбор сервера |
 | **Каналы связи** | `lib/core/services/core_bridge.dart` | `MethodChannel` + `EventChannel` между Flutter и Android-слоем |
 | **Android VPN-сервис** | `android/app/src/main/kotlin/org/tachyon/vpn/` | `TachyonVpnService`, `TachyonTileService`, `BootReceiver`, Unix-сервер `protectSocket`, фоновый цикл статистики уведомления |
-| **JNI FFI и ядро** | `native/core-ffi/`, `android/app/src/main/jniLibs/` | Обвязка `TachyonCore` (`start`, `stop`, `check`, `stats`, `version`) вокруг `tachyon-core` |
+| **iOS Network Extension** | `ios/Runner/`, `ios/PacketTunnelExtension/` | `PacketTunnelProvider` (`NEPacketTunnelProvider`), связка `utun` с `TachyonCore.xcframework`, IPC `sendProviderMessage` и `App Group` |
+| **Нативное ядро** | `Dushnilin/tachyon-core` | Динамические библиотеки `libtachyon-*.so` (Android JNI) и `TachyonCore.xcframework` (iOS C-ABI) |
 
 ---
 
@@ -84,10 +88,10 @@
 
 | Параметр | Значение |
 | :--- | :--- |
-| **Application ID** | `app.tachyon.tachyon_proxy` |
-| **Минимальная ОС** | Android 8.0 Oreo (`API 26`) и новее |
-| **Архитектуры (ABI)** | `arm64-v8a`, `armeabi-v7a`, `x86_64` |
-| **Сетевой стек** | Системный `VpnService` (IPv4 TUN + локальный DNS/FakeIP перехват) |
+| **Application ID / Bundle ID** | `app.tachyon.tachyon_proxy` (Android) / `app.tachyon.tachyonProxy` (iOS) |
+| **Минимальная ОС** | Android 8.0+ (`API 26`), Android TV / Google TV, iOS / iPadOS 15.0+ |
+| **Архитектуры (ABI)** | `arm64-v8a`, `armeabi-v7a`, `x86_64` (Android) · `arm64` (iOS) |
+| **Сетевой стек** | `VpnService` (Android) и `NEPacketTunnelProvider` (`utun`, iOS) + локальный DNS/FakeIP перехват |
 
 ---
 

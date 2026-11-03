@@ -1,160 +1,123 @@
 <svg xmlns="http://www.w3.org/2000/svg"
-     width="1200" height="390" viewBox="0 0 1200 390"
+     width="1200" height="400" viewBox="0 0 1200 400"
      role="img" aria-labelledby="title desc">
-  <title id="title">Tachyon Proxy — Android VPN &amp; DPI Bypass Client</title>
-  <desc id="desc">Android VPN and DPI desynchronization client powered by the Rust tachyon-core engine via JNI, supporting VLESS REALITY, XHTTP, Hysteria2, TUIC, FakeIP, and per-app/per-service routing.</desc>
+  <title id="title">tachyon-proxy — кроссплатформенный VPN-клиент и пакетный десинхронизатор DPI</title>
+  <desc id="desc">Клиент маршрутизации, туннелирования и пакетного обхода ТСПУ (DPI Desync) на базе Rust-движка tachyon-core для Android, Android TV и iOS / iPadOS.</desc>
 
-  <defs>
-    <radialGradient id="dialGlow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#6FD08C" stop-opacity="0.18"/>
-      <stop offset="70%" stop-color="#B9A8FF" stop-opacity="0.05"/>
-      <stop offset="100%" stop-color="#0B0B0D" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#6FD08C" stop-opacity="0.28"/>
-      <stop offset="100%" stop-color="#6FD08C" stop-opacity="0.0"/>
-    </linearGradient>
-  </defs>
+  <!-- Canvas -->
+  <rect width="1200" height="400" rx="16" fill="#141415"/>
+  <rect x="0.5" y="0.5" width="1199" height="399" rx="15.5" fill="none" stroke="#2e2e32" stroke-width="1"/>
 
-  <!-- Canvas background (Morphe Dark #0B0B0D) -->
-  <rect width="1200" height="390" rx="24" fill="#0B0B0D"/>
-  <rect x="1" y="1" width="1198" height="388" rx="23" fill="none" stroke="#26262B" stroke-width="2"/>
+  <!-- Left column: identity, stack, metrics -->
+  <g transform="translate(40, 40)">
+    <!-- Status tag -->
+    <rect x="0" y="0" width="356" height="28" rx="6" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <circle cx="14" cy="14" r="4" fill="#38bdf8"/>
+    <text x="26" y="18" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">tachyon client · android · android tv · ios</text>
 
-  <!-- Left column: Identity, Value, Protocol & Engine badges -->
-  <g id="title-block" transform="translate(56, 48)">
-    <!-- Eyebrow / Wordmark cue -->
-    <circle cx="8" cy="10" r="5" fill="#B9A8FF"/>
-    <text x="24" y="15"
-          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-          font-size="16" font-weight="600" letter-spacing="3.5" fill="#A8A8AD">
-      TACHYON ECOSYSTEM · ANDROID VPN &amp; DPI BYPASS
-    </text>
+    <!-- Title & description -->
+    <text x="0" y="76" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="48" font-weight="500" letter-spacing="-1">tachyon-proxy</text>
+    <text x="0" y="112" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="18" font-weight="400">Клиент маршрутизации, туннелирования и пакетного обхода ТСПУ</text>
+    <text x="0" y="136" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="18" font-weight="400">поверх нативного Rust-движка tachyon-core для мобильных ОС и ТВ</text>
 
-    <!-- Main repository title -->
-    <text x="0" y="76"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-          font-size="54" font-weight="700" letter-spacing="-1.2" fill="#F2F2F3">
-      tachyon-proxy
-    </text>
+    <!-- Target protocols & modules -->
+    <g transform="translate(0, 164)">
+      <rect x="0" y="0" width="124" height="32" rx="6" fill="#19191b" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.5"/>
+      <text x="62" y="20" text-anchor="middle" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">tachyon-core</text>
 
-    <!-- Plain-language value proposition -->
-    <text x="0" y="120"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-          font-size="21" font-weight="400" fill="#A8A8AD">
-      Нативный Android-клиент поверх Rust-ядра <tspan fill="#F2F2F3" font-weight="600">tachyon-core</tspan>.
-    </text>
-    <text x="0" y="150"
-          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-          font-size="21" font-weight="400" fill="#A8A8AD">
-      Туннелирование, пакетный обход ТСПУ (Desync) и маршрутизация.
-    </text>
+      <rect x="132" y="0" width="136" height="32" rx="6" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="200" y="20" text-anchor="middle" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="400">VLESS · REALITY</text>
 
-    <!-- Protocol & transport pills -->
-    <g transform="translate(0, 184)">
-      <rect x="0" y="0" width="148" height="34" rx="17" fill="#2A2440" stroke="#B9A8FF" stroke-opacity="0.5"/>
-      <text x="74" y="22" text-anchor="middle"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#B9A8FF">VLESS · REALITY</text>
+      <rect x="276" y="0" width="124" height="32" rx="6" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="338" y="20" text-anchor="middle" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="400">XHTTP · Hy2</text>
 
-      <rect x="160" y="0" width="128" height="34" rx="17" fill="#141417" stroke="#26262B"/>
-      <text x="224" y="22" text-anchor="middle"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#F2F2F3">XHTTP · gRPC</text>
+      <rect x="408" y="0" width="104" height="32" rx="6" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="460" y="20" text-anchor="middle" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="400">DPI Desync</text>
 
-      <rect x="300" y="0" width="154" height="34" rx="17" fill="#141417" stroke="#26262B"/>
-      <text x="377" y="22" text-anchor="middle"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#F2F2F3">Hysteria2 · TUIC</text>
-
-      <rect x="466" y="0" width="144" height="34" rx="17" fill="#292218" stroke="#E5C07B" stroke-opacity="0.55"/>
-      <text x="538" y="22" text-anchor="middle"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#E5C07B">DPI Desync</text>
+      <rect x="520" y="0" width="64" height="32" rx="6" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="552" y="20" text-anchor="middle" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="400">.trs</text>
     </g>
 
-    <!-- Bottom technical metadata -->
-    <g transform="translate(0, 254)">
-      <rect x="0" y="0" width="610" height="44" rx="12" fill="#141417" stroke="#26262B"/>
-      <circle cx="22" cy="22" r="5" fill="#6FD08C"/>
-      <text x="38" y="27"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15.5" fill="#A8A8AD">
-        JNI FFI <tspan fill="#70707A">→</tspan> <tspan fill="#F2F2F3">libtachyon.so</tspan> <tspan fill="#70707A">·</tspan> FakeIP 198.18.0.0/15 <tspan fill="#70707A">·</tspan> .trs rules
-      </text>
+    <!-- Stat cards (same height 68px, 4px grid) -->
+    <g transform="translate(0, 216)">
+      <rect x="0" y="0" width="184" height="68" rx="8" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="16" y="28" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="500">3 ОС</text>
+      <text x="72" y="28" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="14" font-weight="400">в одном коде</text>
+      <text x="16" y="50" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Android · TV · iOS 15+</text>
+
+      <rect x="196" y="0" width="184" height="68" rx="8" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="212" y="28" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="500">9</text>
+      <text x="232" y="28" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="14" font-weight="400">протоколов</text>
+      <text x="212" y="50" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">прокси + нативный Desync</text>
+
+      <rect x="392" y="0" width="192" height="68" rx="8" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+      <text x="408" y="28" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="500">Zero-Copy</text>
+      <text x="408" y="50" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">FakeIP + mmap .trs базы</text>
+    </g>
+
+    <!-- Routing action legend -->
+    <g transform="translate(0, 304)">
+      <circle cx="6" cy="8" r="4" fill="#38bdf8"/>
+      <text x="18" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Proxy / DPI</text>
+      <text x="108" y="12" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">обход блокировок</text>
+
+      <circle cx="244" cy="8" r="4" fill="#4cc38a"/>
+      <text x="256" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Direct</text>
+      <text x="306" y="12" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">напрямую в РФ</text>
+
+      <circle cx="420" cy="8" r="4" fill="#e5484d"/>
+      <text x="432" y="12" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Block</text>
+      <text x="478" y="12" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">реклама и QUIC</text>
     </g>
   </g>
 
-  <!-- Right column: Native Product Specimen (Morphe UI Dashboard Card) -->
-  <g id="product-specimen" transform="translate(716, 34)">
-    <circle cx="214" cy="112" r="110" fill="url(#dialGlow)"/>
+  <!-- Right column: live tunnel specimen -->
+  <g transform="translate(664, 32)">
+    <rect x="0" y="0" width="496" height="336" rx="12" fill="#0f0f10" stroke="#2e2e32" stroke-width="1"/>
 
-    <!-- Phone card frame -->
-    <rect x="0" y="0" width="428" height="322" rx="20" fill="#141417" stroke="#26262B" stroke-width="1.5"/>
+    <!-- Specimen header -->
+    <rect x="0" y="0" width="496" height="36" rx="12" fill="#19191b"/>
+    <rect x="0" y="24" width="496" height="12" fill="#19191b"/>
+    <line x1="0" y1="36" x2="496" y2="36" stroke="#2e2e32" stroke-width="1"/>
+    <text x="16" y="23" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">tun0 / utun → libtachyon.so / TachyonCore</text>
+    <circle cx="412" cy="19" r="3.5" fill="#4cc38a"/>
+    <text x="480" y="23" text-anchor="end" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="500">active</text>
 
-    <!-- Top bar inside card -->
-    <circle cx="28" cy="28" r="4" fill="#B9A8FF"/>
-    <text x="42" y="33"
-          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-          font-size="15" font-weight="700" letter-spacing="3" fill="#F2F2F3">TACHYON</text>
-    <rect x="304" y="15" width="102" height="26" rx="13" fill="#192B20" stroke="#6FD08C" stroke-opacity="0.5"/>
-    <text x="355" y="33" text-anchor="middle"
-          font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-          font-size="13.5" font-weight="600" fill="#6FD08C">ПОДКЛЮЧЕНО</text>
-
-    <!-- Power ring & active session timer -->
-    <g transform="translate(24, 58)">
-      <circle cx="52" cy="52" r="46" fill="none" stroke="#6FD08C" stroke-width="1.5" stroke-opacity="0.65"/>
-      <circle cx="52" cy="52" r="36" fill="#6FD08C" fill-opacity="0.1" stroke="#6FD08C" stroke-opacity="0.35"/>
-      <path d="M52 34 L52 50 M42 40 A14 14 0 1 0 62 40"
-            fill="none" stroke="#6FD08C" stroke-width="2.4" stroke-linecap="round"/>
-
-      <text x="120" y="42"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="28" font-weight="700" fill="#F2F2F3">02:41:18</text>
-      <text x="120" y="68"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-            font-size="17" font-weight="600" fill="#B9A8FF">DE · XHTTP · REALITY</text>
-      <text x="120" y="92"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="14.5" fill="#6FD08C">HTTP 204: 48 ms · FakeIP</text>
+    <!-- Stage 1: Session & Outbound -->
+    <g transform="translate(16, 52)">
+      <rect x="0" y="0" width="464" height="72" rx="8" fill="#141415" stroke="#2e2e32" stroke-width="1"/>
+      <text x="16" y="24" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="14" font-weight="500">1. Системный туннель и активный узел</text>
+      <text x="448" y="24" text-anchor="end" fill="#4cc38a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="500">HTTP 204 · 48 ms</text>
+      <text x="16" y="44" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">VLESS · XHTTP · REALITY (uTLS Chrome) · FakeIP 198.18.0.0/15</text>
+      <text x="16" y="60" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">VpnService (Android) · NEPacketTunnelProvider (iOS)</text>
     </g>
 
-    <!-- Mode bar -->
-    <g transform="translate(24, 174)">
-      <rect x="0" y="0" width="380" height="36" rx="10" fill="#0B0B0D" stroke="#26262B"/>
-      <rect x="4" y="4" width="118" height="28" rx="7" fill="#2A2440" stroke="#B9A8FF" stroke-opacity="0.6"/>
-      <text x="63" y="23" text-anchor="middle"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-            font-size="14" font-weight="600" fill="#B9A8FF">По правилам</text>
-      <text x="178" y="23" text-anchor="middle"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-            font-size="14" fill="#E5C07B">Обход DPI</text>
-      <text x="275" y="23" text-anchor="middle"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-            font-size="14" fill="#A8A8AD">Весь трафик</text>
-      <text x="350" y="23" text-anchor="middle"
-            font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-            font-size="14" fill="#70707A">RU</text>
+    <!-- Connector 1 -->
+    <line x1="248" y1="124" x2="248" y2="140" stroke="#2e2e32" stroke-width="1"/>
+
+    <!-- Stage 2: Highlighted moment (Hybrid Routing + Desync) -->
+    <g transform="translate(16, 140)">
+      <rect x="0" y="0" width="464" height="80" rx="8" fill="#19191b" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.5"/>
+      <text x="16" y="24" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="14" font-weight="500">2. Гибридная маршрутизация и DPI Desync</text>
+      <text x="448" y="24" text-anchor="end" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="500">fake_split · autottl</text>
+      <text x="16" y="46" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">YouTube и Discord через пакетный Desync без участия сервера</text>
+      <text x="16" y="64" fill="#a1a1a6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Зарубежные ИИ и сервисы в Proxy · банки и госсайты РФ в Direct</text>
     </g>
 
-    <!-- Live traffic & sparkline card -->
-    <g transform="translate(24, 222)">
-      <rect x="0" y="0" width="380" height="78" rx="12" fill="#0B0B0D" stroke="#26262B"/>
-      <text x="16" y="26"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#B9A8FF">↑ 412 КБ/с</text>
-      <text x="142" y="26"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="15" font-weight="600" fill="#6FD08C">↓ 8.4 МБ/с</text>
-      <text x="282" y="26"
-            font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            font-size="14" fill="#A8A8AD">34 соед.</text>
+    <!-- Connector 2 -->
+    <line x1="248" y1="220" x2="248" y2="236" stroke="#2e2e32" stroke-width="1"/>
 
-      <!-- Sparkline curve -->
-      <path d="M16 64 L54 60 L92 52 L130 56 L168 42 L206 47 L244 36 L282 40 L320 32 L364 35 L364 68 L16 68 Z"
-            fill="url(#sparkFill)"/>
-      <path d="M16 64 L54 60 L92 52 L130 56 L168 42 L206 47 L244 36 L282 40 L320 32 L364 35"
-            fill="none" stroke="#6FD08C" stroke-width="2"/>
+    <!-- Stage 3: Telemetry & Protection -->
+    <g transform="translate(16, 236)">
+      <rect x="0" y="0" width="226" height="84" rx="8" fill="#141415" stroke="#2e2e32" stroke-width="1"/>
+      <text x="16" y="24" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Поток и телеметрия</text>
+      <text x="16" y="46" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">↓ 8.4 МБ/с · ↑ 412 КБ/с</text>
+      <text x="16" y="66" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">34 активных TCP/UDP узла</text>
+
+      <rect x="238" y="0" width="226" height="84" rx="8" fill="#141415" stroke="#2e2e32" stroke-width="1"/>
+      <text x="254" y="24" fill="#ededed" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="500">Защита сокетов и DNS</text>
+      <text x="254" y="46" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">protect_path · DoH · .trs</text>
+      <text x="254" y="66" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">SHA-256 верификация баз</text>
     </g>
   </g>
 </svg>

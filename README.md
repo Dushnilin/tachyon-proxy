@@ -1,112 +1,229 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="tachyon-proxy — Android VPN и клиент обхода DPI на базе Rust-ядра tachyon-core">
+  <img src="./assets/readme/hero.svg" width="100%" alt="tachyon-proxy — клиент маршрутизации, туннелирования и пакетного обхода ТСПУ на базе Rust-движка tachyon-core для Android, Android TV и iOS">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/Dushnilin/tachyon-proxy/build.yml?branch=main&style=flat-square&label=APK%20Build&labelColor=141417&color=6FD08C" alt="Build Status"></a>
-  <a href="https://github.com/Dushnilin/tachyon-proxy/releases"><img src="https://img.shields.io/badge/APK-Releases-B9A8FF?style=flat-square&labelColor=141417" alt="Releases"></a>
-  <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20(Rust)-B9A8FF?style=flat-square&labelColor=141417" alt="Engine: tachyon-core"></a>
-  <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/rules-tachyon--lists%20(.trs)-6FD08C?style=flat-square&labelColor=141417" alt="Rules: tachyon-lists"></a>
-  <img src="https://img.shields.io/badge/Android-8.0%2B_%7C_Android_TV-A8A8AD?style=flat-square&labelColor=141417" alt="Android 8.0+ & Android TV">
-  <img src="https://img.shields.io/badge/iOS-15.0%2B%20(arm64)-38BDF8?style=flat-square&labelColor=141417" alt="iOS 15.0+">
+  <a href="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml"><img src="https://github.com/Dushnilin/tachyon-proxy/actions/workflows/build.yml/badge.svg" alt="Build &amp; Release Tachyon Proxy"></a>
+  <a href="https://github.com/Dushnilin/tachyon-proxy/releases/tag/latest"><img src="https://img.shields.io/badge/release-v0.0.9%20%2F%20latest-38bdf8?labelColor=19191b" alt="Latest Release"></a>
+  <a href="https://github.com/Dushnilin/tachyon-core"><img src="https://img.shields.io/badge/engine-tachyon--core%20v0.3.1-232325?labelColor=19191b" alt="Engine: tachyon-core"></a>
+  <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/lists-143%20categories%20(.trs)-232325?labelColor=19191b" alt="Rules: tachyon-lists"></a>
+  <img src="https://img.shields.io/badge/targets-Android%20%C2%B7%20TV%20%C2%B7%20iOS%2015%2B-232325?labelColor=19191b" alt="Targets: Android, Android TV, iOS 15+">
 </p>
 
-**`tachyon-proxy`** — самостоятельный VPN-клиент и пакетный десинхронизатор ТСПУ (DPI) для **Android**, **Android TV** и **iOS / iPadOS** на Flutter, построенный поверх нативного Rust-движка [`tachyon-core`](https://github.com/Dushnilin/tachyon-core).
-
-Приложение формирует конфигурацию `sing-box`-совместимого ядра, поднимает системный туннель (`VpnService` на Android и `NEPacketTunnelProvider` на iOS), защищает исходящие сокеты от петель маршрутизации и передаёт управление трафиком в нативное ядро (`libtachyon.so` по JNI / `TachyonCore.xcframework` по C-ABI).
-
 ---
-
-## Скачать APK и IPA
-
-Готовые сборки автоматически публикуются через GitHub Actions в разделе **[Releases](https://github.com/Dushnilin/tachyon-proxy/releases)**:
-
-- **`tachyon-proxy-ios.ipa`** — сборка для **iPhone и iPad (`iOS / iPadOS 15.0+`, `arm64`)** с вшитыми правами `NEPacketTunnelProvider` (установка через TrollStore, SideStore, AltStore, Sideloadly, ESign, Feather)
-- **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (`armeabi-v7a` + `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок по Wi-Fi QR)
-- **`tachyon-proxy-arm64-v8a.apk`** — основной пакет для современных смартфонов Android (`64-bit ARM`)
-- **`tachyon-proxy-armeabi-v7a.apk`** — для `32-bit ARM` устройств и ТВ-боксов
-- **`tachyon-proxy-x86_64.apk`** — для эмуляторов и `x86_64` систем
-- **`tachyon-proxy-universal.apk`** — универсальный APK со всеми архитектурами
-
----
-
-## Чем отличается
-
-- **Два контура в одном ядре: Прокси + Нативный DPI Desync.** Можно работать через удалённый сервер (`VLESS`, `REALITY`, `XHTTP`, `Hysteria2`, `TUIC v5`, `Trojan`, `Shadowsocks-2022`, `AnyTLS`, `SOCKS5`), включить автономный режим **Обход DPI (Desync)** вообще без VPN-сервера (разрезание TLS ClientHello `fake_split` / `fake_disorder` / `tlsrec` с обманом `autottl` / `md5` и подавлением `UDP:443` QUIC), либо комбинировать их одновременно (например: YouTube и Discord идут через `Desync`, Instagram и ChatGPT — через `VLESS`, а банки и `.ru` — напрямую).
-- **Честная обратная связь от движка.** Статус «Подключено» выставляется только после фактического старта `libtachyon.so` и валидации схемы. Живая скорость (`↑/↓`), график нагрузки (спарклайн), счётчик активных соединений и сквозной `HTTP 204` тест считываются напрямую из туннеля.
-- **Полная интеграция с Android.** Плитка быстрых настроек в шторке (`Quick Settings Tile`), информативное уведомление с живой скоростью и кнопками **«Отключить»** / **«След. сервер»**, автозапуск при загрузке ОС (`BOOT_COMPLETED`) и раздача прокси в локальную сеть (`Allow LAN 0.0.0.0:2080`).
-
----
-
-## Как устроен конвейер
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="Архитектура конвейера трафика tachyon-proxy: Flutter UI, Kotlin VpnService и Rust JNI-движок tachyon-core">
+  <img src="./assets/readme/section-packages.svg" width="100%" alt="01 — Установочные пакеты и целевые платформы (releases/)">
 </p>
 
-| Слой | Путь в репозитории | Задача |
-| :--- | :--- | :--- |
-| **UI и дизайн-система** | `lib/features/`, `lib/app/` | 4 основных экрана (Туннель, Профили, Правила, Настройки), монитор соединений, экран приложений, DNS и журнал; токены `Morphe` в `lib/app/theme/tokens.dart` |
-| **Контроллер и конфигуратор** | `lib/core/app_controller.dart`, `lib/core/models/runtime_config.dart` | Парсинг подписок (`Subscription-Userinfo`, `Profile-Title`, Base64/URI), генерация JSON для ядра, TCP/HTTP пинг, автоподбор сервера |
-| **Каналы связи** | `lib/core/services/core_bridge.dart` | `MethodChannel` + `EventChannel` между Flutter и Android-слоем |
-| **Android VPN-сервис** | `android/app/src/main/kotlin/org/tachyon/vpn/` | `TachyonVpnService`, `TachyonTileService`, `BootReceiver`, Unix-сервер `protectSocket`, фоновый цикл статистики уведомления |
-| **iOS Network Extension** | `ios/Runner/`, `ios/PacketTunnelExtension/` | `PacketTunnelProvider` (`NEPacketTunnelProvider`), связка `utun` с `TachyonCore.xcframework`, IPC `sendProviderMessage` и `App Group` |
-| **Нативное ядро** | `Dushnilin/tachyon-core` | Динамические библиотеки `libtachyon-*.so` (Android JNI) и `TachyonCore.xcframework` (iOS C-ABI) |
+<p align="center">
+  <img src="./assets/readme/packages-board.svg" width="100%" alt="Шесть пакетов поставки: arm64-v8a.apk, ios.ipa, android-tv.apk, armeabi-v7a.apk, x86_64.apk и индекс version.json">
+</p>
+
+| Целевая платформа | Артефакт | Прямая ссылка (`releases/latest`) |
+|:---|:---|:---|
+| **Android (`64-bit ARM`, основной)** | `tachyon-proxy-arm64-v8a.apk` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-arm64-v8a.apk` |
+| **iOS / iPadOS 15.0+ (`arm64`)** | `tachyon-proxy-ios.ipa` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-ios.ipa` |
+| **Android TV / Google TV (`Leanback`)** | `tachyon-proxy-android-tv.apk` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-android-tv.apk` |
+| **Android (`32-bit ARM`, ТВ-боксы)** | `tachyon-proxy-armeabi-v7a.apk` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-armeabi-v7a.apk` |
+| **Android (`x86_64`, ChromeOS / WSA)** | `tachyon-proxy-x86_64.apk` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-x86_64.apk` |
+| **Универсальный APK (все ABI)** | `tachyon-proxy-universal.apk` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-universal.apk` |
+| **Манифест OTA и `SHA-256` суммы** | `version.json` · `SHA256SUMS.txt` | `https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/SHA256SUMS.txt` |
+
+<details>
+<summary><b>Особенности установки на iOS / iPadOS (<code>.ipa</code>) и приставки Android TV</b></summary>
+
+<br>
+
+**Установка на iOS / iPadOS (`tachyon-proxy-ios.ipa`):**
+- Пакет содержит основное приложение `Runner.app` и сетевое расширение `PacketTunnelExtension.appex` (`NEPacketTunnelProvider`), скомпилированные со статическим фреймворком `TachyonCore.xcframework`.
+- В бинарные файлы предпрошиты права `com.apple.developer.networking.networkextension` (`packet-tunnel-provider`) и `com.apple.security.application-groups` (`group.app.tachyon.proxy`).
+- При установке через **TrollStore** используются вшитые ad-hoc права без переподписи.
+- При подписи через **SideStore**, **AltStore**, **Sideloadly**, **ESign** или **Feather** расширение автоматически переключается на передачу конфигурации, профилей и скачанных списков `.trs` через `NETunnelProviderProtocol.providerConfiguration` и IPC-сообщения `sendProviderMessage`, поэтому туннель работает даже без платного контейнера `App Group`.
+
+**Установка на Android TV и медиаприставки (`tachyon-proxy-android-tv.apk`):**
+- Отдельный пакет с `Leanback`-баннером для главного экрана Android TV / Google TV и поддержкой `arm64-v8a` + `armeabi-v7a`.
+- Все элементы интерфейса адаптированы под навигацию крестовиной пульта (`D-pad` / `Enter` / `Back`).
+- Для добавления подписок и `vless://` ключей без ввода текста с пульта встроен локальный HTTP-сервер с QR-кодом: смартфон в той же Wi-Fi сети сканирует код с экрана телевизора и отправляет ссылку напрямую в клиент.
+
+</details>
 
 ---
 
-## Возможности по разделам
+<p align="center">
+  <img src="./assets/readme/section-pipeline.svg" width="100%" alt="02 — Архитектура и конвейер обработки трафика">
+</p>
 
-### 1. Туннель (Дашборд)
-- Кольцевой индикатор состояния туннеля, таймер сессии и переключатель режимов в 1 тап (**По правилам**, **Обход DPI**, **Весь трафик**, **Исключения**).
-- Карточка трафика с живой скоростью (`↑ КБ/с`, `↓ МБ/с`), мини-спарклайном и быстрым переходом в монитор активных соединений.
-- Карточка текущего сервера с кнопкой сквозного `HTTP-теста` (`http://cp.cloudflare.com/generate_204`) и генерацией QR-кода.
-- Поиск по серверам, кнопка **«Лучший»** (пакетный TCP-пинг и автовыбор минимальной задержки) и сворачиваемые группы подписок.
+<p align="center">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="Конвейер прохождения пакетов: RuntimeConfig, захват системного дескриптора TUN/utun, классификация в tachyon-core и четыре контура выхода">
+</p>
 
-### 2. Профили и подписки
-- Импорт ссылок `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `hy2://`, `tuic://`, `anytls://`, `socks://`, `wg://`, `https://`-подписок (с передачей `X-Hwid`) и сырых JSON-аутбаундов.
-- Отображение остатка трафика (прогресс-бар гигабайт) и даты окончания подписки из заголовка `Subscription-Userinfo`.
-- Кнопка очистки недоступных серверов (`✗`) после пинга.
-- Полноценный редактор сервера (протокол, транспорт `TCP`/`XHTTP`/`WS`/`gRPC`/`HTTPUpgrade`, безопасность `None`/`TLS`/`REALITY`, `SNI`, `Flow`, `pbk`, `sid`, `uTLS Fingerprint`).
-- Встроенный векторный генератор QR-кодов (`ISO/IEC 18004`) без сторонних зависимостей, экспорт URI и системное меню «Поделиться».
+<p align="center">
+  <sub>Связанные репозитории экосистемы:
+  <a href="https://github.com/Dushnilin/tachyon-core"><b>Dushnilin/tachyon-core</b></a> (нативное Rust-ядро маршрутизации и DPI) ·
+  <a href="https://github.com/Dushnilin/tachyon-lists"><b>Dushnilin/tachyon-lists</b></a> (компилятор бинарных баз <code>.trs v2</code> и <code>.srs v3</code>) ·
+  <a href="https://github.com/Dushnilin/tachyon"><b>Dushnilin/tachyon</b></a> (клиент для роутеров OpenWrt)</sub>
+</p>
 
-### 3. Правила и обход ТСПУ (Desync)
-- **Пользовательские правила**: быстрое добавление `domain_suffix`, `domain`, `domain_keyword` и `ip_cidr` с выбором действия (`ТУННЕЛЬ`, `НАПРЯМУЮ`, `ОБХОД DPI`, `БЛОК`).
-- **Точечно по сервисам**: готовые пресеты для YouTube, Discord, Telegram, Instagram/Meta, ChatGPT/AI и российских сайтов/банков (`.ru`).
-- **Настройка Desync**: выбор рецепта (`auto`, `fake_split`, `fake_disorder`, `tlsrec`, `multi_split`, `split`, `disorder`), метода обмана ТСПУ (`autottl`, `md5`, `timestamp`, `badseq`, `badsum`) и кнопка автоматического тестирования доступности YouTube/Discord.
-- **Каталог [`tachyon-lists`](https://github.com/Dushnilin/tachyon-lists)**: скачивание бинарных `.trs`-списков с проверкой `SHA-256`, поиск и фильтрация активных наборов.
+<details>
+<summary><b>Схема взаимодействия системного туннеля с <code>tachyon-core</code> и пример генерируемой конфигурации</b></summary>
 
-### 4. Приложения, DNS, Соединения и Настройки
-- **Приложения**: реальные иконки установленных пакетов, закрепление настроенных приложений вверху списка, фильтр системных пакетов и шаблоны в 1 клик (*«Банки и РФ → Напрямую»*, *«YouTube / Discord → DPI»*).
-- **DNS и анти-утечки**: режим **FakeIP (`198.18.0.0/15`)**, выбор стратегии маршрутизации DNS (*Раздельный `.ru` напрямую*, *Всегда через прокси*, *Напрямую*), чипы популярных DoH-резолверов (`Google`, `Cloudflare`, `Quad9`, `AdGuard`, `Comss`, `Яндекс`) и встроенный бенчмарк задержки.
-- **Активные соединения**: живой список зафиксированных `TCP`/`UDP` узлов из ядра с созданием правила для любого домена или IP в один тап.
-- **Журнал и резервное копирование**: `Live-tail` логов ядра с фильтрацией по уровням (`ERROR`, `WARN`, `INFO`), настройка `MTU` (`1360`..`9000`), `Allow LAN (:2080)` и полный экспорт/импорт настроек в `JSON`.
+<br>
+
+Клиент не запускает дочерние процессы и не пересылает трафик через локальный SOCKS-прокси между слоями: файловый дескриптор системного интерфейса (`tun fd` на Android и `utun fd` на iOS) передаётся напрямую в Rust-ядро `tachyon-core` через FFI (`Java_org_tachyon_vpn_TachyonBridge_startCore` на Android и `tachyon_start(config_json, tun_fd)` на iOS).
+
+Для предотвращения петель маршрутизации на Android поднимается локальный Unix-сокет `protect_path`, через который `tachyon-core` вызывает `VpnService.protect(fd)` для каждого исходящего сокета перед установкой соединения.
+
+```json
+{
+  "log": { "level": "info" },
+  "dns": {
+    "servers": [
+      { "tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy" },
+      { "tag": "dns-direct", "address": "77.88.8.8", "detour": "direct" },
+      { "tag": "dns-fakeip", "address": "fakeip" }
+    ],
+    "fakeip": {
+      "enabled": true,
+      "inet4_range": "198.18.0.0/15"
+    }
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "Inet4Address": "172.19.0.1/30",
+      "mtu": 1400,
+      "auto_route": false,
+      "sniff": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "edge.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": { "enabled": true, "public_key": "...", "short_id": "..." }
+      },
+      "transport": { "type": "xhttp", "path": "/api/v1/stream", "mode": "auto" }
+    },
+    {
+      "type": "desync",
+      "tag": "dpi",
+      "strategy": "fake_split",
+      "fooling": "autottl",
+      "split_pos": 2,
+      "drop_quic": true
+    },
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
+  ],
+  "route": {
+    "rule_set": [
+      { "tag": "ru_whitelist", "type": "local", "format": "binary", "path": ".../rules/ru_whitelist.trs" },
+      { "tag": "youtube", "type": "local", "format": "binary", "path": ".../rules/youtube.trs" },
+      { "tag": "ai_all", "type": "local", "format": "binary", "path": ".../rules/ai_all.trs" }
+    ],
+    "rules": [
+      { "rule_set": ["ru_whitelist"], "outbound": "direct" },
+      { "rule_set": ["youtube"], "outbound": "dpi" },
+      { "rule_set": ["ai_all"], "outbound": "proxy" }
+    ],
+    "auto_detect_interface": true,
+    "protect_path": ".../protect_path"
+  }
+}
+```
+
+</details>
 
 ---
 
-## Системные требования
+<p align="center">
+  <img src="./assets/readme/section-capabilities.svg" width="100%" alt="03 — Подсистемы клиента и управление маршрутизацией">
+</p>
 
-| Параметр | Значение |
-| :--- | :--- |
-| **Application ID / Bundle ID** | `app.tachyon.tachyon_proxy` (Android) / `app.tachyon.tachyonProxy` (iOS) |
-| **Минимальная ОС** | Android 8.0+ (`API 26`), Android TV / Google TV, iOS / iPadOS 15.0+ |
-| **Архитектуры (ABI)** | `arm64-v8a`, `armeabi-v7a`, `x86_64` (Android) · `arm64` (iOS) |
-| **Сетевой стек** | `VpnService` (Android) и `NEPacketTunnelProvider` (`utun`, iOS) + локальный DNS/FakeIP перехват |
+<p align="center">
+  <img src="./assets/readme/features-grid.svg" width="100%" alt="Шесть ключевых подсистем клиента tachyon-proxy: протоколы, DPI Desync, списки .trs, DNS FakeIP, интеграция с ОС и диагностика">
+</p>
+
+| Подсистема | Поддерживаемые механизмы и параметры |
+|:---|:---|
+| **Прокси-протоколы и транспорты** | `VLESS` (`Vision`, `REALITY`, `uTLS`), `Trojan`, `Shadowsocks` (`2022-blake3-*`, `aes-*-gcm`, `chacha20-ietf-poly1305`), `VMess`, `Hysteria2` (`Salamander`), `TUIC v5`, `AnyTLS`, `WireGuard`, `SOCKS5` · транспорты `TCP`, `XHTTP` (`splithttp`), `WebSocket`, `gRPC`, `HTTPUpgrade` |
+| **Пакетный обход ТСПУ (`Desync`)** | Автономная модификация пакетов без участия внешнего сервера: рецепты `auto`, `fake_split`, `fake_disorder`, `tlsrec`, `multi_split`, `split`, `disorder` · методы отбраковки фейков `autottl`, `md5`, `timestamp`, `badseq`, `badsum` · подавление `UDP:443` (`QUIC`) и автоподбор рабочей стратегии по целевым узлам |
+| **Четыре режима работы туннеля** | **По правилам** (гибридное распределение `Proxy` + `Desync` + `Direct` + `Block`), **Обход DPI** (работает только локальный десинхронизатор без VPN-сервера), **Весь трафик** (глобальный туннель с исключением критичных доменов РФ), **Исключения** |
+| **Каталог [`tachyon-lists`](https://github.com/Dushnilin/tachyon-lists) (`.trs`)** | Встроенный менеджер 143 категорий правил в формате `TSRS v2` (`zero-copy mmap`), проверка контрольных сумм `SHA-256`, локальный кэш, поиск по доменам и пользовательские правила (`domain`, `domain_suffix`, `domain_keyword`, `ip_cidr`) |
+| **Подписки и профили** | Парсинг ссылок, `Base64`-списков и `JSON`-аутбаундов, передача заголовка `X-Hwid`, учёт остатка трафика и срока действия из `Subscription-Userinfo`, пакетный TCP-пинг, автовыбор минимальной задержки и встроенный векторный генератор QR (`ISO/IEC 18004`) |
+| **DNS и защита от утечек** | Виртуальный пул `FakeIP` (`198.18.0.0/15`), раздельный резолвинг национальных зон `.ru` / `.рф` / `.su` напрямую мимо туннеля, пресеты `DoH` / `DoT` / `UDP` резолверов (`Cloudflare`, `Google`, `Quad9`, `AdGuard`, `Comss`, `Яндекс`) со встроенным тестом отклика |
+| **Раздельное туннелирование и мониторинг** | Поприложенческая маршрутизация на Android (`Proxy`, `Direct`, `DPI`), живой инспектор открытых `TCP`/`UDP` соединений ядра с созданием правил в один шаг, `live-tail` системного журнала и полный экспорт/импорт конфигурации в `JSON` |
 
 ---
 
-## 💖 Поддержать разработку
+<p align="center">
+  <img src="./assets/readme/section-build.svg" width="100%" alt="04 — Структура репозитория и сборка из исходного кода">
+</p>
 
-Если Tachyon помогает вам и делает работу в сети комфортной, вы можете поддержать проект и автора! ☕ 🧀 🌭
+| Слой | Путь в репозитории | Назначение |
+|:---|:---|:---|
+| **Интерфейс и экраны** | [`lib/features/`](lib/features/), [`lib/app/`](lib/app/) | Экраны туннеля, профилей, правил и каталога `.trs`, настроек, приложений, DNS и инспектора активных соединений |
+| **Контроллер и конфигуратор** | [`lib/core/app_controller.dart`](lib/core/app_controller.dart), [`lib/core/models/runtime_config.dart`](lib/core/models/runtime_config.dart) | Парсер подписок и URI, синхронизация с `tachyon-lists`, компиляция JSON-схемы `tachyon-core`, проверка обновлений |
+| **Платформенный мост** | [`lib/core/services/core_bridge.dart`](lib/core/services/core_bridge.dart) | Асинхронный `MethodChannel` (`app.tachyon.proxy/vpn`) и поток событий `EventChannel` (`app.tachyon.proxy/events`) |
+| **Android `VpnService`** | [`android/app/src/main/kotlin/org/tachyon/vpn/`](android/app/src/main/kotlin/org/tachyon/vpn/) | `TachyonVpnService`, `TachyonTileService`, `BootReceiver`, Unix-сервер `protectSocket`, JNI-обёртка `TachyonBridge` |
+| **iOS `NEPacketTunnelProvider`** | [`ios/Runner/`](ios/Runner/), [`ios/PacketTunnelExtension/`](ios/PacketTunnelExtension/) | `PacketTunnelProvider` (`utun`), C-FFI заголовок `tachyon_core.h`, синхронизация через `App Group` и IPC `sendProviderMessage` |
+| **Пайплайн CI/CD** | [`.github/workflows/build.yml`](.github/workflows/build.yml) | Автоматическая сборка Android APK (`ubuntu-latest`), iOS IPA (`macos-latest`) и публикация релизов с `SHA-256` |
 
-⭐ **Boosty (подписки, донаты, эксклюзив):**  
-👉 [**Поддержать на Boosty**](https://boosty.to/tachyon)
+<details>
+<summary><b>Системные спецификации и команды локальной сборки (Android APK / iOS IPA)</b></summary>
 
-💳 **Карты РФ / СБП / Tinkoff Pay:**  
-👉 [**Поддержать проект на CloudTips**](https://pay.cloudtips.ru/p/449c5ef9)
+<br>
 
-🪙 **Криптовалюта:**
-* **Bitcoin (BTC):** `bc1q9ehdv7y9g948jejyflkq7xmau3tytgunxgh35h`
-* **Ethereum (ETH / ERC-20):** `0x6CB7a4547eD62EF64990D5C6B5D9fdA58EB223E6`
-* **TON:** `UQDPhLRjMz5KltDLACAT3YXXHDVEtIDOHky2i33ZIOtsMEoR`
-* **Solana (SOL):** `3csTGaNeU9KjhCKHEKAU3XLS5UfVjEeBVhXihpsETZwh`
+| Параметр | Спецификация |
+|:---|:---|
+| **Идентификаторы пакетов** | `app.tachyon.tachyon_proxy` (Android) · `app.tachyon.tachyonProxy` и `.PacketTunnel` (iOS) |
+| **Минимальные версии ОС** | Android 8.0 (`API 26`), Android TV / Google TV, iOS / iPadOS 15.0 |
+| **Поддерживаемые архитектуры** | `arm64-v8a`, `armeabi-v7a`, `x86_64` (Android) · `arm64` (iOS) |
+| **Бинарные артефакты ядра** | `libtachyon-arm64-v8a.so`, `libtachyon-armeabi-v7a.so`, `libtachyon-x86_64.so`, `TachyonCore.xcframework` |
+
+**Сборка пакетов Android (`Linux` / `macOS` / `Windows`):**
+
+```bash
+# 1. Скачать JNI-библиотеки из последнего релиза Dushnilin/tachyon-core в android/app/src/main/jniLibs/<abi>/libtachyon.so
+# 2. Проверить анализатор и модульные тесты
+flutter analyze
+flutter test
+
+# 3. Собрать раздельные APK по архитектурам и сборку для Android TV
+flutter build apk --release --split-per-abi
+flutter build apk --release --dart-define=TACHYON_TV=true
+```
+
+**Сборка пакета iOS (`macOS` + `Xcode 15+`):**
+
+```bash
+# 1. Распаковать tachyon-core-ios-xcframework.tar.gz в ios/Frameworks/TachyonCore.xcframework
+# 2. Собрать Flutter-часть и подписать Runner.app + PacketTunnelExtension.appex с вшитыми entitlements
+flutter build ios --release --no-codesign
+xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos \
+  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+```
+
+</details>
+
+---
+
+## Поддержать разработку
+
+Если Tachyon помогает в работе, вы можете поддержать развитие проекта:
+
+- **Boosty:** [boosty.to/tachyon](https://boosty.to/tachyon)
+- **Карты РФ и СБП (CloudTips):** [pay.cloudtips.ru/p/449c5ef9](https://pay.cloudtips.ru/p/449c5ef9)
+- **Bitcoin (BTC):** `bc1q9ehdv7y9g948jejyflkq7xmau3tytgunxgh35h`
+- **Ethereum (ETH / ERC-20):** `0x6CB7a4547eD62EF64990D5C6B5D9fdA58EB223E6`
+- **TON:** `UQDPhLRjMz5KltDLACAT3YXXHDVEtIDOHky2i33ZIOtsMEoR`
+- **Solana (SOL):** `3csTGaNeU9KjhCKHEKAU3XLS5UfVjEeBVhXihpsETZwh`

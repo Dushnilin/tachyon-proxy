@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="332" viewBox="0 0 1200 332"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Шесть ключевых подсистем клиента tachyon-proxy</title>
+  <desc id="desc">Сетка из 6 инженерных модулей tachyon-proxy: протоколы и транспорты, пакетный обход ТСПУ (Desync), каталог правил .trs, DNS и FakeIP, системная интеграция для Android/TV/iOS и диагностика соединений.</desc>
+
+  <rect width="1200" height="332" rx="16" fill="#141415"/>
+  <rect x="0.5" y="0.5" width="1199" height="331" rx="15.5" fill="none" stroke="#2e2e32" stroke-width="1"/>
+
+  <!-- Row 1 (y=24, h=136) -->
+  <!-- Module 1: Protocols -->
+  <g transform="translate(24, 24)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Протоколы и транспорты · 9</text>
+    <circle cx="304" cy="23" r="3" fill="#38bdf8"/>
+    <text x="314" y="27" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Proxy</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">VLESS · REALITY · XHTTP · WS · gRPC</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Hysteria2 · TUIC v5 · Trojan · SS-2022</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">WireGuard · AnyTLS · VMess · SOCKS5</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Подписки с X-Hwid, остатком ГБ и редактором</text>
+  </g>
+
+  <!-- Module 2: DPI Desync -->
+  <g transform="translate(416, 24)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.5"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Пакетный обход ТСПУ · Desync</text>
+    <circle cx="296" cy="23" r="3" fill="#38bdf8"/>
+    <text x="306" y="27" fill="#38bdf8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="500">Desync</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">fake_split · fake_disorder · tlsrec</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">multi_split · split · disorder</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">fooling: autottl · md5 · badseq · badsum</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Автономная работа без сервера + сброс QUIC</text>
+  </g>
+
+  <!-- Module 3: Lists & Rules -->
+  <g transform="translate(808, 24)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Списки маршрутизации · .trs</text>
+    <circle cx="300" cy="23" r="3" fill="#4cc38a"/>
+    <text x="310" y="27" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">143 баз</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Интеграция с каталогом tachyon-lists</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Скачивание и сверка SHA-256 хешей</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">domain · domain_suffix · keyword · cidr</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Быстрые пресеты по сервисам и приложениям</text>
+  </g>
+
+  <!-- Row 2 (y=172, h=136) -->
+  <!-- Module 4: DNS & FakeIP -->
+  <g transform="translate(24, 172)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">DNS, FakeIP и анти-утечки</text>
+    <circle cx="300" cy="23" r="3" fill="#4cc38a"/>
+    <text x="310" y="27" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">FakeIP</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Пул FakeIP 198.18.0.0/15 внутри ядра</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Раздельный DNS (.ru и СНГ мимо прокси)</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Cloudflare · Google · Quad9 · AdGuard · Comss</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Встроенный замер задержки DoH / DoT / UDP</text>
+  </g>
+
+  <!-- Module 5: OS Integration -->
+  <g transform="translate(416, 172)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Интеграция с ОС и ТВ</text>
+    <circle cx="304" cy="23" r="3" fill="#38bdf8"/>
+    <text x="314" y="27" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Native</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Android Quick Settings Tile и шторка ↑/↓</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">iOS NEPacketTunnel + sideload IPC фоллбэк</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Android TV D-pad навигация и LAN QR-сервер</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Автозапуск при старте ОС и Allow LAN :2080</text>
+  </g>
+
+  <!-- Module 6: Telemetry & Diagnostics -->
+  <g transform="translate(808, 172)">
+    <rect x="0" y="0" width="368" height="136" rx="12" fill="#19191b" stroke="#2e2e32" stroke-width="1"/>
+    <text x="20" y="28" fill="#ededed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="16" font-weight="500">Мониторинг и диагностика</text>
+    <circle cx="304" cy="23" r="3" fill="#85858b"/>
+    <text x="314" y="27" fill="#85858b" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Audit</text>
+    <text x="20" y="56" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Таблица активных TCP/UDP соединений ядра</text>
+    <text x="20" y="76" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Создание правила для узла или пакета в 1 тап</text>
+    <text x="20" y="96" fill="#a1a1a6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="400">Сквозной HTTP 204 пинг и пакетный TCP-тест</text>
+    <text x="20" y="120" fill="#85858b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" font-size="13" font-weight="400">Live-tail журнала и полный экспорт в JSON</text>
+  </g>
+</svg>

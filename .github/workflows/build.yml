@@ -225,21 +225,52 @@ jobs:
           cd dist && sha256sum *.apk *.ipa version.json > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+          sed 's/^          //' > "${RUNNER_TEMP}/RELEASE_NOTES.md" <<EOF
+          <p align="left">
+            <a href="https://github.com/Dushnilin/tachyon-core/releases/tag/v${core_ver}"><img src="https://img.shields.io/badge/engine-tachyon--core%20v${core_ver}-38bdf8?labelColor=19191b" alt="Core v${core_ver}"></a>
+            <a href="https://github.com/Dushnilin/tachyon-lists"><img src="https://img.shields.io/badge/lists-143%20categories%20(.trs)-232325?labelColor=19191b" alt="Rules .trs"></a>
+            <img src="https://img.shields.io/badge/targets-Android%20%C2%B7%20TV%20%C2%B7%20iOS%2015%2B-232325?labelColor=19191b" alt="Targets">
+          </p>
+
+          Релиз **Tachyon Proxy v${app_ver}** со встроенным нативным ядром маршрутизации и обхода DPI [\`tachyon-core v${core_ver}\`](https://github.com/Dushnilin/tachyon-core/releases/tag/v${core_ver}).
+
+          ---
+
+          ### Ключевые изменения и возможности
+
+          - **Полная документация и визуальная архитектура проекта:** обновлён корневой \`README.md\` и комплект векторных схем (\`hero.svg\`, \`packages-board.svg\`, \`architecture.svg\`, \`features-grid.svg\`) с описанием четырёхэтапного конвейера обработки пакетов (\`RuntimeConfig\` → \`System Tunnel\` → \`tachyon-core\` → \`Outbounds\`) и примером рабочей JSON-схемы.
+          - **Нативная поддержка iOS / iPadOS 15.0+ (\`tachyon-proxy-ios.ipa\`):** системное расширение \`NEPacketTunnelProvider\` (\`PacketTunnelExtension.appex\`), статическая линковка с \`TachyonCore.xcframework\`, захват дескриптора \`utun\`, синхронизация через \`App Group\` (\`group.app.tachyon.proxy\`) и автономный IPC-фоллбэк \`sendProviderMessage\` для установки через **TrollStore**, **SideStore**, **AltStore**, **Sideloadly**, **ESign** и **Feather**.
+          - **Четыре контура маршрутизации в одном ядре:** одновременная работа прокси-протоколов (\`VLESS\`, \`REALITY\`, \`XHTTP\`, \`Hysteria2\`, \`TUIC v5\`, \`Trojan\`, \`Shadowsocks-2022\`, \`WireGuard\`, \`AnyTLS\`), пакетного десинхронизатора ТСПУ (\`fake_split\`, \`fake_disorder\`, \`tlsrec\`, \`multi_split\`, \`autottl\`, \`md5\`), прямого контура для РФ (\`Direct\`) и блокировщика рекламы/QUIC (\`Block\`).
+          - **Интеграция с каталогом \`tachyon-lists\` (\`TSRS v2 .trs\`):** прямая загрузка 143 категорий правил с проверкой контрольных сумм \`SHA-256\` и отображением в память \`zero-copy mmap\`.
+
+          ---
+
+          ### Установочные пакеты
+
+          | Целевая платформа | Файл | Описание |
+          |:---|:---|:---|
+          | **Android (\`64-bit ARM\`, основной)** | \`tachyon-proxy-arm64-v8a.apk\` | Основная сборка для современных смартфонов и планшетов Android 8.0+ |
+          | **iOS / iPadOS 15.0+ (\`arm64\`)** | \`tachyon-proxy-ios.ipa\` | Сборка с \`NEPacketTunnelProvider\` и вшитыми entitlements (TrollStore / SideStore / AltStore / ESign / Feather) |
+          | **Android TV / Google TV (\`Leanback\`)** | \`tachyon-proxy-android-tv.apk\` | Сборка для телевизоров и приставок (\`arm64-v8a\` + \`armeabi-v7a\`), управление пультом ДУ и импорт по LAN QR |
+          | **Android (\`32-bit ARM\`)** | \`tachyon-proxy-armeabi-v7a.apk\` | Для 32-битных устройств и ТВ-боксов |
+          | **Android (\`x86_64\`)** | \`tachyon-proxy-x86_64.apk\` | Для ChromeOS, WSA и эмуляторов |
+          | **Универсальный APK** | \`tachyon-proxy-universal.apk\` | Единый пакет со всеми архитектурами |
+
+          ---
+
+          ### Контрольные суммы (\`SHA-256\`)
+
+          \`\`\`text
+          $(cat SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
       - name: Publish rolling release (latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: "Tachyon Proxy v${{ needs.check-core.outputs.app_ver }} (Core v${{ needs.check-core.outputs.latest_core }}) — Latest"
-          body: |
-            Сборка **Tachyon Proxy v${{ needs.check-core.outputs.app_ver }}** со встроенным нативным ядром **`tachyon-core v${{ needs.check-core.outputs.latest_core }}`**.
-
-            ### 📦 Установочные пакеты Android, Android TV и iOS
-            - **`tachyon-proxy-ios.ipa`** — сборка для **iOS / iPadOS 15.0+** (`arm64`, `NEPacketTunnelProvider` + `TachyonCore.xcframework`, установка через TrollStore / SideStore / AltStore / ESign / Feather)
-            - **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (32-bit `armeabi-v7a` + 64-bit `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок с телефона по Wi-Fi QR)
-            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных смартфонов и планшетов (64-bit ARM)
-            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и лёгких приставок
-            - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
-            - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
+          body_path: ${{ runner.temp }}/RELEASE_NOTES.md
           files: dist/*
           prerelease: false
           make_latest: false
@@ -248,17 +279,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ needs.check-core.outputs.app_ver }}"
-          name: "⚡ Tachyon Proxy v${{ needs.check-core.outputs.app_ver }} (Core v${{ needs.check-core.outputs.latest_core }})"
-          body: |
-            Сборка **Tachyon Proxy v${{ needs.check-core.outputs.app_ver }}** со встроенным нативным ядром **`tachyon-core v${{ needs.check-core.outputs.latest_core }}`**.
-
-            ### 📦 Установочные пакеты Android, Android TV и iOS
-            - **`tachyon-proxy-ios.ipa`** — сборка для **iOS / iPadOS 15.0+** (`arm64`, `NEPacketTunnelProvider` + `TachyonCore.xcframework`, установка через TrollStore / SideStore / AltStore / ESign / Feather)
-            - **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (32-bit `armeabi-v7a` + 64-bit `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок с телефона по Wi-Fi QR)
-            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных смартфонов и планшетов (64-bit ARM)
-            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и лёгких приставок
-            - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
-            - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
-          generate_release_notes: true
+          name: "Tachyon Proxy v${{ needs.check-core.outputs.app_ver }} (Core v${{ needs.check-core.outputs.latest_core }})"
+          body_path: ${{ runner.temp }}/RELEASE_NOTES.md
+          generate_release_notes: false
           files: dist/*
           make_latest: true

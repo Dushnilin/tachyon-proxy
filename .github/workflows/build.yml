@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.android
-          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          printf '%s' "$KEYSTORE_B64" | tr -d ' \t\r\n' | base64 -d > ~/.android/debug.keystore
           keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep -E "Owner:|SHA256:"
 
       - name: Set up Flutter

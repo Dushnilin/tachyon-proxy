@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore:
       - 'README.md'
+      - 'CHANGELOG.md'
       - 'assets/readme/**'
   pull_request:
     branches: [main]
@@ -210,6 +211,11 @@ jobs:
     if: needs.check-core.outputs.skip != 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout tachyon-proxy
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download Android artifacts
         uses: actions/download-artifact@v4
         with:
@@ -242,19 +248,32 @@ jobs:
           }
           EOF
 
-          cd dist && sha256sum *.apk *.ipa version.json > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          (cd dist && sha256sum *.apk *.ipa version.json > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
 
-          sed 's/^          //' > "${RUNNER_TEMP}/RELEASE_NOTES.md" <<EOF
+          notes=""
+          if [ -f CHANGELOG.md ]; then
+            notes=$(awk -v ver="$app_ver" '
+              $0 ~ "^## \\[?" ver "\\]?" { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md | sed '/./,$!d')
+          fi
+          if [ -z "$notes" ]; then
+            prev_tag=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vx "v${app_ver}" | head -n 1 || true)
+            if [ -n "$prev_tag" ]; then
+              notes=$(git log "${prev_tag}..HEAD" --no-merges --pretty=format:"- %s (%h)")
+            else
+              notes=$(git log -n 5 --no-merges --pretty=format:"- %s (%h)")
+            fi
+          fi
+
+          cat > "${RUNNER_TEMP}/RELEASE_NOTES.md" <<EOF
           ## Tachyon Proxy v${app_ver} (tachyon-core v${core_ver})
 
           ### Изменения
 
-          - **Навигация и прокрутка на Android TV / Google TV:** добавлены узлы фокуса и подсветка активного элемента для всех чипов маршрутизации, переключателей \`SwitchRow\`, карточек правил и пунктов настроек; убран \`IndexedStack\` из корневой оболочки, чтобы скрытые вкладки не перехватывали фокус пульта ДУ (D-pad).
-          - **Режим «Домашний интернет» (Android 12–16 / iOS):** автоматическая постановка маршрутизации на паузу при подключении к выбранным Wi-Fi сетям (\`NetworkCallback(FLAG_INCLUDE_LOCATION_INFO)\`, \`BroadcastReceiver\`, кэш \`BSSID → SSID\`) и автоматический возврат туннеля при выходе из сети.
-          - **Нативное ядро \`tachyon-core v${core_ver}\`:** обновлён встроенный движок маршрутизации, десинхронизации сегментов и разбора подписок (\`happ://crypt5\`, \`v2raytun://crypt\`, \`XHTTP\` с \`session_table: hex\`).
-          - **Замер задержки (Ping):** раздельный учёт DNS-резолвинга и чистого 1-RTT TCP/HTTP отклика без лишних TLS-рукопожатий.
-          - **Сборки для Android, Android TV и iOS 15.0+:** единый ключ подписи APK для обновления поверх установленной версии и пакет \`tachyon-proxy-ios.ipa\` с \`NEPacketTunnelProvider\`.
+          ${notes}
 
           ### Пакеты
 
@@ -270,9 +289,10 @@ jobs:
           ### SHA-256
 
           \`\`\`text
-          $(cat SHA256SUMS.txt)
+          $(cat dist/SHA256SUMS.txt)
           \`\`\`
           EOF
+          sed -i 's/^          //' "${RUNNER_TEMP}/RELEASE_NOTES.md"
 
       - name: Publish rolling release (latest)
         uses: softprops/action-gh-release@v2

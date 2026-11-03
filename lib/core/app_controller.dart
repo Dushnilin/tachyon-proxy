@@ -104,7 +104,7 @@ class AppController extends ChangeNotifier {
   String _lastNetType = '';
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.7';
+  static const String appVersion = '0.0.8';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -2705,6 +2705,10 @@ class AppController extends ChangeNotifier {
   /// Отдельное обновление ТОЛЬКО нативного ядра (`libtachyon.so`) через внутренний загрузчик.
   Future<void> updateEngineOnly() async {
     if (isAnyUpdateRunning) return;
+    if (Platform.isIOS) {
+      await updateAppOnly();
+      return;
+    }
     _updatingEngine = true;
     _updateProgress = 0.02;
     _updateStatusText = 'Подготовка загрузчика ядра tachyon-core...';
@@ -2783,12 +2787,14 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Отдельное обновление ТОЛЬКО приложения (`APK`) через системный установщик Android.
+  /// Отдельное обновление ТОЛЬКО приложения (`APK` / `IPA`) через системный установщик.
   Future<void> updateAppOnly() async {
     if (isAnyUpdateRunning) return;
     _updatingApp = true;
     _updateProgress = 0.02;
-    _updateStatusText = 'Подготовка загрузчика APK...';
+    _updateStatusText = Platform.isIOS
+        ? 'Подготовка загрузки пакета IPA...'
+        : 'Подготовка загрузчика APK...';
     notifyListeners();
 
     try {
@@ -2801,6 +2807,42 @@ class AppController extends ChangeNotifier {
       final updateDir = Directory('$fDir/update');
       if (!updateDir.existsSync()) {
         updateDir.createSync(recursive: true);
+      }
+
+      if (Platform.isIOS) {
+        const ipaName = 'tachyon-proxy-ios.ipa';
+        final ipaFile = File('${updateDir.path}/$ipaName');
+        const candidateIpaUrls = <String>[
+          'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/tachyon-proxy-ios.ipa',
+          'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-ios.ipa',
+          'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/tachyon-proxy-ios.ipa',
+          'https://ghfast.top/https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-ios.ipa',
+        ];
+        var okIpa = false;
+        for (final ipaUrl in candidateIpaUrls) {
+          okIpa = await _downloadUpdateFile(
+            ipaUrl,
+            ipaFile,
+            'Скачивание IPA приложения (iOS arm64)',
+          );
+          if (okIpa) break;
+        }
+        if (!okIpa) {
+          _updateStatusText =
+              'Не удалось скачать IPA приложения с GitHub Releases';
+          return;
+        }
+        _updateProgress = 1.0;
+        _updateStatusText = 'Открытие меню установки / экспорта IPA...';
+        notifyListeners();
+        final res = await bridge.installApk(ipaName);
+        if (res != 'ok') {
+          _updateStatusText = 'Ошибка открытия IPA: $res';
+        } else {
+          _updateStatusText =
+              'IPA скачан — выберите TrollStore / SideStore / AltStore или сохраните в Файлы';
+        }
+        return;
       }
 
       final abiSuffix = switch (abi) {

@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -208,11 +209,14 @@ class _AppsScreenState extends State<AppsScreen> {
             child: _loading
                 ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
                 : filtered.isEmpty
-                    ? const EmptyState(
+                    ? EmptyState(
                         icon: Icons.apps_outlined,
-                        title: 'Приложения не найдены',
-                        description:
-                            'Попробуйте изменить поисковый запрос или включить показ системных пакетов.',
+                        title: Platform.isIOS
+                            ? 'Поприложенная маршрутизация недоступна в iOS'
+                            : 'Приложения не найдены',
+                        description: Platform.isIOS
+                            ? 'Система iOS изолирует список установленных программ. Используйте вкладку «Правила» для точечной маршрутизации сервисов и доменов (.trs).'
+                            : 'Попробуйте изменить поисковый запрос или включить показ системных пакетов.',
                       )
                     : ListView.builder(
                         padding: const EdgeInsets.fromLTRB(

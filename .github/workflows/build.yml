@@ -1,4 +1,4 @@
-name: Build & Auto-Sync Android APK
+name: Build & Auto-Sync Android APK & iOS IPA
 
 on:
   push:
@@ -21,15 +21,17 @@ permissions:
   contents: write
 
 jobs:
-  build-apk:
-    name: Build & Release APK
+  check-core:
+    name: Check latest tachyon-core
     runs-on: ubuntu-latest
-
+    outputs:
+      latest_core: ${{ steps.core_check.outputs.latest_core }}
+      latest_tag: ${{ steps.core_check.outputs.latest_tag }}
+      app_ver: ${{ steps.core_check.outputs.app_ver }}
+      skip: ${{ steps.core_check.outputs.skip }}
     steps:
       - name: Checkout tachyon-proxy
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Check latest tachyon-core release
         id: core_check
@@ -56,10 +58,20 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+  build-apk:
+    name: Build Android APKs
+    needs: [check-core]
+    if: needs.check-core.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tachyon-proxy
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download libtachyon-*.so from Dushnilin/tachyon-core release
-        if: steps.core_check.outputs.skip != 'true'
         run: |
-          latest_tag="${{ steps.core_check.outputs.latest_tag }}"
+          latest_tag="${{ needs.check-core.outputs.latest_tag }}"
           base_url="https://github.com/Dushnilin/tachyon-core/releases/download/${latest_tag}"
           mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/jniLibs/armeabi-v7a android/app/src/main/jniLibs/x86_64
           curl -fsSL --retry 3 -o android/app/src/main/jniLibs/arm64-v8a/libtachyon.so "${base_url}/libtachyon-arm64-v8a.so"
@@ -68,51 +80,132 @@ jobs:
           ls -lh android/app/src/main/jniLibs/*/libtachyon.so
 
       - name: Set up JDK 21
-        if: steps.core_check.outputs.skip != 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
       - name: Set up Flutter
-        if: steps.core_check.outputs.skip != 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
 
       - name: Install dependencies
-        if: steps.core_check.outputs.skip != 'true'
         run: flutter pub get
 
       - name: Analyze Dart code
-        if: steps.core_check.outputs.skip != 'true'
         run: flutter analyze
 
       - name: Run unit tests
-        if: steps.core_check.outputs.skip != 'true'
         run: flutter test
 
       - name: Build per-ABI release APKs
-        if: steps.core_check.outputs.skip != 'true'
         run: flutter build apk --release --split-per-abi
 
       - name: Build universal release APK
-        if: steps.core_check.outputs.skip != 'true'
         run: flutter build apk --release
 
-      - name: Prepare release artifacts (APKs + version.json)
-        if: steps.core_check.outputs.skip != 'true'
+      - name: Stage APK artifacts
         run: |
-          mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/tachyon-proxy-arm64-v8a.apk
-          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/tachyon-proxy-armeabi-v7a.apk
-          cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist/tachyon-proxy-x86_64.apk
-          cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-universal.apk
-          cp build/app/outputs/flutter-apk/app-release.apk dist/tachyon-proxy-android-tv.apk
+          mkdir -p dist-android
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist-android/tachyon-proxy-arm64-v8a.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist-android/tachyon-proxy-armeabi-v7a.apk
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist-android/tachyon-proxy-x86_64.apk
+          cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-universal.apk
+          cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-android-tv.apk
 
-          core_ver="${{ steps.core_check.outputs.latest_core }}"
-          app_ver="${{ steps.core_check.outputs.app_ver }}"
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-proxy-android
+          path: dist-android/*
+          if-no-files-found: error
+
+  build-ios:
+    name: Build iOS IPA
+    needs: [check-core]
+    if: needs.check-core.outputs.skip != 'true'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout tachyon-proxy
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download TachyonCore.xcframework from Dushnilin/tachyon-core release
+        run: |
+          latest_tag="${{ needs.check-core.outputs.latest_tag }}"
+          url="https://github.com/Dushnilin/tachyon-core/releases/download/${latest_tag}/tachyon-core-ios-xcframework-${latest_tag}.tar.gz"
+          mkdir -p ios/Frameworks /tmp/xcf
+          curl -fsSL --retry 3 -o /tmp/xcf/tachyon-core-ios-xcframework.tar.gz "$url"
+          tar -xzf /tmp/xcf/tachyon-core-ios-xcframework.tar.gz -C ios/Frameworks
+          ls -la ios/Frameworks/TachyonCore.xcframework
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build iOS Release (.app + PacketTunnelExtension.appex)
+        run: flutter build ios --release --no-codesign
+
+      - name: Sign ad-hoc with NetworkExtension entitlements & package IPA
+        run: |
+          app_dir="build/ios/iphoneos/Runner.app"
+          ext_dir="${app_dir}/PlugIns/PacketTunnelExtension.appex"
+          test -d "$app_dir"
+          test -d "$ext_dir"
+
+          # Подписываем ad-hoc с вшиванием entitlements (для TrollStore / SideStore / AltStore / ESign / Feather)
+          codesign --force --sign - \
+            --entitlements ios/PacketTunnelExtension/PacketTunnelExtension.entitlements \
+            --timestamp=none \
+            "$ext_dir"
+
+          codesign --force --sign - \
+            --entitlements ios/Runner/Runner.entitlements \
+            --timestamp=none \
+            "$app_dir"
+
+          mkdir -p /tmp/ipa-stage/Payload dist-ios
+          cp -R "$app_dir" /tmp/ipa-stage/Payload/Runner.app
+          (cd /tmp/ipa-stage && zip -qry "$GITHUB_WORKSPACE/dist-ios/tachyon-proxy-ios.ipa" Payload)
+          ls -lh dist-ios/tachyon-proxy-ios.ipa
+
+      - name: Upload iOS IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tachyon-proxy-ios
+          path: dist-ios/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [check-core, build-apk, build-ios]
+    if: needs.check-core.outputs.skip != 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tachyon-proxy-android
+          path: dist
+
+      - name: Download iOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tachyon-proxy-ios
+          path: dist
+
+      - name: Generate version.json and SHA256SUMS.txt
+        run: |
+          core_ver="${{ needs.check-core.outputs.latest_core }}"
+          app_ver="${{ needs.check-core.outputs.app_ver }}"
           cat > dist/version.json <<EOF
           {
             "app_version": "${app_ver}",
@@ -122,50 +215,50 @@ jobs:
             "apk_armv7": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-armeabi-v7a.apk",
             "apk_x86_64": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-x86_64.apk",
             "apk_android_tv": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-android-tv.apk",
+            "ipa_ios": "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-ios.ipa",
             "so_arm64": "https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-arm64-v8a.so",
             "so_armv7": "https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-armeabi-v7a.so",
             "so_x86_64": "https://github.com/Dushnilin/tachyon-core/releases/latest/download/libtachyon-x86_64.so"
           }
           EOF
 
-          cd dist && sha256sum *.apk version.json > SHA256SUMS.txt
-
-      - name: Upload APK artifacts
-        if: steps.core_check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tachyon-proxy-apks
-          path: dist/*
-          if-no-files-found: error
+          cd dist && sha256sum *.apk *.ipa version.json > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Publish rolling release (latest)
-        if: steps.core_check.outputs.skip != 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "Tachyon Proxy v${{ steps.core_check.outputs.app_ver }} (Core v${{ steps.core_check.outputs.latest_core }}) — Latest"
+          name: "Tachyon Proxy v${{ needs.check-core.outputs.app_ver }} (Core v${{ needs.check-core.outputs.latest_core }}) — Latest"
           body: |
-            Автоматическая сборка **Tachyon Proxy v${{ steps.core_check.outputs.app_ver }}** со встроенным ядром **`tachyon-core v${{ steps.core_check.outputs.latest_core }}`** (${{ github.sha }}).
+            Сборка **Tachyon Proxy v${{ needs.check-core.outputs.app_ver }}** со встроенным нативным ядром **`tachyon-core v${{ needs.check-core.outputs.latest_core }}`**.
 
-            ### 📦 Установочные пакеты Android и Android TV (APK)
+            ### 📦 Установочные пакеты Android, Android TV и iOS
+            - **`tachyon-proxy-ios.ipa`** — сборка для **iOS / iPadOS 15.0+** (`arm64`, `NEPacketTunnelProvider` + `TachyonCore.xcframework`, установка через TrollStore / SideStore / AltStore / ESign / Feather)
             - **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (32-bit `armeabi-v7a` + 64-bit `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок с телефона по Wi-Fi QR)
             - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных смартфонов и планшетов (64-bit ARM)
             - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и лёгких приставок
             - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
             - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
-
-            ### ⚡ Нативное ядро (`libtachyon-*.so`)
-            Берётся напрямую из релизов [`Dushnilin/tachyon-core`](https://github.com/Dushnilin/tachyon-core/releases/latest).
           files: dist/*
           prerelease: false
           make_latest: false
 
       - name: Publish versioned release (v*)
-        if: steps.core_check.outputs.skip != 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ steps.core_check.outputs.app_ver }}"
-          name: "⚡ Tachyon Proxy v${{ steps.core_check.outputs.app_ver }} (Core v${{ steps.core_check.outputs.latest_core }})"
+          tag_name: "v${{ needs.check-core.outputs.app_ver }}"
+          name: "⚡ Tachyon Proxy v${{ needs.check-core.outputs.app_ver }} (Core v${{ needs.check-core.outputs.latest_core }})"
+          body: |
+            Сборка **Tachyon Proxy v${{ needs.check-core.outputs.app_ver }}** со встроенным нативным ядром **`tachyon-core v${{ needs.check-core.outputs.latest_core }}`**.
+
+            ### 📦 Установочные пакеты Android, Android TV и iOS
+            - **`tachyon-proxy-ios.ipa`** — сборка для **iOS / iPadOS 15.0+** (`arm64`, `NEPacketTunnelProvider` + `TachyonCore.xcframework`, установка через TrollStore / SideStore / AltStore / ESign / Feather)
+            - **`tachyon-proxy-android-tv.apk`** — сборка для **Android TV / Google TV и ТВ-приставок** (32-bit `armeabi-v7a` + 64-bit `arm64-v8a`, Leanback-лончер, управление пультом ДУ / D-pad, приём подписок с телефона по Wi-Fi QR)
+            - **`tachyon-proxy-arm64-v8a.apk`** — для большинства современных смартфонов и планшетов (64-bit ARM)
+            - **`tachyon-proxy-armeabi-v7a.apk`** — для 32-bit ARM устройств и лёгких приставок
+            - **`tachyon-proxy-x86_64.apk`** — для эмуляторов и x86_64 систем
+            - **`tachyon-proxy-universal.apk`** — универсальный пакет со всеми архитектурами
           generate_release_notes: true
           files: dist/*
           make_latest: true

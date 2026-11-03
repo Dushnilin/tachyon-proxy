@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -422,7 +424,9 @@ class _SettingsTabState extends State<SettingsTab> {
                                     ? 'Чтение версии нативного движка...'
                                     : (controller.hasCoreUpdate
                                         ? 'Установлено: $shownVer · Доступно: v${controller.latestCoreVersion}'
-                                        : 'Установлено: $shownVer (горячая замена .so)'),
+                                        : (Platform.isIOS
+                                            ? 'Установлено: $shownVer (TachyonCore.xcframework)'
+                                            : 'Установлено: $shownVer (горячая замена .so)')),
                                 style: Theme.of(context)
                                     .textTheme
                                     .bodySmall
@@ -482,7 +486,9 @@ class _SettingsTabState extends State<SettingsTab> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Приложение Tachyon Proxy (APK)',
+                            Platform.isIOS
+                                ? 'Приложение Tachyon Proxy (IPA)'
+                                : 'Приложение Tachyon Proxy (APK)',
                             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                                   fontWeight: FontWeight.w500,
                                 ),
@@ -524,7 +530,7 @@ class _SettingsTabState extends State<SettingsTab> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.system_update_alt_rounded, size: 16),
-                      label: const Text('APK'),
+                      label: Text(Platform.isIOS ? 'IPA' : 'APK'),
                     ),
                   ],
                 ),

@@ -29,6 +29,7 @@ migrate_working_dir/
 /dist/
 /coverage/
 /android/app/src/main/jniLibs/
+/ios/Frameworks/
 
 # Symbolication & obfuscation
 app.*.symbols

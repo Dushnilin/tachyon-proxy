@@ -24,7 +24,9 @@ android {
         // targetSdk = 28 переводит процесс в SELinux-домен untrusted_app_27 на Android 10–16,
         // что разрешает горячую загрузку обновлённого ядра libtachyon.so из code_cache/engine через dlopen.
         targetSdk = 28
-        versionCode = flutter.versionCode
+        // Единый versionCode для всех APK (--split-per-abi, universal и локальных сборок),
+        // смещённый на +5000 выше старых ABI-множителей (1000/2000/4000), чтобы обновление поверх любой старой сборки проходило без конфликта версий.
+        versionCode = 5000 + flutter.versionCode
         versionName = flutter.versionName
     }
 

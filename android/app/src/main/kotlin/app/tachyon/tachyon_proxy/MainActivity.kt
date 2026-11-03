@@ -623,6 +623,7 @@ class MainActivity : FlutterFragmentActivity() {
             val uri = android.net.Uri.parse("content://${org.tachyon.vpn.ApkFileProvider.AUTHORITY}/$fileName")
             val installIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/vnd.android.package-archive")
+                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(installIntent)

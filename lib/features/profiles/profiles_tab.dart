@@ -37,7 +37,8 @@ class _ProfilesTabState extends State<ProfilesTab> {
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
     final tokens = context.tokens;
-    final profiles = controller.settings.profiles;
+    final profiles = controller.settings.visibleProfiles;
+    final subs = controller.settings.visibleSubscriptions;
     final standaloneProfiles = _filter(controller.sortProfiles(
       profiles.where((p) => p.subscriptionId.isEmpty).toList(),
     ));
@@ -107,7 +108,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
           ),
         ],
       ),
-      body: (profiles.isEmpty && controller.settings.subscriptions.isEmpty)
+      body: (profiles.isEmpty && subs.isEmpty)
           ? EmptyState(
               icon: Icons.dns_outlined,
               title: 'Профилей пока нет',
@@ -154,7 +155,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   ),
                   const SizedBox(height: Space.md),
                 ],
-                if (controller.settings.subscriptions.isNotEmpty) ...[
+                if (subs.isNotEmpty) ...[
                   _SubscriptionGroupList(
                     controller: controller,
                     searchQuery: _searchQuery,
@@ -1373,8 +1374,8 @@ class _SubscriptionGroupList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final subs = controller.settings.subscriptions;
-    final allProfiles = controller.settings.profiles;
+    final subs = controller.settings.visibleSubscriptions;
+    final allProfiles = controller.settings.visibleProfiles;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

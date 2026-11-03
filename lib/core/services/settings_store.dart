@@ -74,6 +74,7 @@ class AppSettings {
     this.proxyTlsFragment = false,
     this.homeWifiMode = false,
     this.trustedWifiSsids = const [],
+    this.showFreeNodes = true,
   });
 
   final List<Profile> profiles;
@@ -149,6 +150,20 @@ class AppSettings {
   /// Список SSID доверенных Wi-Fi сетей (дом, офис, работа и т.д.).
   final List<String> trustedWifiSsids;
 
+  /// Показывать ли карточку и списки бесплатных резервных узлов (WARP AmneziaWG и SHARD).
+  final bool showFreeNodes;
+
+  static bool isFreeSubId(String subId) =>
+      subId == 'free-warp' || subId == 'free-shard';
+
+  List<Profile> get visibleProfiles => showFreeNodes
+      ? profiles
+      : profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
+
+  List<SubscriptionEntry> get visibleSubscriptions => showFreeNodes
+      ? subscriptions
+      : subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
+
   Profile? get detourProfile {
     if (detourProfileId.isEmpty) return null;
     for (final p in profiles) {
@@ -179,12 +194,13 @@ class AppSettings {
         subscriptionId: subId == 'all' ? '' : subId,
       );
     }
-    if (profiles.isEmpty) return null;
-    for (final profile in profiles) {
-      if (profile.id == selectedProfileId) return profile;
+      final pool = visibleProfiles;
+      if (pool.isEmpty) return null;
+      for (final profile in pool) {
+        if (profile.id == selectedProfileId) return profile;
+      }
+      return pool.first;
     }
-    return profiles.first;
-  }
 
   AppSettings copyWith({
     List<Profile>? profiles,
@@ -214,6 +230,7 @@ class AppSettings {
     bool? proxyTlsFragment,
     bool? homeWifiMode,
     List<String>? trustedWifiSsids,
+    bool? showFreeNodes,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -243,6 +260,7 @@ class AppSettings {
       proxyTlsFragment: proxyTlsFragment ?? this.proxyTlsFragment,
       homeWifiMode: homeWifiMode ?? this.homeWifiMode,
       trustedWifiSsids: trustedWifiSsids ?? this.trustedWifiSsids,
+      showFreeNodes: showFreeNodes ?? this.showFreeNodes,
     );
   }
 
@@ -275,6 +293,7 @@ class AppSettings {
         'proxyTlsFragment': proxyTlsFragment,
         'homeWifiMode': homeWifiMode,
         'trustedWifiSsids': trustedWifiSsids,
+        'showFreeNodes': showFreeNodes,
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -337,6 +356,7 @@ class AppSettings {
           .map((item) => item.toString().trim())
           .where((item) => item.isNotEmpty)
           .toList(growable: false),
+      showFreeNodes: json['showFreeNodes'] != false,
     );
   }
 }

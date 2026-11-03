@@ -92,7 +92,7 @@ class _SettingsTabState extends State<SettingsTab> {
                 _LinkRow(
                   icon: Icons.speed_rounded,
                   title: 'Диагностика и спидтест',
-                  subtitle: 'внешний IP/гео, матрица доступности ТСПУ и замер скорости',
+                  subtitle: 'внешний IP/гео, матрица доступности сервисов и замер скорости',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => const DiagnosticsScreen(),
@@ -171,9 +171,9 @@ class _SettingsTabState extends State<SettingsTab> {
                 ),
                 const Hairline(),
                 SwitchRow(
-                  title: 'Дробить TLS до прокси (Анти-глушилка LTE)',
+                  title: 'Дробить TLS до прокси (Фрагментация LTE)',
                   subtitle:
-                      'Фрагментировать TLS ClientHello до прокси-узлов (обход блокировок ТСПУ на мобильной сети)',
+                      'Фрагментировать TLS ClientHello до прокси-узлов (для мобильных сетей с фильтрацией пакетов)',
                   value: settings.proxyTlsFragment,
                   onChanged: controller.setProxyTlsFragment,
                 ),
@@ -204,6 +204,14 @@ class _SettingsTabState extends State<SettingsTab> {
                   subtitle: 'Фоновое обновление серверов каждые 12 часов',
                   value: settings.autoUpdateSubs,
                   onChanged: controller.setAutoUpdateSubs,
+                ),
+                const Hairline(),
+                SwitchRow(
+                  title: 'Показывать бесплатные узлы (WARP · SHARD)',
+                  subtitle:
+                      'Отображать генератор резервных узлов AmneziaWG и пул SHARD на главном экране',
+                  value: settings.showFreeNodes,
+                  onChanged: controller.setShowFreeNodes,
                 ),
                 const Hairline(),
                 const SizedBox(height: Space.sm),
@@ -253,15 +261,15 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
           ),
           const SizedBox(height: Space.xl),
-          const SectionLabel('Обход DPI'),
+          const SectionLabel('Десинхронизация пакетов (Desync)'),
           HairlineCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 SwitchRow(
-                  title: 'Включить обход',
+                  title: 'Включить десинхронизацию',
                   subtitle:
-                      'Нативный desync-аутбаунд ядра: обман DPI на первых пакетах',
+                      'Нативный desync-аутбаунд ядра: сегментация и маркировка первых пакетов',
                   value: settings.desync.enabled,
                   onChanged: (value) => controller.setDesync(
                     settings.desync.copyWith(enabled: value),
@@ -283,6 +291,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         'fake_split',
                         'fake_disorder',
                         'multi_split',
+                        'multi_disorder',
                         'split',
                         'disorder',
                         'tlsrec',
@@ -305,7 +314,7 @@ class _SettingsTabState extends State<SettingsTab> {
                   ),
                   const SizedBox(height: Space.md),
                   Text(
-                    'Одурачивание',
+                    'Маркировка пакетов (Fooling)',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: Space.sm),
@@ -316,9 +325,14 @@ class _SettingsTabState extends State<SettingsTab> {
                       for (final fooling in const [
                         'autottl',
                         'md5',
+                        'badack',
+                        'md5_badack',
                         'timestamp',
                         'badseq',
                         'badsum',
+                        'badseq_badack_badsum',
+                        'hopbyhop',
+                        'datanoack',
                       ])
                         FocusableTap(
                           onTap: () => controller.setDesync(

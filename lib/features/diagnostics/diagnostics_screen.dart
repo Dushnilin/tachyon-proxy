@@ -245,7 +245,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
     final isTunnelActive =
         mounted && AppScope.read(context).tunnel.status.isActive;
 
-    // Несколько независимых зеркал по 10 МБ: если Cloudflare ECH режется ТСПУ
+    // Несколько независимых зеркал по 10 МБ: если Cloudflare ECH ограничивается на маршруте,
     // на прямом соединении, тест мгновенно переключается на живое CDN-зеркало.
     const endpoints = <(String, String)>[
       ('Cloudflare Edge', 'https://speed.cloudflare.com/__down?bytes=10485760'),
@@ -613,7 +613,7 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
             ),
           ),
           const SizedBox(height: Space.xl),
-          const SectionLabel('Матрица доступности сервисов и ТСПУ'),
+          const SectionLabel('Матрица доступности сервисов и узлов'),
           HairlineCard(
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(

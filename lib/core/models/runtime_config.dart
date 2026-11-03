@@ -830,6 +830,11 @@ class Profile {
       case 'tewfai':
         final trList = extra['tewfai_transport'];
         final trStr = trList is List ? trList.join(',') : transport;
+        final ho = extra['handover'];
+        final hoMap = ho is Map ? ho : null;
+        final hoEnabled = ho == true || (hoMap != null && hoMap['enabled'] != false);
+        final sh = extra['shaper'] is Map ? extra['shaper'] as Map : null;
+        final shMode = (sh?['mode'] ?? '').toString();
         final params = <String, String>{
           if (sni.isNotEmpty) 'sni': sni,
           if (allowInsecure) 'insecure': '1',
@@ -837,6 +842,19 @@ class Profile {
           if (trStr.isNotEmpty) 'transport': trStr,
           if (extra['inner_cipher'] != null) 'inner_cipher': extra['inner_cipher'].toString(),
           if (extra['morph_profile'] != null) 'morph_profile': extra['morph_profile'].toString(),
+          if (extra['pqc'] == true) 'pqc': '1',
+          if (hoEnabled) 'handover': '1',
+          if (hoEnabled && hoMap?['rotate_secs'] != null)
+            'rotate_secs': hoMap!['rotate_secs'].toString(),
+          if (hoEnabled && hoMap?['rotate_mb'] != null)
+            'rotate_mb': hoMap!['rotate_mb'].toString(),
+          if (extra['fec'] == true) 'fec': '1',
+          if (extra['desync'] == true) 'desync': '1',
+          if (sh != null && shMode != 'off') ...{
+            'shaper': '1',
+            'shaper_profile': shMode.isEmpty ? 'adaptive' : shMode,
+          },
+          if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
         };
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
@@ -925,12 +943,12 @@ class CustomRule {
       );
 }
 
-/// Режим маршрутизации: что уходит в туннель, что через обход DPI, что напрямую.
+/// Режим маршрутизации: что уходит в туннель, что через десинхронизацию (Desync), что напрямую.
 enum RoutingMode {
   /// Гибкая маршрутизация: сервисы, списки и приложения по своим правилам.
   rules,
 
-  /// Только обход DPI (Desync) без прокси-сервера или точечно для сервисов.
+  /// Только десинхронизация пакетов (Desync) без прокси-сервера или точечно для сервисов.
   desync,
 
   /// Весь трафик — в туннель.
@@ -941,7 +959,7 @@ enum RoutingMode {
 
   String get label => switch (this) {
         RoutingMode.rules => 'По правилам',
-        RoutingMode.desync => 'Обход DPI',
+        RoutingMode.desync => 'Desync',
         RoutingMode.global => 'Весь трафик',
         RoutingMode.bypass => 'Только исключения',
       };
@@ -1252,7 +1270,7 @@ class RuleSetEntry {
       );
 }
 
-/// Обход DPI: нативный desync-аутбаунд движка.
+/// Пакетная десинхронизация: нативный desync-аутбаунд движка.
 class DesyncSettings {
   const DesyncSettings({
     this.enabled = false,
@@ -1264,7 +1282,7 @@ class DesyncSettings {
     this.customSni = 'www.google.com',
   });
 
-  /// Включён ли обход DPI.
+  /// Включена ли десинхронизация пакетов.
   final bool enabled;
 
   /// Рецепт: `auto`, `fake_split`, `fake_disorder`, `multi_split`, `split`,
@@ -1452,7 +1470,7 @@ class RuntimeConfig {
   final String logLevel;
   final int mtu;
 
-  /// Обход DPI: настройки нативного desync-аутбаунда.
+  /// Пакетная десинхронизация: настройки нативного desync-аутбаунда.
   final DesyncSettings desync;
 
   /// Подписки: ядро качает их само и строит urltest-группы.
@@ -1736,7 +1754,7 @@ class RuntimeConfig {
       final action = resolveOutbound(set.action.isEmpty ? 'proxy' : set.action);
       final useDirectDns = action == 'direct' || (!dns.fakeIp && action == 'desync');
       if (useDirectDns) {
-        // Домены прямого списка (и обхода DPI без FakeIP) разрешаются прямым резолвером
+        // Домены прямого списка (и Desync без FakeIP) разрешаются прямым резолвером
         dnsRules.add({
           'rule_set': [set.id],
           'action': 'route',
@@ -1931,12 +1949,14 @@ class RuntimeConfig {
     if (needDesync) {
       final insertIdx =
           outbounds.isNotEmpty && outbounds.first['tag'] == 'proxy' ? 1 : 0;
+      final fakeSni = desync.customSni.trim();
       outbounds.insert(insertIdx, {
         'type': 'desync',
         'tag': 'desync',
         'preset': desync.preset,
         'fooling': desync.fooling,
         'auto_tune': desync.autoTune,
+        if (fakeSni.isNotEmpty) 'fake_sni': fakeSni,
       });
     }
 
@@ -1955,8 +1975,17 @@ class RuntimeConfig {
       finalOutbound = 'direct';
     }
 
+    final cacheFilePath = filesDir.isNotEmpty ? '$filesDir/cache.db' : 'cache.db';
+
     return {
       'log': {'level': logLevel, 'timestamp': true},
+      'experimental': {
+        'cache_file': {
+          'enabled': true,
+          'path': cacheFilePath,
+          if (dns.fakeIp) 'store_fakeip': true,
+        },
+      },
       'dns': {
         'servers': dnsServers,
         'rules': dnsRules,

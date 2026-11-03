@@ -180,7 +180,7 @@ class FreeNodesService {
       profiles.add(
         Profile(
           id: 'warp-awg-${ep.host.replaceAll('.', '-')}-${ep.port}',
-          name: '⚡ WARP AmneziaWG · ${ep.label}$latencySuffix',
+          name: 'WARP AmneziaWG · ${ep.label}$latencySuffix',
           type: 'wireguard',
           server: ep.host,
           port: ep.port,

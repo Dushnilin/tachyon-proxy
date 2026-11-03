@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
+import 'package:tachyon_proxy/core/services/settings_store.dart';
 
 void main() {
   const profile = Profile(
@@ -138,5 +139,103 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
         expect(outbounds.first['type'], p.type);
       }
     }
+  });
+
+  test('адаптивный desync и tewfai корректно сериализуются в конфиг ядра', () {
+    final config = RuntimeConfig(
+      profile: profile,
+      routingMode: RoutingMode.desync,
+      dns: const DnsSettings(fakeIp: true),
+      ruleSets: const [],
+      desync: const DesyncSettings(
+        enabled: true,
+        preset: 'multi_disorder',
+        fooling: 'md5_badack',
+        autoTune: true,
+        customSni: 'padencap',
+      ),
+      filesDir: '/data/user/0/app.tachyon.proxy/files',
+    ).toJson();
+
+    final exp = config['experimental'] as Map<String, dynamic>;
+    final cacheFile = exp['cache_file'] as Map<String, dynamic>;
+    expect(cacheFile['enabled'], isTrue);
+    expect(cacheFile['path'], '/data/user/0/app.tachyon.proxy/files/cache.db');
+    expect(cacheFile['store_fakeip'], isTrue);
+
+    final outbounds = (config['outbounds'] as List).cast<Map<String, dynamic>>();
+    final desyncOut = outbounds.firstWhere((o) => o['tag'] == 'desync');
+    expect(desyncOut['type'], 'desync');
+    expect(desyncOut['preset'], 'multi_disorder');
+    expect(desyncOut['fooling'], 'md5_badack');
+    expect(desyncOut['auto_tune'], isTrue);
+    expect(desyncOut['fake_sni'], 'padencap');
+
+    const tewfaiLink =
+        'tewfai://6259d517-551f-4902-ae1c-86073deb2a25:tfpass@tf.example.com:443?sni=tf.example.com&transport=quic,tcp&inner_cipher=aes-256-gcm&morph_profile=auto&pqc=1&handover=1&rotate_secs=300&rotate_mb=128&fec=1&desync=1&shaper=1&shaper_profile=adaptive&mtu=1400#Tewfai-1';
+    final parser = LinkParser();
+    final parsed = parser.parse(tewfaiLink);
+    expect(parsed, isNotNull);
+    final outbound = parsed!.toOutbound();
+    expect(outbound['type'], 'tewfai');
+    expect(outbound['morph_profile'], 'auto');
+    expect(outbound['desync'], isTrue);
+    expect(outbound['pqc'], isTrue);
+    expect(outbound['fec'], isTrue);
+    expect((outbound['shaper'] as Map)['mode'], 'adaptive');
+    expect((outbound['handover'] as Map)['rotate_secs'], 300);
+    expect((outbound['handover'] as Map)['rotate_mb'], 128);
+    expect(outbound['mtu'], 1400);
+
+    final reparsed = parser.parse(parsed.toShareUri());
+    expect(reparsed, isNotNull);
+    final reOutbound = reparsed!.toOutbound();
+    expect(reOutbound['desync'], isTrue);
+    expect((reOutbound['handover'] as Map)['rotate_secs'], 300);
+    expect((reOutbound['handover'] as Map)['rotate_mb'], 128);
+    expect(reOutbound['mtu'], 1400);
+  });
+
+  test('отключение бесплатных узлов скрывает WARP и SHARD из видимых списков', () {
+    const warpProfile = Profile(
+      id: 'warp-1',
+      name: 'WARP AWG 1',
+      type: 'wireguard',
+      server: '162.159.192.1',
+      port: 2408,
+      subscriptionId: 'free-warp',
+    );
+    const shardProfile = Profile(
+      id: 'shard-1',
+      name: 'SHARD CF 1',
+      type: 'vless',
+      server: '104.16.0.1',
+      port: 443,
+      subscriptionId: 'free-shard',
+    );
+    const userSub = SubscriptionEntry(
+      id: 'sub-user',
+      url: 'https://sub.example.com/api',
+      name: 'Моя подписка',
+    );
+    const warpSub = SubscriptionEntry(
+      id: 'free-warp',
+      url: 'https://api.cloudflareclient.com/warp',
+      name: 'Cloudflare WARP (AmneziaWG)',
+    );
+
+    final hidden = AppSettings(
+      profiles: const [warpProfile, shardProfile, profile],
+      subscriptions: const [warpSub, userSub],
+      selectedProfileId: 'warp-1',
+      showFreeNodes: false,
+    );
+
+    expect(hidden.visibleProfiles.map((p) => p.id), ['vless-1']);
+    expect(hidden.visibleSubscriptions.map((s) => s.id), ['sub-user']);
+    expect(hidden.selectedProfile?.id, 'vless-1');
+
+    final restored = AppSettings.fromJson(hidden.toJson());
+    expect(restored.showFreeNodes, isFalse);
   });
 }

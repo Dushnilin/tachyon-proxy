@@ -76,7 +76,7 @@ class _HomeTabState extends State<HomeTab> {
           upSpeed: controller.upSpeed,
           pingMs: controller.urlTestPing,
           onPressed: (controller.canConnect ||
-                  controller.settings.subscriptions.isNotEmpty ||
+                  controller.settings.visibleSubscriptions.isNotEmpty ||
                   tunnel.isPausedByWifi)
               ? controller.toggleTunnel
               : null,
@@ -85,7 +85,7 @@ class _HomeTabState extends State<HomeTab> {
         _StatusLine(
           tunnel: tunnel,
           fallbackServerName: isDesyncMode
-              ? 'Режим Обход DPI (Desync)'
+              ? 'Режим Десинхронизации (Desync)'
               : (controller.selectedProfile?.name ?? ''),
         ),
         if (tunnel.isPausedByWifi) ...[
@@ -137,9 +137,11 @@ class _HomeTabState extends State<HomeTab> {
       _StatsRow(controller: controller),
       const SizedBox(height: Space.lg),
       _ProfileCard(controller: controller),
-      const SizedBox(height: Space.lg),
-      _FreeTunnelsCard(controller: controller),
-      if (controller.settings.profiles.isNotEmpty) ...[
+      if (controller.settings.showFreeNodes) ...[
+        const SizedBox(height: Space.lg),
+        _FreeTunnelsCard(controller: controller),
+      ],
+      if (controller.settings.visibleProfiles.isNotEmpty) ...[
         const SizedBox(height: Space.lg),
         Row(
           children: [
@@ -184,22 +186,22 @@ class _HomeTabState extends State<HomeTab> {
           ],
         ),
         const SizedBox(height: Space.md),
-        if (controller.settings.subscriptions.isNotEmpty) ...[
-          for (final sub in controller.settings.subscriptions) ...[
+        if (controller.settings.visibleSubscriptions.isNotEmpty) ...[
+          for (final sub in controller.settings.visibleSubscriptions) ...[
             _buildSubscriptionSection(context, controller, sub),
             const SizedBox(height: Space.md),
           ],
-          if (controller.settings.profiles
+          if (controller.settings.visibleProfiles
               .any((p) => p.subscriptionId.isEmpty)) ...[
             SectionLabel(
               'Пользовательские серверы',
               trailing: Text(
-                '${controller.settings.profiles.where((p) => p.subscriptionId.isEmpty).length}',
+                '${controller.settings.visibleProfiles.where((p) => p.subscriptionId.isEmpty).length}',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ),
             for (final p in _filter(controller.sortProfiles(
-              controller.settings.profiles
+              controller.settings.visibleProfiles
                   .where((p) => p.subscriptionId.isEmpty)
                   .toList(),
             ))) ...[
@@ -249,7 +251,7 @@ class _HomeTabState extends State<HomeTab> {
             ),
           ),
           for (final p in _filter(
-              controller.sortProfiles(controller.settings.profiles))) ...[
+              controller.sortProfiles(controller.settings.visibleProfiles))) ...[
             _DashboardServerTile(
               profile: p,
               selected: p.id == controller.settings.selectedProfileId,
@@ -273,7 +275,7 @@ class _HomeTabState extends State<HomeTab> {
             Row(
               children: [
                 const Expanded(
-                  child: Wordmark(subtitle: 'Маршрутизация и обход DPI'),
+                  child: Wordmark(subtitle: 'Маршрутизация и туннелирование'),
                 ),
                 IconButton(
                   tooltip: 'Принять подписку с телефона по Wi-Fi (Android TV)',
@@ -1030,7 +1032,7 @@ class _ExitNodeCard extends StatelessWidget {
                   locationParts.isNotEmpty
                       ? locationParts.join(' · ')
                       : (controller.settings.routingMode == RoutingMode.desync
-                          ? 'Прямой маршрут с обходом ТСПУ (Desync)'
+                          ? 'Прямой маршрут с десинхронизацией (Desync)'
                           : 'Нажмите, чтобы обновить гео и задержку'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -1760,6 +1762,23 @@ class _FreeTunnelsCard extends StatelessWidget {
                     strokeWidth: 2,
                     color: tokens.accent,
                   ),
+                )
+              else
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Скрыть блок бесплатных узлов (можно вернуть в Настройках)',
+                  onPressed: () async {
+                    await controller.setShowFreeNodes(false);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Блок резервных узлов скрыт (доступен в Настройках)',
+                        ),
+                      ),
+                    );
+                  },
+                  icon: Icon(Icons.visibility_off_outlined, size: 17, color: tokens.faint),
                 ),
             ],
           ),

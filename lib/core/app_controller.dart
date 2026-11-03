@@ -111,7 +111,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.11';
+  static const String appVersion = '0.0.12';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -228,7 +228,8 @@ class AppController extends ChangeNotifier {
   Profile? get selectedProfile {
     final sel = _settings.selectedProfile;
     if (sel != null) return sel;
-    if (_settings.profiles.isNotEmpty) return _settings.profiles.first;
+    final pool = _settings.visibleProfiles;
+    if (pool.isNotEmpty) return pool.first;
     return null;
   }
 
@@ -241,7 +242,7 @@ class AppController extends ChangeNotifier {
         _settings.appRoutes.values.contains('desync')) {
       return true;
     }
-    final hasSub = _settings.subscriptions.isNotEmpty;
+    final hasSub = _settings.visibleSubscriptions.isNotEmpty;
     final profile = selectedProfile;
     if (profile == null && !hasSub) return false;
     if (profile != null && profile.server.isEmpty && !hasSub) return false;
@@ -337,8 +338,8 @@ class AppController extends ChangeNotifier {
   /// Обновляет устаревшие списки и, если нужно, резолверы.
   Future<void> _refreshStale() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    for (final sub in _settings.subscriptions) {
-      if (sub.enabled) {
+    for (final sub in _settings.visibleSubscriptions) {
+      if (sub.enabled && !AppSettings.isFreeSubId(sub.id)) {
         final hasServers = _settings.profiles.any((p) => p.subscriptionId == sub.id);
         final isOld = _settings.autoUpdateSubs &&
             (sub.updatedAt == 0 || (nowMs - sub.updatedAt) > 12 * 3600 * 1000);
@@ -1076,7 +1077,7 @@ class AppController extends ChangeNotifier {
     await _update(_settings.copyWith(themeMode: mode));
   }
 
-  /// Меняет настройки обхода DPI.
+  /// Меняет настройки десинхронизации пакетов (Desync).
   Future<void> setDesync(DesyncSettings desync) async {
     await _update(_settings.copyWith(desync: desync));
     if (_tunnel.status.isActive) {
@@ -1240,7 +1241,8 @@ class AppController extends ChangeNotifier {
   RuntimeConfig? buildConfig() {
     final profile = selectedProfile;
     final hasProfile = profile != null && profile.server.isNotEmpty;
-    final hasSubs = _settings.subscriptions.any((sub) => sub.enabled);
+    final activeSubs = _settings.visibleSubscriptions;
+    final hasSubs = activeSubs.any((sub) => sub.enabled);
     final hasDesync = _settings.routingMode == RoutingMode.desync ||
         _settings.desync.enabled ||
         _settings.serviceRoutes.values.contains('desync') ||
@@ -1255,7 +1257,7 @@ class AppController extends ChangeNotifier {
       logLevel: _settings.logLevel == 'warn' ? 'info' : _settings.logLevel,
       mtu: _settings.mtu,
       desync: _settings.desync,
-      subscriptions: hasProfile ? const [] : _settings.subscriptions,
+      subscriptions: hasProfile ? const [] : activeSubs,
       filesDir: filesDirPath,
       appRoutes: _settings.appRoutes,
       serviceRoutes: _settings.serviceRoutes,
@@ -1263,7 +1265,7 @@ class AppController extends ChangeNotifier {
       allowLan: _settings.allowLan,
       proxyOnly: _settings.proxyOnly,
       detourProfile: _settings.detourProfile,
-      extraProfiles: _settings.profiles,
+      extraProfiles: _settings.visibleProfiles,
       proxyTlsFragment: _settings.proxyTlsFragment,
     );
   }
@@ -1307,7 +1309,7 @@ class AppController extends ChangeNotifier {
     }
 
     final currentServer = _settings.routingMode == RoutingMode.desync
-        ? 'Режим Обход DPI (Desync)'
+        ? 'Режим Десинхронизации (Desync)'
         : (selectedProfile?.name ?? (config.profile.name.isNotEmpty ? config.profile.name : ''));
     _tunnel = _tunnel.copyWith(
       status: VpnStatus.connecting,
@@ -1345,7 +1347,7 @@ class AppController extends ChangeNotifier {
   /// Состояние от нативного слоя: оно авторитетнее локального.
   void _applyNativeState(TunnelState state) {
     final server = _settings.routingMode == RoutingMode.desync
-        ? 'Режим Обход DPI (Desync)'
+        ? 'Режим Десинхронизации (Desync)'
         : (selectedProfile?.name ?? '');
     if (state.status == VpnStatus.connected) {
       _tunnel = state.copyWith(
@@ -1370,7 +1372,7 @@ class AppController extends ChangeNotifier {
   /// Дописывает имя выбранного сервера к состоянию.
   TunnelState _withServer(TunnelState state) => state.copyWith(
         serverName: _settings.routingMode == RoutingMode.desync
-            ? 'Режим Обход DPI (Desync)'
+            ? 'Режим Десинхронизации (Desync)'
             : (selectedProfile?.name ?? ''),
       );
 
@@ -1945,8 +1947,8 @@ class AppController extends ChangeNotifier {
   Future<Profile?> autoSelectBestServer({String? subscriptionId}) async {
     await pingAllProfiles(subscriptionId: subscriptionId);
     final candidates = subscriptionId == null
-        ? _settings.profiles
-        : _settings.profiles.where((p) => p.subscriptionId == subscriptionId).toList();
+        ? _settings.visibleProfiles
+        : _settings.visibleProfiles.where((p) => p.subscriptionId == subscriptionId).toList();
     Profile? best;
     var bestMs = 999999;
     for (final p in candidates) {
@@ -2035,14 +2037,15 @@ class AppController extends ChangeNotifier {
     if (_testingDesync) return null;
     _testingDesync = true;
     _desyncScanResults = const [];
-    _desyncTestStatus = 'Запуск снайпера стратегий DPI (6 профилей)...';
+    _desyncTestStatus = 'Запуск снайпера стратегий Desync (7 профилей)...';
     notifyListeners();
 
     const candidates = [
       ('fake_disorder', 'autottl', 'Fake + Disorder (AutoTTL)'),
-      ('fake_disorder', 'md5', 'Fake + Disorder (MD5 Sig)'),
+      ('fake_disorder', 'md5_badack', 'Fake + Disorder (MD5 + BadACK)'),
+      ('multi_disorder', 'autottl', 'Multi-Disorder (7-точечный SNI)'),
       ('fake_split', 'autottl', 'Fake + Split (AutoTTL)'),
-      ('fake_split', 'badseq', 'Fake + Split (BadSeq)'),
+      ('fake_split', 'badseq_badack_badsum', 'Fake + Split (Triple Fooling)'),
       ('multi_split', 'autottl', 'Multi-Split (Дробление TLS)'),
       ('tlsrec', 'md5', 'TLS Record Split (До SNI)'),
     ];
@@ -2256,6 +2259,46 @@ class AppController extends ChangeNotifier {
   Future<void> setSmartFailover(bool value) =>
       _update(_settings.copyWith(smartFailover: value));
 
+  /// Включает или полностью скрывает бесплатные резервные узлы (WARP AmneziaWG и SHARD).
+  /// При отключении также удаляет ранее сгенерированные бесплатные подписки и их серверы,
+  /// чтобы они не занимали главный экран.
+  Future<void> setShowFreeNodes(bool value) async {
+    if (!value) {
+      for (final freeId in const ['free-warp', 'free-shard']) {
+        final cacheFile = File('$filesDirPath/subs/$freeId.txt');
+        if (cacheFile.existsSync()) {
+          try {
+            cacheFile.deleteSync();
+          } catch (_) {}
+        }
+      }
+      final cleanProfiles = _settings.profiles
+          .where((p) => !AppSettings.isFreeSubId(p.subscriptionId))
+          .toList(growable: false);
+      final cleanSubs = _settings.subscriptions
+          .where((s) => !AppSettings.isFreeSubId(s.id))
+          .toList(growable: false);
+      final selectedOk = cleanProfiles.any((p) => p.id == _settings.selectedProfileId);
+      final nextSelected = selectedOk
+          ? _settings.selectedProfileId
+          : (cleanProfiles.isNotEmpty ? cleanProfiles.first.id : '');
+      _freeNodesStatus = '';
+      await _update(
+        _settings.copyWith(
+          showFreeNodes: false,
+          profiles: cleanProfiles,
+          subscriptions: cleanSubs,
+          selectedProfileId: nextSelected,
+        ),
+      );
+      if (_tunnel.status.isActive && !selectedOk) {
+        await _restartActiveTunnel();
+      }
+      return;
+    }
+    await _update(_settings.copyWith(showFreeNodes: true));
+  }
+
   Future<void> setDetourProfile(String profileId) async {
     await _update(_settings.copyWith(detourProfileId: profileId));
     if (_tunnel.status.isActive) {
@@ -2270,7 +2313,7 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Включает или выключает фрагментацию TLS ClientHello на прокси-соединениях (Анти-глушилка LTE).
+  /// Включает или выключает фрагментацию TLS ClientHello на прокси-соединениях (LTE).
   Future<void> setProxyTlsFragment(bool value) async {
     await _update(_settings.copyWith(proxyTlsFragment: value));
     if (_tunnel.status.isActive) {
@@ -2485,8 +2528,8 @@ class AppController extends ChangeNotifier {
   Future<void> pingAllProfiles({String? subscriptionId}) async {
     if (_pingingAll) return;
     final targets = subscriptionId == null
-        ? _settings.profiles
-        : _settings.profiles
+        ? _settings.visibleProfiles
+        : _settings.visibleProfiles
             .where((p) => p.subscriptionId == subscriptionId)
             .toList(growable: false);
     if (targets.isEmpty) return;

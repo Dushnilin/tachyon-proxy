@@ -96,7 +96,7 @@ class _RulesTabState extends State<RulesTab> {
           const SectionLabel('Точечно по сервисам'),
           _ServiceRoutesSection(controller: controller),
           const SizedBox(height: Space.xl),
-          const SectionLabel('Настройка обхода DPI (Desync)'),
+          const SectionLabel('Настройка десинхронизации (Desync)'),
           _DesyncModeCard(controller: controller),
           const SizedBox(height: Space.xl),
           SectionLabel(
@@ -308,7 +308,7 @@ class _CustomRulesSection extends StatelessWidget {
   static const _labels = {
     'proxy': 'Туннель',
     'direct': 'Напрямую',
-    'desync': 'Обход DPI',
+    'desync': 'Desync',
     'block': 'Блок',
   };
   static const _typeLabels = {
@@ -876,16 +876,23 @@ class _DesyncModeCard extends StatelessWidget {
     ('fake_disorder', 'Fake + Disorder'),
     ('tlsrec', 'TLS Record'),
     ('multi_split', 'Multi-Split'),
+    ('multi_disorder', 'Multi-Disorder'),
     ('split', 'Split'),
     ('disorder', 'Disorder'),
+    ('oob', 'OOB'),
   ];
 
   static const _foolings = <(String, String)>[
     ('autottl', 'AutoTTL'),
     ('md5', 'MD5Sig'),
+    ('badack', 'BadACK'),
+    ('md5_badack', 'MD5+BadACK'),
     ('timestamp', 'Timestamp'),
     ('badseq', 'BadSeq'),
     ('badsum', 'BadSum'),
+    ('badseq_badack_badsum', 'Triple'),
+    ('hopbyhop', 'IPv6 Hop'),
+    ('datanoack', 'DataNoACK'),
   ];
 
   @override
@@ -899,8 +906,8 @@ class _DesyncModeCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SwitchRow(
-            title: 'Весь остальной трафик через DPI',
-            subtitle: 'Рецепт: ${desync.preset} · Обман: ${desync.fooling}',
+            title: 'Весь остальной трафик через Desync',
+            subtitle: 'Рецепт: ${desync.preset} · Маркировка: ${desync.fooling}',
             value: enabled,
             onChanged: (v) => controller.setDesync(
               desync.copyWith(enabled: v),
@@ -908,7 +915,7 @@ class _DesyncModeCard extends StatelessWidget {
           ),
           const Divider(height: 20),
           Text(
-            'Рецепт обхода (Preset)',
+            'Рецепт десинхронизации (Preset)',
             style: Theme.of(context).textTheme.labelSmall,
           ),
           const SizedBox(height: Space.xs),
@@ -947,7 +954,7 @@ class _DesyncModeCard extends StatelessWidget {
           ),
           const SizedBox(height: Space.md),
           Text(
-            'Способ обмана ТСПУ (Fooling)',
+            'Маркировка тестовых пакетов (Fooling)',
             style: Theme.of(context).textTheme.labelSmall,
           ),
           const SizedBox(height: Space.xs),
@@ -1038,7 +1045,7 @@ class _DesyncModeCard extends StatelessWidget {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.radar_rounded, size: 16),
-                  label: const Text('Снайпер (6x)'),
+                  label: const Text('Снайпер (7x)'),
                 ),
               ),
             ],
@@ -1215,7 +1222,7 @@ class _ActionPill extends StatelessWidget {
     const labels = {
       'proxy': 'Туннель',
       'direct': 'Напрямую',
-      'desync': 'Обход DPI',
+      'desync': 'Desync',
       'block': 'Блок',
     };
 

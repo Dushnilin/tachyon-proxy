@@ -264,6 +264,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         logSection["output"] = logPath
         root["log"] = logSection
 
+        // Перенаправляем experimental.cache_file в рабочую директорию App Group / Caches расширения
+        var experimental = (root["experimental"] as? [String: Any]) ?? [:]
+        var cacheFile = (experimental["cache_file"] as? [String: Any]) ?? ["enabled": true]
+        cacheFile["enabled"] = true
+        cacheFile["path"] = workDir.appendingPathComponent("cache.db").path
+        experimental["cache_file"] = cacheFile
+        root["experimental"] = experimental
+
         // Ограничиваем MTU на tun-инбаунде до 4064 для соответствия NEPacketTunnelNetworkSettings
         if var inbounds = root["inbounds"] as? [[String: Any]] {
             for i in inbounds.indices {

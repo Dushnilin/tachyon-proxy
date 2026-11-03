@@ -1287,19 +1287,29 @@ class LinkParser {
       }
     }
 
+    final rotateSecs = int.tryParse(query['rotate_secs'] ?? '');
+    final rotateMb = int.tryParse(query['rotate_mb'] ?? '');
+    final mtu = int.tryParse(query['mtu'] ?? '');
     final extra = <String, dynamic>{
       if (trList.isNotEmpty) 'tewfai_transport': trList,
       if ((query['inner_cipher'] ?? '').isNotEmpty) 'inner_cipher': query['inner_cipher'],
       if ((query['morph_profile'] ?? '').isNotEmpty) 'morph_profile': query['morph_profile'],
       if (_isTruthy(query['pqc'])) 'pqc': true,
-      if (_isTruthy(query['handover'])) 'handover': {'enabled': true},
+      if (_isTruthy(query['handover']))
+        'handover': {
+          'enabled': true,
+          if (rotateSecs != null && rotateSecs > 0) 'rotate_secs': rotateSecs,
+          if (rotateMb != null && rotateMb > 0) 'rotate_mb': rotateMb,
+        },
       if (_isTruthy(query['fec'])) 'fec': true,
+      if (_isTruthy(query['desync'])) 'desync': true,
       if (_isTruthy(query['shaper']))
         'shaper': {
           'mode': const {'fixed', 'off'}.contains(query['shaper_profile'])
               ? query['shaper_profile']
               : 'adaptive',
         },
+      if (mtu != null && mtu >= 256) 'mtu': mtu,
       if ((query['fp'] ?? query['fingerprint'] ?? '').isNotEmpty)
         'fp': query['fp'] ?? query['fingerprint'],
     };

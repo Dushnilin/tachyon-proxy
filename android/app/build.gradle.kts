@@ -31,7 +31,7 @@ android {
     }
 
     signingConfigs {
-        getByName("debug") {
+        create("tachyon") {
             val ciKeystore = file("tachyon.keystore")
             val homeKeystore = file("${System.getProperty("user.home")}/.android/debug.keystore")
             storeFile = if (ciKeystore.exists()) ciKeystore else homeKeystore
@@ -42,10 +42,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("tachyon")
+        }
         release {
-            // Подпись debug-ключом: сборка ставится на устройство без
-            // подготовки релизного ключа.
-            signingConfig = signingConfigs.getByName("debug")
+            // Подпись постоянным ключом: сборка ставится и обновляется поверх без конфликтов.
+            signingConfig = signingConfigs.getByName("tachyon")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

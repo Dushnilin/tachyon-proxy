@@ -8,7 +8,6 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -23,34 +22,33 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * VPN-сервис: держит TUN-интерфейс и запускает в нём ядро `tachyon-core`.
  *
- * Жизненный цикл:
- *  1. [establish] выдаёт дескриптор TUN, который передаётся ядру как
- *     нестандартное поле `fd` в tun-инбаунде. Ядро не создаёт интерфейс
- *     самостоятельно и не трогает маршруты — их настраивает система.
- *  2. До старта ядра поднимается unix-сокет защиты: каждый сокет, который
- *     ядро открывает наружу, передаётся сюда и защищается через
- *     [VpnService.protect], иначе трафик попадал бы в туннель рекурсивно.
- *  3. Ядро стартует в отдельном потоке: вызов блокирующий и держит сервис
- *     живым всё время работы туннеля.
+ * Поддерживает фоновый режим «Домашний интернет» (авто-пауза маршрутизации
+ * при подключении к доверенным Wi-Fi сетям из списка и автоматическое
+ * включение туннеля при выходе из домашней сети).
  */
 class TachyonVpnService : VpnService() {
 
     private var coreThread: Thread? = null
     private var protectThread: Thread? = null
     private var statsThread: Thread? = null
+    private var wifiWatchThread: Thread? = null
 
     /** Дескриптор TUN: должен жить дольше, чем ядро читает из него. */
     private var tunDescriptor: ParcelFileDescriptor? = null
 
-    /** Конфигурация текущего запуска: нужна для перезапуска ядра. */
+    /** Конфигурация текущего запуска: нужна для перезапуска ядра и возврата из авто-паузы Wi-Fi. */
     private var currentConfig: String? = null
     private var currentServerName: String = ""
+    private var currentAllowedPackages: List<String> = emptyList()
+    private var currentDisallowedPackages: List<String> = emptyList()
+    private var currentMtu: Int = MTU
+    private var currentProxyOnly: Boolean = false
 
     /** Путь к сокету защиты и к файлу журнала. */
     private var protectPath: String? = null
     private var logPath: String? = null
 
-    /** Следит за сетью: при смене ядро перезапускается. */
+    /** Следит за сетью. */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     @Volatile
@@ -61,6 +59,14 @@ class TachyonVpnService : VpnService() {
     @Volatile
     private var running = false
 
+    /** Сервис находится в режиме авто-паузы в домашней Wi-Fi сети. */
+    @Volatile
+    private var pausedByWifi = false
+
+    /** Если пользователь нажал «Включить принудительно» в домашней сети, игнорируем авто-паузу для этого SSID до отключения от него. */
+    @Volatile
+    private var forceOverrideWifiSsid: String = ""
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -69,12 +75,33 @@ class TachyonVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                forceOverrideWifiSsid = ""
+                pausedByWifi = false
+                stopWifiWatcher()
                 stopTunnel()
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_NEXT_SERVER -> {
                 TunnelStateHolder.dispatchCommand("next_server")
+                return START_STICKY
+            }
+            ACTION_RECHECK_WIFI -> {
+                if (running || pausedByWifi) {
+                    Thread({ evaluateHomeWifiState() }, "tachyon-wifi-recheck").start()
+                    return START_STICKY
+                } else {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+            }
+            ACTION_FORCE_RESUME -> {
+                val ssid = WifiSsidHelper.getCurrentWifiSsid(this)
+                    .ifEmpty { TunnelStateHolder.pausedByWifiSsid }
+                forceOverrideWifiSsid = ssid
+                if (pausedByWifi) {
+                    resumeFromHomeWifi()
+                }
                 return START_STICKY
             }
             else -> {
@@ -86,6 +113,7 @@ class TachyonVpnService : VpnService() {
                 var serverName = intent?.getStringExtra(EXTRA_SERVER_NAME).orEmpty()
                 var mtu = intent?.getIntExtra(EXTRA_MTU, MTU) ?: MTU
                 var proxyOnly = intent?.getBooleanExtra(EXTRA_PROXY_ONLY, false) ?: false
+                val forceStart = intent?.getBooleanExtra(EXTRA_FORCE_START, false) ?: false
 
                 if (config.isNullOrBlank()) {
                     val savedFile = File(filesDir, LAST_SESSION_FILE)
@@ -107,18 +135,68 @@ class TachyonVpnService : VpnService() {
                     TunnelStateHolder.update(
                         TunnelStateHolder.State.Failed,
                         "конфигурация не передана",
+                        pausedWifi = "",
                     )
                     stopSelf()
                     return START_NOT_STICKY
                 }
-                // Повторный запуск: прошлая конфигурация снимается целиком.
-                if (running) {
-                    stopTunnel()
+
+                currentConfig = config
+                currentServerName = serverName
+                currentAllowedPackages = allowedPackages
+                currentDisallowedPackages = disallowedPackages
+                currentMtu = mtu
+                currentProxyOnly = proxyOnly
+                saveSessionToDisk(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
+
+                val currentSsid = WifiSsidHelper.getCurrentWifiSsid(this)
+                if (forceStart && currentSsid.isNotEmpty()) {
+                    forceOverrideWifiSsid = currentSsid
                 }
-                startTunnel(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
+
+                val (homeWifiMode, trustedSsids) = WifiSsidHelper.readHomeWifiConfig(filesDir)
+                val shouldPauseNow = homeWifiMode &&
+                    currentSsid.isNotEmpty() &&
+                    WifiSsidHelper.matchesTrustedWifi(currentSsid, trustedSsids) &&
+                    !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
+
+                if (running) {
+                    stopCoreAndTunOnly()
+                }
+
+                if (shouldPauseNow) {
+                    enterHomeWifiPause(currentSsid)
+                    startWifiWatcher()
+                } else {
+                    pausedByWifi = false
+                    TunnelStateHolder.pausedByWifiSsid = ""
+                    startTunnel(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
+                    startWifiWatcher()
+                }
             }
         }
         return START_STICKY
+    }
+
+    private fun saveSessionToDisk(
+        config: String,
+        allowedPackages: List<String>,
+        disallowedPackages: List<String>,
+        serverName: String,
+        mtu: Int,
+        proxyOnly: Boolean,
+    ) {
+        runCatching {
+            val sessionJson = JSONObject().apply {
+                put("config", config)
+                put("serverName", serverName)
+                put("mtu", mtu)
+                put("proxyOnly", proxyOnly)
+                put("allowed", JSONArray(allowedPackages))
+                put("disallowed", JSONArray(disallowedPackages))
+            }
+            File(filesDir, LAST_SESSION_FILE).writeText(sessionJson.toString())
+        }
     }
 
     private fun jsonArrayToList(arr: JSONArray?): List<String> {
@@ -129,6 +207,101 @@ class TachyonVpnService : VpnService() {
             if (s.isNotEmpty()) list.add(s)
         }
         return list
+    }
+
+    /**
+     * Переводит сервис в режим ожидания домашней Wi-Fi сети:
+     * закрывает TUN и останавливает ядро, но оставляет фоновый наблюдатель.
+     */
+    private fun enterHomeWifiPause(ssid: String) {
+        stopCoreAndTunOnly()
+        pausedByWifi = true
+        TunnelStateHolder.serverName = currentServerName
+        TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = ssid)
+        startForeground(NOTIFICATION_ID, buildHomeWifiStandbyNotification(ssid))
+        runCatching { TachyonAppWidget.updateAll(this, "🏠 Пауза в Wi-Fi: $ssid") }
+    }
+
+    /**
+     * Автоматически поднимает туннель после выхода из доверенной домашней Wi-Fi сети.
+     */
+    private fun resumeFromHomeWifi() {
+        val cfg = currentConfig ?: return
+        pausedByWifi = false
+        TunnelStateHolder.pausedByWifiSsid = ""
+        startTunnel(
+            cfg,
+            currentAllowedPackages,
+            currentDisallowedPackages,
+            currentServerName,
+            currentMtu,
+            currentProxyOnly,
+        )
+    }
+
+    /**
+     * Фоновый наблюдатель за текущим SSID Wi-Fi и настройками «Домашнего интернета».
+     */
+    private fun startWifiWatcher() {
+        watchNetwork()
+        if (wifiWatchThread?.isAlive == true) return
+        wifiWatchThread = Thread({
+            while ((running || pausedByWifi) && !Thread.currentThread().isInterrupted) {
+                try {
+                    Thread.sleep(2000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (!running && !pausedByWifi) break
+                runCatching { evaluateHomeWifiState() }
+            }
+        }, "tachyon-wifi-watch").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopWifiWatcher() {
+        wifiWatchThread?.interrupt()
+        wifiWatchThread = null
+        networkCallback?.let { callback ->
+            val manager = getSystemService(ConnectivityManager::class.java)
+            runCatching { manager?.unregisterNetworkCallback(callback) }
+        }
+        networkCallback = null
+        activeNetworkHandle = null
+    }
+
+    @Synchronized
+    private fun evaluateHomeWifiState() {
+        if (!running && !pausedByWifi) return
+        val (homeWifiMode, trustedSsids) = WifiSsidHelper.readHomeWifiConfig(filesDir)
+        val currentSsid = WifiSsidHelper.getCurrentWifiSsid(this)
+
+        if (forceOverrideWifiSsid.isNotEmpty() &&
+            !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
+        ) {
+            forceOverrideWifiSsid = ""
+        }
+
+        val shouldPause = homeWifiMode &&
+            currentSsid.isNotEmpty() &&
+            WifiSsidHelper.matchesTrustedWifi(currentSsid, trustedSsids) &&
+            !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
+
+        if (shouldPause) {
+            if (running) {
+                Log.i(TAG, "Домашний Wi-Fi '$currentSsid' обнаружен — ставим маршрутизацию на авто-паузу")
+                enterHomeWifiPause(currentSsid)
+            } else if (pausedByWifi && TunnelStateHolder.pausedByWifiSsid != currentSsid) {
+                TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = currentSsid)
+                val manager = getSystemService(NotificationManager::class.java)
+                manager?.notify(NOTIFICATION_ID, buildHomeWifiStandbyNotification(currentSsid))
+            }
+        } else if (pausedByWifi) {
+            Log.i(TAG, "Выход из домашнего Wi-Fi — автоматически включаем маршрутизацию")
+            resumeFromHomeWifi()
+        }
     }
 
     /**
@@ -146,21 +319,10 @@ class TachyonVpnService : VpnService() {
 
         currentServerName = serverName
         TunnelStateHolder.serverName = serverName
-        TunnelStateHolder.update(TunnelStateHolder.State.Starting, null)
+        TunnelStateHolder.update(TunnelStateHolder.State.Starting, null, pausedWifi = "")
         runCatching { TachyonAppWidget.updateAll(this) }
 
-        // Сохраняем последнюю сессию для запуска из Quick Settings Tile и при загрузке системы.
-        runCatching {
-            val sessionJson = JSONObject().apply {
-                put("config", config)
-                put("serverName", serverName)
-                put("mtu", mtu)
-                put("proxyOnly", proxyOnly)
-                put("allowed", JSONArray(allowedPackages))
-                put("disallowed", JSONArray(disallowedPackages))
-            }
-            File(filesDir, LAST_SESSION_FILE).writeText(sessionJson.toString())
-        }
+        saveSessionToDisk(config, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
 
         // Уведомление поднимается сразу: после startForegroundService система
         // даёт несколько секунд на foreground-состояние.
@@ -174,8 +336,6 @@ class TachyonVpnService : VpnService() {
             coreTunFd = -1
             activeProtectPath = ""
         } else {
-            // `Builder` - внутренний класс VpnService: создаётся на этом сервисе.
-            // `setSession` в API 36 удалён, поэтому имя сессии не задаём.
             val builder = Builder()
                 .setMtu(mtu.coerceIn(1280, 9000))
                 .addAddress(TUN_ADDRESS, TUN_PREFIX)
@@ -183,30 +343,25 @@ class TachyonVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
 
             if (allowedPackages.isNotEmpty()) {
-                // В туннель попадают только перечисленные приложения (кроме самого VPN-клиента).
                 allowedPackages.filter { it != packageName }.forEach { name ->
                     runCatching { builder.addAllowedApplication(name) }
                         .onFailure { Log.w(TAG, "не удалось разрешить пакет $name", it) }
                 }
             } else {
-                // Само приложение всегда исключается: иначе управляющий канал и
-                // журнал ушли бы в туннель.
                 runCatching { builder.addDisallowedApplication(packageName) }
-                // Перечисленные приложения идут мимо туннеля.
                 disallowedPackages.forEach { name ->
                     runCatching { builder.addDisallowedApplication(name) }
                         .onFailure { Log.w(TAG, "не удалось исключить пакет $name", it) }
                 }
             }
 
-            // `Builder.establish()` сам поднимает интерфейс и отдаёт null,
-            // если система отказала (API 14+, доступен на всех наших версиях).
             val descriptor = runCatching { builder.establish() }.getOrNull()
             if (descriptor == null) {
                 Log.e(TAG, "establish() не выдал дескриптор TUN")
                 TunnelStateHolder.update(
                     TunnelStateHolder.State.Failed,
                     "система не выдала интерфейс VPN",
+                    pausedWifi = "",
                 )
                 runCatching { TachyonAppWidget.updateAll(this) }
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -215,14 +370,12 @@ class TachyonVpnService : VpnService() {
             }
             tunDescriptor = descriptor
 
-            // Нативный `Tun` закрывает свой `fd` в `Drop` через `libc::close`.
-            // Передача `descriptor.fd` напрямую вызывает SIGABRT от Android `fdsan`,
-            // так как им владеет `ParcelFileDescriptor`. Дублируем и отвязываем (`detachFd`).
             val detachedFd = detachTunFd(descriptor)
             if (detachedFd == null) {
                 TunnelStateHolder.update(
                     TunnelStateHolder.State.Failed,
                     "не удалось подготовить дескриптор TUN",
+                    pausedWifi = "",
                 )
                 runCatching { TachyonAppWidget.updateAll(this) }
                 closeTun()
@@ -241,6 +394,7 @@ class TachyonVpnService : VpnService() {
                 TunnelStateHolder.update(
                     TunnelStateHolder.State.Failed,
                     "не удалось открыть канал защиты сокетов",
+                    pausedWifi = "",
                 )
                 runCatching { TachyonAppWidget.updateAll(this) }
                 closeTun()
@@ -250,8 +404,6 @@ class TachyonVpnService : VpnService() {
             }
             activeProtectPath = protectSocket.absolutePath
 
-            // Слушатель сокета защиты живёт весь сеанс: пока он работает, ядро
-            // может передавать сокеты на protect().
             protectThread = Thread({
                 try {
                     TachyonCore.protectLoop(this)
@@ -280,12 +432,13 @@ class TachyonVpnService : VpnService() {
             if (code != 0) {
                 val error = TachyonCore.lastError() ?: "ядро не стартовало (код $code)"
                 Log.e(TAG, error)
-                TunnelStateHolder.update(TunnelStateHolder.State.Failed, error)
+                TunnelStateHolder.update(TunnelStateHolder.State.Failed, error, pausedWifi = "")
                 runCatching { TachyonAppWidget.updateAll(this) }
                 stopSelf()
             } else {
                 running = true
-                TunnelStateHolder.update(TunnelStateHolder.State.Running, null)
+                pausedByWifi = false
+                TunnelStateHolder.update(TunnelStateHolder.State.Running, null, pausedWifi = "")
                 runCatching { TachyonAppWidget.updateAll(this) }
                 startStatsLoop()
             }
@@ -341,34 +494,43 @@ class TachyonVpnService : VpnService() {
         else -> String.format("%.2f ГБ", bytes / (1024.0 * 1024.0 * 1024.0))
     }
 
-    /**
-     * Создаёт дубликат дескриптора TUN и снимает с него `fdsan`-владение
-     * `ParcelFileDescriptor`, чтобы нативное ядро могло закрыть его в `Drop`.
-     */
     private fun detachTunFd(descriptor: ParcelFileDescriptor): Int? =
         runCatching { ParcelFileDescriptor.dup(descriptor.fileDescriptor).detachFd() }
             .onFailure { Log.e(TAG, "не удалось клонировать дескриптор TUN", it) }
             .getOrNull()
 
     /**
-     * Следит за системной сетью по умолчанию и обновляет underlying network
-     * для VpnService без перезапуска ядра (защищённые через protect(fd) сокеты
-     * автоматически маршрутизируются системой через активную сеть).
+     * Следит за системной сетью по умолчанию, обновляет underlying network
+     * и мгновенно проверяет условие «Домашний интернет» при смене Wi-Fi / LTE.
      */
     private fun watchNetwork() {
+        if (networkCallback != null) return
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
         activeNetworkHandle = null
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 activeNetworkHandle = network.networkHandle
-                runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                if (running) {
+                    runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                }
+                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-avail").start()
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                networkCapabilities: NetworkCapabilities,
+            ) {
+                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-caps").start()
             }
 
             override fun onLost(network: Network) {
                 if (activeNetworkHandle == network.networkHandle) {
                     activeNetworkHandle = null
-                    runCatching { setUnderlyingNetworks(null) }
+                    if (running) {
+                        runCatching { setUnderlyingNetworks(null) }
+                    }
                 }
+                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-lost").start()
             }
         }
         try {
@@ -379,48 +541,6 @@ class TachyonVpnService : VpnService() {
         }
     }
 
-    /** Перезапускает ядро с той же конфигурацией. */
-    private fun restartCore() {
-        val config = currentConfig ?: return
-        val descriptor = tunDescriptor ?: return
-        val protect = protectPath ?: return
-        val log = logPath ?: return
-        if (!running) return
-        if (!restarting.compareAndSet(false, true)) return
-
-        Log.i(TAG, "сеть изменилась, ядро перезапускается")
-        Thread({
-            try {
-                // Ядро держит один инстанс: сначала глушим, потом поднимаем с новым dup-fd.
-                runCatching { TachyonCore.stop() }
-                    .onFailure { Log.e(TAG, "остановка ядра не удалась", it) }
-                Thread.sleep(200)
-                if (!running) return@Thread
-                val nextTunFd = detachTunFd(descriptor) ?: return@Thread
-                val code = TachyonCore.start(config, nextTunFd, protect, log)
-                if (code != 0) {
-                    val error = TachyonCore.lastError() ?: "ядро не перезапустилось"
-                    Log.e(TAG, error)
-                    TunnelStateHolder.update(TunnelStateHolder.State.Failed, error)
-                }
-            } finally {
-                restarting.set(false)
-            }
-        }, "tachyon-restart").apply {
-            isDaemon = true
-            start()
-        }
-    }
-
-    /**
-     * Защищает сокет ядра от захвата туннелем.
-     *
-     * Вызывается из нативного кода: тот открывает сокет, передаёт его дескриптор
-     * через unix-сокет и ждёт ответа. Если сокет не защищён, исходящие
-     * соединения ядра попадут обратно в туннель.
-     *
-     * @return true, если сокет защищён
-     */
     @androidx.annotation.Keep
     fun protectFd(fd: Int): Boolean {
         return try {
@@ -431,22 +551,11 @@ class TachyonVpnService : VpnService() {
         }
     }
 
-    /** Останавливает туннель и освобождает ресурсы. */
-    fun stopTunnel() {
-        if (!running && coreThread == null) {
-            closeTun()
-            return
-        }
+    /** Останавливает только ядро и закрывает TUN, не завершая сам сервис. */
+    private fun stopCoreAndTunOnly() {
         running = false
         statsThread?.interrupt()
         statsThread = null
-
-        networkCallback?.let { callback ->
-            val manager = getSystemService(ConnectivityManager::class.java)
-            runCatching { manager?.unregisterNetworkCallback(callback) }
-        }
-        networkCallback = null
-        activeNetworkHandle = null
 
         runCatching { TachyonCore.stop() }
             .onFailure { Log.e(TAG, "остановка ядра не удалась", it) }
@@ -457,9 +566,23 @@ class TachyonVpnService : VpnService() {
         protectThread?.interrupt()
         protectThread = null
 
-        currentConfig = null
         closeTun()
-        TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null)
+    }
+
+    /** Полностью останавливает туннель, фоновый наблюдатель и освобождает ресурсы. */
+    fun stopTunnel() {
+        pausedByWifi = false
+        stopWifiWatcher()
+        if (!running && coreThread == null) {
+            closeTun()
+            TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
+            runCatching { TachyonAppWidget.updateAll(this) }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            return
+        }
+        stopCoreAndTunOnly()
+        currentConfig = null
+        TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
         runCatching { TachyonAppWidget.updateAll(this) }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
@@ -491,6 +614,64 @@ class TachyonVpnService : VpnService() {
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
+    }
+
+    private fun buildHomeWifiStandbyNotification(ssid: String): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openPending = PendingIntent.getActivity(
+            this,
+            0,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val stopIntent = Intent(this, TachyonVpnService::class.java).setAction(ACTION_STOP)
+        val stopPending = PendingIntent.getService(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val forceIntent = Intent(this, TachyonVpnService::class.java).setAction(ACTION_FORCE_RESUME)
+        val forcePending = PendingIntent.getService(
+            this,
+            3,
+            forceIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+
+        val forceAction = Notification.Action.Builder(
+            android.R.drawable.ic_media_play,
+            "Включить сейчас",
+            forcePending,
+        ).build()
+
+        val stopAction = Notification.Action.Builder(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "Отключить",
+            stopPending,
+        ).build()
+
+        return builder
+            .setContentTitle("🏠 Домашний интернет · $ssid")
+            .setContentText("Маршрутизация на паузе в домашней сети · Включится вне Wi-Fi")
+            .setSmallIcon(R.drawable.ic_tachyon_bolt)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openPending)
+            .addAction(forceAction)
+            .addAction(stopAction)
+            .build()
     }
 
     private fun buildNotification(statsLine: String? = null): Notification {
@@ -572,11 +753,14 @@ class TachyonVpnService : VpnService() {
         const val ACTION_START = "app.tachyon.proxy.START"
         const val ACTION_STOP = "app.tachyon.proxy.STOP"
         const val ACTION_NEXT_SERVER = "app.tachyon.proxy.NEXT_SERVER"
+        const val ACTION_RECHECK_WIFI = "app.tachyon.proxy.RECHECK_WIFI"
+        const val ACTION_FORCE_RESUME = "app.tachyon.proxy.FORCE_RESUME"
 
         const val EXTRA_CONFIG = "config"
         const val EXTRA_SERVER_NAME = "server_name"
         const val EXTRA_MTU = "mtu"
         const val EXTRA_PROXY_ONLY = "proxy_only"
+        const val EXTRA_FORCE_START = "force_start"
         const val EXTRA_ALLOWED_PACKAGES = "allowed_packages"
         const val EXTRA_DISALLOWED_PACKAGES = "disallowed_packages"
 

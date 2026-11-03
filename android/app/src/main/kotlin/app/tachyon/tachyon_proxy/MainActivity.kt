@@ -22,6 +22,7 @@ import org.tachyon.vpn.QrScannerActivity
 import org.tachyon.vpn.TachyonCore
 import org.tachyon.vpn.TachyonVpnService
 import org.tachyon.vpn.TunnelStateHolder
+import org.tachyon.vpn.WifiSsidHelper
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -46,6 +47,15 @@ class MainActivity : FlutterFragmentActivity() {
     /** Запрос, ждущий разрешения на VPN. */
     private var pendingStart: PendingStart? = null
     private var pendingQrResult: MethodChannel.Result? = null
+    private var pendingWifiPermResult: MethodChannel.Result? = null
+
+    /** Запрос разрешения геолокации для чтения SSID Wi-Fi в режиме «Домашний интернет». */
+    private val wifiPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+            val res = pendingWifiPermResult
+            pendingWifiPermResult = null
+            res?.success(WifiSsidHelper.hasLocationPermission(this))
+        }
 
     /**
      * Уведомление о туннеле нужно пользователю, но отказ на него не мешает
@@ -102,6 +112,7 @@ class MainActivity : FlutterFragmentActivity() {
                     "type" to "state",
                     "status" to TunnelStateHolder.stateName(),
                     "error" to (error ?: ""),
+                    "pausedWifiSsid" to TunnelStateHolder.pausedByWifiSsid,
                 ),
             )
         }
@@ -231,6 +242,11 @@ class MainActivity : FlutterFragmentActivity() {
                     "openUrl" -> handleOpenUrl(call, result)
                     "scanQr" -> handleScanQr(call, result)
                     "networkInfo" -> result.success(currentNetworkType())
+                    "wifiInfo" -> result.success(currentWifiInfo())
+                    "requestWifiPermission" -> handleRequestWifiPermission(result)
+                    "openLocationSettings" -> handleOpenLocationSettings(result)
+                    "recheckHomeWifi" -> handleRecheckHomeWifi(result)
+                    "forceResumeFromWifi" -> handleForceResumeFromWifi(result)
                     "filesDir" -> result.success(filesDir.absolutePath)
                     "deviceAbi" -> result.success(Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
                     "installEngineSo" -> handleInstallEngineSo(call, result)
@@ -383,6 +399,7 @@ class MainActivity : FlutterFragmentActivity() {
         "status" to TunnelStateHolder.stateName(),
         "error" to (TunnelStateHolder.error ?: ""),
         "server" to TunnelStateHolder.serverName,
+        "pausedWifiSsid" to TunnelStateHolder.pausedByWifiSsid,
     )
 
     /** Версия нативного ядра. */
@@ -503,17 +520,86 @@ class MainActivity : FlutterFragmentActivity() {
         qrScannerLauncher.launch(intent)
     }
 
-    /** Определяет активный тип сети: wifi / cellular / ethernet / none. */
+    /** Определяет активный тип сети: wifi / cellular / ethernet / none (игнорируя VPN поверх сети). */
+    @Suppress("DEPRECATION")
     private fun currentNetworkType(): String {
+        if (WifiSsidHelper.isWifiConnected(this)) return "wifi"
         val cm = getSystemService(ConnectivityManager::class.java) ?: return "none"
-        val net = cm.activeNetwork ?: return "none"
-        val caps = cm.getNetworkCapabilities(net) ?: return "none"
+        for (net in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(net) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "cellular"
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ethernet"
+        }
+        val active = cm.activeNetwork ?: return "none"
+        val caps = cm.getNetworkCapabilities(active) ?: return "none"
         return when {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
             else -> "other"
         }
+    }
+
+    /** Возвращает информацию о текущем Wi-Fi подключении и видимых рядом сетях. */
+    private fun currentWifiInfo(): Map<String, Any?> = mapOf(
+        "ssid" to WifiSsidHelper.getCurrentWifiSsid(this),
+        "isWifi" to WifiSsidHelper.isWifiConnected(this),
+        "hasPermission" to WifiSsidHelper.hasLocationPermission(this),
+        "locationEnabled" to WifiSsidHelper.isLocationEnabled(this),
+        "nearbySsids" to WifiSsidHelper.getNearbySsids(this),
+        "pausedWifiSsid" to TunnelStateHolder.pausedByWifiSsid,
+    )
+
+    private fun handleRequestWifiPermission(result: MethodChannel.Result) {
+        if (WifiSsidHelper.hasLocationPermission(this)) {
+            result.success(true)
+            return
+        }
+        pendingWifiPermResult?.success(false)
+        pendingWifiPermResult = result
+        wifiPermissionLauncher.launch(
+            arrayOf(
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            ),
+        )
+    }
+
+    private fun handleOpenLocationSettings(result: MethodChannel.Result) {
+        runCatching {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }
+        result.success(true)
+    }
+
+    private fun handleRecheckHomeWifi(result: MethodChannel.Result) {
+        if (TunnelStateHolder.state == TunnelStateHolder.State.Running ||
+            TunnelStateHolder.state == TunnelStateHolder.State.Starting ||
+            TunnelStateHolder.pausedByWifiSsid.isNotEmpty()
+        ) {
+            runCatching {
+                val intent = Intent(this, TachyonVpnService::class.java).setAction(
+                    TachyonVpnService.ACTION_RECHECK_WIFI,
+                )
+                startService(intent)
+            }
+        }
+        result.success(true)
+    }
+
+    private fun handleForceResumeFromWifi(result: MethodChannel.Result) {
+        runCatching {
+            val intent = Intent(this, TachyonVpnService::class.java).setAction(
+                TachyonVpnService.ACTION_FORCE_RESUME,
+            )
+            startService(intent)
+        }
+        result.success(true)
     }
 
     /**

@@ -1,0 +1,187 @@
+package org.tachyon.vpn
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.provider.Settings
+import org.json.JSONObject
+import java.io.File
+
+/**
+ * Помощник определения текущего SSID Wi-Fi, сканирования доступных сетей
+ * и проверки списка доверенных домашних/офисных Wi-Fi сетей.
+ */
+object WifiSsidHelper {
+
+    fun cleanSsid(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        var s = raw.trim()
+        if (s.length >= 2 && s.startsWith("\"") && s.endsWith("\"")) {
+            s = s.substring(1, s.length - 1).trim()
+        }
+        if (s.isEmpty() ||
+            s.equals("<unknown ssid>", ignoreCase = true) ||
+            s.equals("0x", ignoreCase = true)
+        ) {
+            return ""
+        }
+        return s
+    }
+
+    fun hasLocationPermission(context: Context): Boolean {
+        val fine = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        val coarse = context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    fun isLocationEnabled(context: Context): Boolean {
+        return try {
+            val lm = context.getSystemService(LocationManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && lm != null) {
+                lm.isLocationEnabled
+            } else {
+                @Suppress("DEPRECATION")
+                val mode = Settings.Secure.getInt(
+                    context.contentResolver,
+                    Settings.Secure.LOCATION_MODE,
+                    Settings.Secure.LOCATION_MODE_OFF,
+                )
+                mode != Settings.Secure.LOCATION_MODE_OFF
+            }
+        } catch (_: Throwable) {
+            true
+        }
+    }
+
+    /**
+     * Проверяет, подключено ли устройство к реальной сети Wi-Fi
+     * (игнорируя поверх поднятый интерфейс VPN).
+     */
+    @Suppress("DEPRECATION")
+    fun isWifiConnected(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
+            for (net in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(net) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                ) {
+                    return true
+                }
+            }
+            false
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Возвращает SSID текущей подключённой Wi-Fi сети, либо пустую строку,
+     * если Wi-Fi отключён или разрешение на чтение SSID ещё не выдано.
+     */
+    @Suppress("DEPRECATION", "MissingPermission")
+    fun getCurrentWifiSsid(context: Context): String {
+        if (!isWifiConnected(context)) return ""
+        return try {
+            val cm = context.getSystemService(ConnectivityManager::class.java)
+            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                for (net in cm.allNetworks) {
+                    val caps = cm.getNetworkCapabilities(net) ?: continue
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                        !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    ) {
+                        val info = caps.transportInfo as? WifiInfo
+                        val fromCaps = cleanSsid(info?.ssid)
+                        if (fromCaps.isNotEmpty()) return fromCaps
+                    }
+                }
+            }
+
+            val wm = context.applicationContext.getSystemService(WifiManager::class.java)
+            val conn = wm?.connectionInfo
+            val fromConn = cleanSsid(conn?.ssid)
+            if (fromConn.isNotEmpty()) return fromConn
+
+            // Фоллбэк по BSSID через результаты сканирования Wi-Fi (актуально для ряда прошивок HyperOS/MIUI)
+            val bssid = conn?.bssid?.trim().orEmpty()
+            if (bssid.isNotEmpty() &&
+                !bssid.equals("02:00:00:00:00:00", ignoreCase = true) &&
+                !bssid.equals("00:00:00:00:00:00", ignoreCase = true) &&
+                wm != null &&
+                hasLocationPermission(context)
+            ) {
+                val match = runCatching { wm.scanResults }.getOrNull()
+                    ?.firstOrNull { it.BSSID != null && it.BSSID.equals(bssid, ignoreCase = true) }
+                val fromScan = cleanSsid(match?.SSID)
+                if (fromScan.isNotEmpty()) return fromScan
+            }
+            ""
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    /**
+     * Возвращает список видимых рядом Wi-Fi сетей (отсортированных по уровню сигнала),
+     * включая текущую подключённую сеть первой в списке.
+     */
+    @Suppress("DEPRECATION", "MissingPermission")
+    fun getNearbySsids(context: Context): List<String> {
+        val result = LinkedHashSet<String>()
+        val current = getCurrentWifiSsid(context)
+        if (current.isNotEmpty()) {
+            result.add(current)
+        }
+        if (!hasLocationPermission(context)) {
+            return result.toList()
+        }
+        try {
+            val wm = context.applicationContext.getSystemService(WifiManager::class.java)
+            val scans = runCatching { wm?.scanResults }.getOrNull().orEmpty()
+            scans.sortedByDescending { it.level }.forEach { sr ->
+                val ssid = cleanSsid(sr.SSID)
+                if (ssid.isNotEmpty()) {
+                    result.add(ssid)
+                }
+            }
+        } catch (_: Throwable) {}
+        return result.take(20)
+    }
+
+    /**
+     * Читает настройки режима «Домашний интернет» напрямую из `tachyon-settings.json`.
+     */
+    fun readHomeWifiConfig(filesDir: File): Pair<Boolean, List<String>> {
+        val file = File(filesDir, "tachyon-settings.json")
+        if (!file.exists()) return false to emptyList()
+        return try {
+            val obj = JSONObject(file.readText())
+            val enabled = obj.optBoolean("homeWifiMode", false)
+            val arr = obj.optJSONArray("trustedWifiSsids")
+            val list = ArrayList<String>()
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val s = cleanSsid(arr.optString(i))
+                    if (s.isNotEmpty()) list.add(s)
+                }
+            }
+            enabled to list
+        } catch (_: Throwable) {
+            false to emptyList()
+        }
+    }
+
+    fun matchesTrustedWifi(currentSsid: String, trustedSsids: Collection<String>): Boolean {
+        val clean = cleanSsid(currentSsid)
+        if (clean.isEmpty()) return false
+        return trustedSsids.any { it.trim().equals(clean, ignoreCase = true) }
+    }
+}

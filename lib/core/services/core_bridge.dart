@@ -67,6 +67,7 @@ class CoreBridge {
               TunnelState(
                 status: _parseStatus(data['status'] as String?),
                 error: (data['error'] as String?) ?? '',
+                pausedWifiSsid: (data['pausedWifiSsid'] as String?) ?? '',
               ),
             );
           case 'log':
@@ -196,6 +197,7 @@ class CoreBridge {
         status: _parseStatus(data['status'] as String?),
         error: (data['error'] as String?) ?? '',
         serverName: (data['server'] as String?) ?? '',
+        pausedWifiSsid: (data['pausedWifiSsid'] as String?) ?? '',
       );
     } on PlatformException {
       return const TunnelState();
@@ -303,6 +305,63 @@ class CoreBridge {
       return await _channel.invokeMethod<String>('networkInfo') ?? 'none';
     } on PlatformException {
       return 'none';
+    }
+  }
+
+  /// Возвращает текущий SSID Wi-Fi, статус разрешения геолокации и список видимых рядом сетей.
+  Future<WifiStatusInfo> wifiInfo() async {
+    try {
+      final data = await _channel.invokeMapMethod<String, dynamic>('wifiInfo');
+      if (data == null) return const WifiStatusInfo();
+      return WifiStatusInfo(
+        ssid: (data['ssid'] as String?)?.trim() ?? '',
+        isWifi: data['isWifi'] == true,
+        hasPermission: data['hasPermission'] == true,
+        locationEnabled: data['locationEnabled'] != false,
+        nearbySsids: ((data['nearbySsids'] as List?) ?? const [])
+            .map((e) => e.toString().trim())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false),
+        pausedWifiSsid: (data['pausedWifiSsid'] as String?)?.trim() ?? '',
+      );
+    } on PlatformException {
+      return const WifiStatusInfo();
+    }
+  }
+
+  /// Запрашивает у системы разрешение на чтение SSID Wi-Fi (ACCESS_FINE_LOCATION).
+  Future<bool> requestWifiPermission() async {
+    try {
+      return await _channel.invokeMethod<bool>('requestWifiPermission') ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// Открывает системные настройки геолокации Android.
+  Future<void> openLocationSettings() async {
+    try {
+      await _channel.invokeMethod<bool>('openLocationSettings');
+    } on PlatformException {
+      // Игнорируем ошибку
+    }
+  }
+
+  /// Просит фоновый VPN-сервис немедленно перепроверить условие «Домашний интернет».
+  Future<void> recheckHomeWifi() async {
+    try {
+      await _channel.invokeMethod<bool>('recheckHomeWifi');
+    } on PlatformException {
+      // Игнорируем ошибку
+    }
+  }
+
+  /// Принудительно включает маршрутизацию, несмотря на активную домашнюю Wi-Fi сеть.
+  Future<void> forceResumeFromWifi() async {
+    try {
+      await _channel.invokeMethod<bool>('forceResumeFromWifi');
+    } on PlatformException {
+      // Игнорируем ошибку
     }
   }
 
@@ -433,4 +492,23 @@ class InstalledApp {
   final String packageName;
   final String label;
   final bool system;
+}
+
+/// Информация о текущем подключении Wi-Fi и списке видимых сетей.
+class WifiStatusInfo {
+  const WifiStatusInfo({
+    this.ssid = '',
+    this.isWifi = false,
+    this.hasPermission = false,
+    this.locationEnabled = true,
+    this.nearbySsids = const [],
+    this.pausedWifiSsid = '',
+  });
+
+  final String ssid;
+  final bool isWifi;
+  final bool hasPermission;
+  final bool locationEnabled;
+  final List<String> nearbySsids;
+  final String pausedWifiSsid;
 }

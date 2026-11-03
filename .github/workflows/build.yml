@@ -121,7 +121,7 @@ jobs:
       - name: Build universal release APK
         run: flutter build apk --release
 
-      - name: Stage APK artifacts
+      - name: Stage and verify APK artifacts
         run: |
           mkdir -p dist-android
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist-android/tachyon-proxy-arm64-v8a.apk
@@ -129,6 +129,11 @@ jobs:
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist-android/tachyon-proxy-x86_64.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-universal.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-android-tv.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          for apk in dist-android/*.apk; do
+            "$APKSIGNER" sign --ks android/app/tachyon.keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey "$apk"
+            "$APKSIGNER" verify --print-certs "$apk" | grep "SHA-256"
+          done
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4

@@ -192,6 +192,34 @@ import UIKit
         case "networkInfo":
             result(currentNetworkType)
 
+        case "wifiInfo":
+            if #available(iOS 14.0, *) {
+                NEHotspotNetwork.fetchCurrent { [weak self] network in
+                    let ssid = network?.ssid ?? ""
+                    let isWifi = (self?.currentNetworkType == "wifi")
+                    result([
+                        "ssid": ssid,
+                        "isWifi": isWifi,
+                        "hasPermission": true,
+                        "locationEnabled": true,
+                        "nearbySsids": ssid.isEmpty ? [String]() : [ssid],
+                        "pausedWifiSsid": "",
+                    ])
+                }
+            } else {
+                result([
+                    "ssid": "",
+                    "isWifi": currentNetworkType == "wifi",
+                    "hasPermission": true,
+                    "locationEnabled": true,
+                    "nearbySsids": [String](),
+                    "pausedWifiSsid": "",
+                ])
+            }
+
+        case "requestWifiPermission", "openLocationSettings", "recheckHomeWifi", "forceResumeFromWifi":
+            result(true)
+
         case "consumeLaunchLink":
             let link = pendingLaunchLink
             pendingLaunchLink = nil

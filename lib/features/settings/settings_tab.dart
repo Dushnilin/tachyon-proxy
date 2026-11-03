@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -31,6 +32,7 @@ class _SettingsTabState extends State<SettingsTab> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final controller = AppScope.read(context);
+      unawaited(controller.refreshWifiInfo());
       final version = await controller.coreVersion();
       if (mounted) setState(() => _version = version);
     });
@@ -152,6 +154,9 @@ class _SettingsTabState extends State<SettingsTab> {
               ],
             ),
           ),
+          const SizedBox(height: Space.xl),
+          const SectionLabel('Домашний интернет (Доверенные Wi-Fi сети)'),
+          _HomeWifiSettingsCard(controller: controller),
           const SizedBox(height: Space.xl),
           const SectionLabel('Параметры туннеля и системы'),
           HairlineCard(
@@ -1173,6 +1178,364 @@ class _LinkRow extends StatelessWidget {
             Icon(Icons.chevron_right, size: 18, color: tokens.faint),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Карточка настройки режима «Домашний интернет» (автоматическое отключение
+/// маршрутизации в выбранных Wi-Fi сетях и авто-включение при выходе из них).
+class _HomeWifiSettingsCard extends StatelessWidget {
+  const _HomeWifiSettingsCard({required this.controller});
+
+  final AppController controller;
+
+  Future<void> _showAddSsidDialog(BuildContext context) async {
+    final textCtrl = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Добавить Wi-Fi сеть (SSID)'),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Введите точное название Wi-Fi сети (например, домашнего или офисного роутера). При подключении к ней маршрутизация будет автоматически отключаться:',
+                style: Theme.of(ctx).textTheme.bodySmall,
+              ),
+              const SizedBox(height: Space.md),
+              TextField(
+                controller: textCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: 'Например: Keenetic-5G, Home_WiFi, Office',
+                  prefixIcon: Icon(Icons.wifi_rounded, size: 18),
+                ),
+                onSubmitted: (val) {
+                  final clean = val.trim();
+                  if (clean.isNotEmpty) {
+                    controller.addTrustedWifiSsid(clean);
+                    Navigator.pop(ctx);
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final clean = textCtrl.text.trim();
+              if (clean.isNotEmpty) {
+                controller.addTrustedWifiSsid(clean);
+              }
+              Navigator.pop(ctx);
+            },
+            child: const Text('Добавить'),
+          ),
+        ],
+      ),
+    );
+    textCtrl.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final settings = controller.settings;
+    final trusted = settings.trustedWifiSsids;
+    final currentSsid = controller.currentWifiSsid;
+    final isWifi = controller.isWifiConnected;
+    final hasPerm = controller.hasWifiPermission;
+    final locEnabled = controller.wifiLocationEnabled;
+    final isCurrentTrusted = controller.isCurrentWifiTrusted;
+    final pausedSsid = controller.tunnel.pausedWifiSsid;
+
+    final nearbySuggestions = controller.nearbyWifiSsids
+        .where(
+          (s) => !trusted.any(
+            (t) => t.trim().toLowerCase() == s.trim().toLowerCase(),
+          ),
+        )
+        .toList(growable: false);
+
+    return HairlineCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SwitchRow(
+            title: 'Режим «Домашний интернет»',
+            subtitle:
+                'Сам отключает маршрутизацию при подключении к выбранным Wi-Fi (дом, офис, роутер с Tachyon) и включает обратно при выходе из сети',
+            value: settings.homeWifiMode,
+            onChanged: controller.setHomeWifiMode,
+          ),
+          const SizedBox(height: Space.sm),
+          const Hairline(),
+          const SizedBox(height: Space.md),
+
+          // Блок статуса текущего Wi-Fi подключения
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.md,
+              vertical: 10,
+            ),
+            decoration: BoxDecoration(
+              color: tokens.surface,
+              borderRadius: BorderRadius.circular(Radii.control),
+              border: Border.all(
+                color: isCurrentTrusted
+                    ? tokens.accent.withValues(alpha: 0.45)
+                    : tokens.line,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  isWifi ? Icons.wifi_rounded : Icons.signal_cellular_alt_rounded,
+                  size: 18,
+                  color: isWifi
+                      ? (isCurrentTrusted ? tokens.accent : tokens.success)
+                      : tokens.muted,
+                ),
+                const SizedBox(width: Space.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        currentSsid.isNotEmpty
+                            ? 'Текущий Wi-Fi: $currentSsid'
+                            : (isWifi
+                                ? 'Wi-Fi подключён (имя сети скрыто системой)'
+                                : 'Сейчас: мобильная сеть / Wi-Fi отключён'),
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: tokens.ink,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        pausedSsid.isNotEmpty
+                            ? '🏠 Маршрутизация сейчас на авто-паузе ($pausedSsid)'
+                            : isCurrentTrusted
+                                ? 'Эта сеть в списке домашних — маршрутизация отключается автоматически'
+                                : (currentSsid.isNotEmpty
+                                    ? 'Нажмите «+ В домашние», чтобы отключать VPN в этой сети'
+                                    : (!hasPerm
+                                        ? 'Разрешите доступ к геолокации, чтобы Android отдавал имя Wi-Fi (SSID)'
+                                        : (!locEnabled
+                                            ? 'Включите геолокацию в шторке Android для определения SSID'
+                                            : 'Подключитесь к Wi-Fi или добавьте имя сети вручную'))),
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: (pausedSsid.isNotEmpty || isCurrentTrusted)
+                              ? tokens.accent
+                              : tokens.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: Space.xs),
+                if (currentSsid.isNotEmpty && !isCurrentTrusted)
+                  FilledButton.tonalIcon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () => controller.addTrustedWifiSsid(currentSsid),
+                    icon: const Icon(Icons.add_rounded, size: 15),
+                    label: const Text('В домашние'),
+                  )
+                else if (isWifi && currentSsid.isEmpty && !hasPerm)
+                  FilledButton.tonalIcon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: () =>
+                        controller.refreshWifiInfo(requestPermission: true),
+                    icon: const Icon(Icons.location_on_outlined, size: 15),
+                    label: const Text('Разрешить'),
+                  )
+                else if (isWifi && currentSsid.isEmpty && !locEnabled)
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 32),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: controller.openLocationSettings,
+                    child: const Text('Геолокация'),
+                  )
+                else
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Обновить статус Wi-Fi',
+                    onPressed: () => controller.refreshWifiInfo(
+                      requestPermission: !hasPerm,
+                    ),
+                    icon: Icon(
+                      Icons.refresh_rounded,
+                      size: 18,
+                      color: tokens.muted,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: Space.md),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  trusted.isEmpty
+                      ? 'Доверенные сети Wi-Fi не выбраны'
+                      : 'Выбранные домашние / офисные сети (${trusted.length}):',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: tokens.muted,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 30),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () => _showAddSsidDialog(context),
+                icon: const Icon(Icons.add_rounded, size: 16),
+                label: const Text('Ввести SSID'),
+              ),
+            ],
+          ),
+
+          if (trusted.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Wrap(
+              spacing: Space.sm,
+              runSpacing: Space.sm,
+              children: [
+                for (final ssid in trusted)
+                  Builder(
+                    builder: (context) {
+                      final isConnectedNow = currentSsid.isNotEmpty &&
+                          currentSsid.trim().toLowerCase() ==
+                              ssid.trim().toLowerCase();
+                      return Container(
+                        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+                        decoration: BoxDecoration(
+                          color: isConnectedNow
+                              ? tokens.accent.withValues(alpha: 0.14)
+                              : tokens.surface,
+                          borderRadius: BorderRadius.circular(Radii.control),
+                          border: Border.all(
+                            color: isConnectedNow
+                                ? tokens.accent.withValues(alpha: 0.55)
+                                : tokens.line,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.home_rounded,
+                              size: 14,
+                              color:
+                                  isConnectedNow ? tokens.accent : tokens.muted,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              ssid,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w500,
+                                fontFamily: 'monospace',
+                                color: isConnectedNow ? tokens.ink : tokens.ink,
+                              ),
+                            ),
+                            if (isConnectedNow) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: tokens.success,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(width: 4),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(4),
+                              onTap: () => controller.removeTrustedWifiSsid(ssid),
+                              child: Padding(
+                                padding: const EdgeInsets.all(2),
+                                child: Icon(
+                                  Icons.close_rounded,
+                                  size: 14,
+                                  color: tokens.muted,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ],
+
+          if (nearbySuggestions.isNotEmpty) ...[
+            const SizedBox(height: Space.md),
+            Text(
+              'Доступные сети рядом (нажмите, чтобы добавить):',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: tokens.faint,
+              ),
+            ),
+            const SizedBox(height: Space.xs),
+            Wrap(
+              spacing: Space.xs,
+              runSpacing: Space.xs,
+              children: [
+                for (final near in nearbySuggestions.take(8))
+                  GestureDetector(
+                    onTap: () => controller.addTrustedWifiSsid(near),
+                    child: Pill(
+                      label: '+ $near',
+                      color: tokens.muted,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
       ),
     );
   }

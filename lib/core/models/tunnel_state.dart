@@ -28,6 +28,7 @@ class TunnelState {
     this.error = '',
     this.startedAt,
     this.serverName = '',
+    this.pausedWifiSsid = '',
   });
 
   final VpnStatus status;
@@ -41,11 +42,17 @@ class TunnelState {
   /// Имя выбранного сервера.
   final String serverName;
 
+  /// Имя домашней Wi-Fi сети, в которой маршрутизация сейчас поставлена на авто-паузу.
+  final String pausedWifiSsid;
+
+  bool get isPausedByWifi => pausedWifiSsid.isNotEmpty;
+
   TunnelState copyWith({
     VpnStatus? status,
     String? error,
     DateTime? startedAt,
     String? serverName,
+    String? pausedWifiSsid,
     bool clearStartedAt = false,
   }) {
     return TunnelState(
@@ -55,6 +62,7 @@ class TunnelState {
       // флагом: иначе длительность старой сессии пережила бы переподключение.
       startedAt: clearStartedAt ? null : (startedAt ?? this.startedAt),
       serverName: serverName ?? this.serverName,
+      pausedWifiSsid: pausedWifiSsid ?? this.pausedWifiSsid,
     );
   }
 

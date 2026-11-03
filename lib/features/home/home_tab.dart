@@ -71,11 +71,13 @@ class _HomeTabState extends State<HomeTab> {
         const SizedBox(height: Space.xs),
         _PowerDial(
           status: tunnel.status,
+          pausedWifiSsid: tunnel.pausedWifiSsid,
           downSpeed: controller.downSpeed,
           upSpeed: controller.upSpeed,
           pingMs: controller.urlTestPing,
           onPressed: (controller.canConnect ||
-                  controller.settings.subscriptions.isNotEmpty)
+                  controller.settings.subscriptions.isNotEmpty ||
+                  tunnel.isPausedByWifi)
               ? controller.toggleTunnel
               : null,
         ),
@@ -86,6 +88,10 @@ class _HomeTabState extends State<HomeTab> {
               ? 'Режим Обход DPI (Desync)'
               : (controller.selectedProfile?.name ?? ''),
         ),
+        if (tunnel.isPausedByWifi) ...[
+          const SizedBox(height: Space.md),
+          _HomeWifiPauseBanner(controller: controller),
+        ],
         if (tunnel.error.isNotEmpty) ...[
           const SizedBox(height: Space.md),
           HairlineCard(
@@ -503,6 +509,7 @@ class _PowerDial extends StatefulWidget {
   const _PowerDial({
     required this.status,
     required this.onPressed,
+    this.pausedWifiSsid = '',
     this.downSpeed = 0,
     this.upSpeed = 0,
     this.pingMs,
@@ -510,6 +517,7 @@ class _PowerDial extends StatefulWidget {
 
   final VpnStatus status;
   final VoidCallback? onPressed;
+  final String pausedWifiSsid;
   final int downSpeed;
   final int upSpeed;
   final int? pingMs;
@@ -609,9 +617,15 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
         secondary = tokens.warning;
         label = 'Сбой';
       case VpnStatus.disconnected:
-        primary = tokens.muted;
-        secondary = tokens.line;
-        label = 'Запустить';
+        if (widget.pausedWifiSsid.isNotEmpty) {
+          primary = tokens.accent;
+          secondary = tokens.line;
+          label = 'Авто-пауза Wi-Fi';
+        } else {
+          primary = tokens.muted;
+          secondary = tokens.line;
+          label = 'Запустить';
+        }
     }
 
     final liveSpeed = widget.status == VpnStatus.connected
@@ -1068,6 +1082,29 @@ class _StatusLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
 
+    if (tunnel.isPausedByWifi) {
+      return Column(
+        children: [
+          Text(
+            'ДОМАШНИЙ WI-FI',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.0,
+              color: tokens.accent,
+            ),
+          ),
+          const SizedBox(height: Space.xs),
+          Text(
+            '${tunnel.pausedWifiSsid} · маршрутизация на паузе',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: tokens.muted,
+                ),
+          ),
+        ],
+      );
+    }
+
     final duration = tunnel.connectedFor;
     final elapsed = duration == Duration.zero
         ? '—'
@@ -1097,6 +1134,88 @@ class _StatusLine extends StatelessWidget {
           style: Theme.of(context).textTheme.bodyMedium,
         ),
       ],
+    );
+  }
+}
+
+/// Баннер авто-паузы в домашней Wi-Fi сети с кнопками принудительного запуска и отключения.
+class _HomeWifiPauseBanner extends StatelessWidget {
+  const _HomeWifiPauseBanner({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final ssid = controller.tunnel.pausedWifiSsid;
+
+    return HairlineCard(
+      padding: const EdgeInsets.all(Space.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.home_rounded, size: 18, color: tokens.accent),
+              const SizedBox(width: Space.sm),
+              Expanded(
+                child: Text(
+                  'Домашний интернет · $ssid',
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: tokens.ink,
+                  ),
+                ),
+              ),
+              Pill(label: 'НА ПАУЗЕ', color: tokens.accent),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Маршрутизация отключена, пока телефон подключён к этой Wi-Fi сети. Как только вы отключитесь от неё, туннель поднимется автоматически.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.35,
+              color: tokens.muted,
+            ),
+          ),
+          const SizedBox(height: Space.sm),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 34),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: controller.forceResumeFromHomeWifi,
+                  icon: const Icon(Icons.bolt_rounded, size: 16),
+                  label: const Text('Включить сейчас'),
+                ),
+              ),
+              const SizedBox(width: Space.sm),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, 34),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: controller.toggleTunnel,
+                icon: const Icon(Icons.stop_rounded, size: 16),
+                label: const Text('Выключить'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

@@ -72,6 +72,8 @@ class AppSettings {
     this.detourProfileId = '',
     this.perNetworkDesync = false,
     this.proxyTlsFragment = false,
+    this.homeWifiMode = false,
+    this.trustedWifiSsids = const [],
   });
 
   final List<Profile> profiles;
@@ -140,6 +142,13 @@ class AppSettings {
   /// Дробить TLS ClientHello до прокси-сервера (record_fragment) против глушилок LTE.
   final bool proxyTlsFragment;
 
+  /// Режим «Домашний интернет»: автоматически ставить маршрутизацию на паузу
+  /// при подключении к доверенным Wi-Fi сетям и включать при выходе из них.
+  final bool homeWifiMode;
+
+  /// Список SSID доверенных Wi-Fi сетей (дом, офис, работа и т.д.).
+  final List<String> trustedWifiSsids;
+
   Profile? get detourProfile {
     if (detourProfileId.isEmpty) return null;
     for (final p in profiles) {
@@ -203,6 +212,8 @@ class AppSettings {
     String? detourProfileId,
     bool? perNetworkDesync,
     bool? proxyTlsFragment,
+    bool? homeWifiMode,
+    List<String>? trustedWifiSsids,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -230,6 +241,8 @@ class AppSettings {
       detourProfileId: detourProfileId ?? this.detourProfileId,
       perNetworkDesync: perNetworkDesync ?? this.perNetworkDesync,
       proxyTlsFragment: proxyTlsFragment ?? this.proxyTlsFragment,
+      homeWifiMode: homeWifiMode ?? this.homeWifiMode,
+      trustedWifiSsids: trustedWifiSsids ?? this.trustedWifiSsids,
     );
   }
 
@@ -260,6 +273,8 @@ class AppSettings {
         'detourProfileId': detourProfileId,
         'perNetworkDesync': perNetworkDesync,
         'proxyTlsFragment': proxyTlsFragment,
+        'homeWifiMode': homeWifiMode,
+        'trustedWifiSsids': trustedWifiSsids,
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -317,6 +332,11 @@ class AppSettings {
       detourProfileId: (json['detourProfileId'] as String?) ?? '',
       perNetworkDesync: json['perNetworkDesync'] == true,
       proxyTlsFragment: json['proxyTlsFragment'] == true,
+      homeWifiMode: json['homeWifiMode'] == true,
+      trustedWifiSsids: ((json['trustedWifiSsids'] as List?) ?? const [])
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList(growable: false),
     );
   }
 }

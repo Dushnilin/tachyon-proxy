@@ -43,6 +43,10 @@ object TunnelStateHolder {
     @Volatile
     var serverName: String = ""
 
+    /** Имя домашней Wi-Fi сети, в которой маршрутизация сейчас поставлена на авто-паузу. */
+    @Volatile
+    var pausedByWifiSsid: String = ""
+
     /** Подписка на изменения состояния. */
     fun addListener(listener: Listener) {
         listeners.add(listener)
@@ -74,9 +78,10 @@ object TunnelStateHolder {
      * @param newState новое состояние
      * @param newError текст ошибки; `null` — ошибки нет
      */
-    fun update(newState: State, newError: String?) {
+    fun update(newState: State, newError: String?, pausedWifi: String = pausedByWifiSsid) {
         state = newState
         error = newError
+        pausedByWifiSsid = pausedWifi
         listeners.forEach { listener ->
             runCatching { listener.onStateChanged(newState, newError) }
         }

@@ -103,8 +103,15 @@ class AppController extends ChangeNotifier {
   int _consecutiveWatchdogFails = 0;
   String _lastNetType = '';
 
+  /// Состояние подключённого Wi-Fi и режима «Домашний интернет».
+  String _currentWifiSsid = '';
+  bool _isWifiConnected = false;
+  bool _hasWifiPermission = false;
+  bool _wifiLocationEnabled = true;
+  List<String> _nearbyWifiSsids = const [];
+
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.8';
+  static const String appVersion = '0.0.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -154,6 +161,16 @@ class AppController extends ChangeNotifier {
   String get desyncTestStatus => _desyncTestStatus;
   List<DesyncScanEntry> get desyncScanResults => _desyncScanResults;
   String get activeNetworkType => _lastNetType;
+  String get currentWifiSsid => _currentWifiSsid;
+  bool get isWifiConnected => _isWifiConnected;
+  bool get hasWifiPermission => _hasWifiPermission;
+  bool get wifiLocationEnabled => _wifiLocationEnabled;
+  List<String> get nearbyWifiSsids => _nearbyWifiSsids;
+  bool get isCurrentWifiTrusted =>
+      _currentWifiSsid.isNotEmpty &&
+      _settings.trustedWifiSsids.any(
+        (s) => s.trim().toLowerCase() == _currentWifiSsid.trim().toLowerCase(),
+      );
   bool get checkingUpdates => _checkingUpdates;
   bool get updatingEngine => _updatingEngine;
   bool get updatingApp => _updatingApp;
@@ -300,6 +317,7 @@ class AppController extends ChangeNotifier {
 
     // Фоновое обновление: подписки без серверов, список устарел или резолверы ещё не проверены.
     unawaited(_refreshStale());
+    unawaited(refreshWifiInfo());
   }
 
   Future<void> _handleIncomingDeepLink(String raw) async {
@@ -1254,8 +1272,11 @@ class AppController extends ChangeNotifier {
   Future<void> toggleTunnel() async {
     if (_tunnel.status.isBusy) return;
 
-    if (_tunnel.status.isActive) {
-      _tunnel = _tunnel.copyWith(status: VpnStatus.disconnecting);
+    if (_tunnel.status.isActive || _tunnel.isPausedByWifi) {
+      _tunnel = _tunnel.copyWith(
+        status: VpnStatus.disconnecting,
+        pausedWifiSsid: '',
+      );
       notifyListeners();
       await bridge.stop();
       _upSpeed = 0;
@@ -1270,6 +1291,7 @@ class AppController extends ChangeNotifier {
       _latencyHistory.clear();
       _tunnel = _tunnel.copyWith(
         status: VpnStatus.disconnected,
+        pausedWifiSsid: '',
         clearStartedAt: true,
       );
       notifyListeners();
@@ -1471,6 +1493,11 @@ class AppController extends ChangeNotifier {
       unawaited(_checkNetworkDesyncProfile());
     }
 
+    // Опрос текущего Wi-Fi и состояния «Домашний интернет»
+    if (_pollTickCount % 2 == 0) {
+      unawaited(refreshWifiInfo());
+    }
+
     // Smart Failover (Watchdog): раз в 30 сек проверяет живой отклик туннеля
     if (_tunnel.status.isActive &&
         _settings.smartFailover &&
@@ -1598,17 +1625,50 @@ class AppController extends ChangeNotifier {
   }
 
   /// Проверяет реальный сквозной HTTP 204 пинг через текущий маршрут/туннель.
+  /// Сначала прогревает поток через локальный прокси, затем замеряет чистый 1-RTT отклик.
   Future<int> testUrlPing() async {
     if (_testingUrlPing) return _urlTestPing ?? -1;
     _testingUrlPing = true;
     notifyListeners();
     var result = -1;
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 2500)
+      ..idleTimeout = const Duration(seconds: 5)
+      ..badCertificateCallback = (_, _, _) => true;
+    if (_tunnel.status.isActive) {
+      client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+    }
     try {
-      result = await _probeHttpsViaCore(
-        'http://cp.cloudflare.com/generate_204',
-        timeout: const Duration(seconds: 5),
-      );
+      final uri = Uri.parse('http://cp.cloudflare.com/generate_204');
+      // 1. Прогрев туннельного соединения (установка потока до выходного узла)
+      final warmSw = Stopwatch()..start();
+      final warmReq = await client.getUrl(uri).timeout(const Duration(milliseconds: 2500));
+      warmReq.headers.set('Cache-Control', 'no-cache');
+      final warmResp = await warmReq.close().timeout(const Duration(milliseconds: 2500));
+      await warmResp.drain<void>().timeout(const Duration(milliseconds: 1500));
+      warmSw.stop();
+
+      if (warmResp.statusCode > 0 && warmResp.statusCode < 500) {
+        result = warmSw.elapsedMilliseconds;
+        // 2. Замер чистого RTT по уже открытому keep-alive потоку туннеля
+        try {
+          final rttSw = Stopwatch()..start();
+          final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 1800));
+          req.headers.set('Cache-Control', 'no-cache');
+          final resp = await req.close().timeout(const Duration(milliseconds: 1800));
+          await resp.drain<void>().timeout(const Duration(milliseconds: 1000));
+          rttSw.stop();
+          if (resp.statusCode > 0 && resp.statusCode < 500 && rttSw.elapsedMilliseconds > 0) {
+            result = rttSw.elapsedMilliseconds;
+          }
+        } catch (_) {
+          // Если повторный запрос не прошёл, оставляем результат первого
+        }
+      }
+    } catch (_) {
+      result = -1;
     } finally {
+      client.close(force: true);
       _urlTestPing = result;
       if (result > 0) {
         if (_latencyHistory.length >= 24) _latencyHistory.removeAt(0);
@@ -1641,21 +1701,15 @@ class AppController extends ChangeNotifier {
 
       Future<Map<String, dynamic>?> fetchJson(String url) async {
         try {
-          final sw = Stopwatch()..start();
           final req = await client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 4));
           req.headers.set('Accept', 'application/json');
-          req.headers.set('User-Agent', 'Tachyon/0.0.4');
+          req.headers.set('User-Agent', 'Tachyon/0.0.9');
           final resp = await req.close().timeout(const Duration(seconds: 4));
           if (resp.statusCode != 200) {
             await resp.drain<void>();
             return null;
           }
           final body = await resp.transform(utf8.decoder).join().timeout(const Duration(seconds: 4));
-          sw.stop();
-          if (_latencyHistory.isEmpty && sw.elapsedMilliseconds > 0) {
-            _latencyHistory.add(sw.elapsedMilliseconds);
-            _urlTestPing ??= sw.elapsedMilliseconds;
-          }
           final decoded = jsonDecode(body);
           return decoded is Map<String, dynamic> ? decoded : null;
         } catch (_) {
@@ -2224,6 +2278,98 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Обновляет данные о текущем Wi-Fi SSID, разрешениях и списке сетей вокруг.
+  Future<void> refreshWifiInfo({bool requestPermission = false}) async {
+    if (requestPermission) {
+      await bridge.requestWifiPermission();
+    }
+    final info = await bridge.wifiInfo();
+    final changed = _currentWifiSsid != info.ssid ||
+        _isWifiConnected != info.isWifi ||
+        _hasWifiPermission != info.hasPermission ||
+        _wifiLocationEnabled != info.locationEnabled ||
+        _nearbyWifiSsids.length != info.nearbySsids.length ||
+        _tunnel.pausedWifiSsid != info.pausedWifiSsid;
+    _currentWifiSsid = info.ssid;
+    _isWifiConnected = info.isWifi;
+    _hasWifiPermission = info.hasPermission;
+    _wifiLocationEnabled = info.locationEnabled;
+    _nearbyWifiSsids = info.nearbySsids;
+    if (_tunnel.pausedWifiSsid != info.pausedWifiSsid) {
+      _tunnel = _tunnel.copyWith(pausedWifiSsid: info.pausedWifiSsid);
+    }
+    if (changed || requestPermission) {
+      notifyListeners();
+    }
+  }
+
+  /// Открывает системные настройки геолокации (требуется Android для чтения SSID).
+  Future<void> openLocationSettings() => bridge.openLocationSettings();
+
+  /// Включает или выключает режим «Домашний интернет» (авто-пауза в доверенных Wi-Fi сетях).
+  Future<void> setHomeWifiMode(bool enabled) async {
+    if (enabled && !_hasWifiPermission) {
+      await bridge.requestWifiPermission();
+    }
+    await _update(_settings.copyWith(homeWifiMode: enabled));
+    await refreshWifiInfo();
+    await bridge.recheckHomeWifi();
+    if (enabled &&
+        !_tunnel.status.isActive &&
+        !_tunnel.isPausedByWifi &&
+        isCurrentWifiTrusted &&
+        canConnect) {
+      await toggleTunnel();
+    }
+  }
+
+  /// Добавляет Wi-Fi сеть (SSID) в список доверенных домашних/офисных сетей.
+  Future<void> addTrustedWifiSsid(String rawSsid) async {
+    var clean = rawSsid.trim();
+    if (clean.length >= 2 && clean.startsWith('"') && clean.endsWith('"')) {
+      clean = clean.substring(1, clean.length - 1).trim();
+    }
+    if (clean.isEmpty) return;
+    final exists = _settings.trustedWifiSsids.any(
+      (s) => s.trim().toLowerCase() == clean.toLowerCase(),
+    );
+    final next = exists
+        ? _settings.trustedWifiSsids
+        : [..._settings.trustedWifiSsids, clean];
+    await _update(
+      _settings.copyWith(
+        homeWifiMode: true,
+        trustedWifiSsids: next,
+      ),
+    );
+    await refreshWifiInfo();
+    await bridge.recheckHomeWifi();
+    if (!_tunnel.status.isActive &&
+        !_tunnel.isPausedByWifi &&
+        isCurrentWifiTrusted &&
+        canConnect) {
+      await toggleTunnel();
+    }
+  }
+
+  /// Удаляет Wi-Fi сеть (SSID) из списка доверенных сетей.
+  Future<void> removeTrustedWifiSsid(String ssid) async {
+    final target = ssid.trim().toLowerCase();
+    final next = _settings.trustedWifiSsids
+        .where((s) => s.trim().toLowerCase() != target)
+        .toList(growable: false);
+    await _update(_settings.copyWith(trustedWifiSsids: next));
+    await bridge.recheckHomeWifi();
+    await refreshWifiInfo();
+  }
+
+  /// Принудительно включает маршрутизацию, несмотря на активный домашний Wi-Fi.
+  Future<void> forceResumeFromHomeWifi() async {
+    await bridge.forceResumeFromWifi();
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    await refreshWifiInfo();
+  }
+
   /// Экспортирует все настройки приложения в форматированный JSON.
   String exportSettingsJson() =>
       const JsonEncoder.withIndent('  ').convert(_settings.toJson());
@@ -2274,23 +2420,23 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Проверяет доступность и задержку сервера профиля с учётом TLS/Reality-рукопожатия.
-  /// Возвращает мс или -1 при ошибке/блокировке ТСПУ.
+  /// Проверяет доступность и чистую сетевую задержку (TCP RTT) до сервера профиля.
+  /// DNS-резолвинг выполняется до запуска секундомера, чтобы время DNS-запроса
+  /// и пересылки REALITY-хендшейка на внешний SNI не завышало пинг.
   Future<int> pingProfile(String id) async {
     final profile = _settings.profiles.where((p) => p.id == id).firstOrNull;
     if (profile == null || profile.server.isEmpty) return -1;
     _pingingIds.add(id);
     notifyListeners();
-    final sw = Stopwatch()..start();
     var result = -1;
     try {
       // Если профиль использует цепочку прокси (detour), проверяем первый входной узел цепочки
-      var targetHost = profile.server;
+      var targetHost = profile.server.trim();
       var targetPort = profile.port;
       final chain = profile.extra['chain_outbounds'];
       if (chain is List && chain.isNotEmpty && chain.last is Map) {
         final entryHop = chain.last as Map;
-        final h = (entryHop['server'] ?? '').toString();
+        final h = (entryHop['server'] ?? '').toString().trim();
         final p = (entryHop['server_port'] as num?)?.toInt() ?? 0;
         if (h.isNotEmpty && p > 0) {
           targetHost = h;
@@ -2298,50 +2444,28 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      final socket = await Socket.connect(
-        targetHost,
-        targetPort,
-        timeout: const Duration(milliseconds: 2800),
-      );
-      final tcpRtt = sw.elapsedMilliseconds;
-
-      // Для TCP+TLS/Reality узлов без транзитного SOCKS проверяем реальный TLS ServerHello,
-      // чтобы отсеивать заблокированные ТСПУ IP, где TCP SYN проходит, но TLS глушится (blackhole).
-      final isDirectTlsTcp = (chain is! List || chain.isEmpty) &&
-          profile.hasTls &&
-          !const {'hysteria2', 'hysteria', 'tuic', 'wireguard', 'masque'}.contains(profile.type);
-      if (isDirectTlsTcp) {
-        try {
-          final sni = profile.sni.isNotEmpty ? profile.sni : targetHost;
-          final secure = await SecureSocket.secure(
-            socket,
-            host: sni,
-            onBadCertificate: (_) => true,
-          ).timeout(const Duration(milliseconds: 2200));
-          sw.stop();
-          await secure.close();
-          result = sw.elapsedMilliseconds;
-        } on HandshakeException {
-          // Для REALITY без shortId сервер отвечает подменённым сертификатом или TLS alert —
-          // это доказывает, что пакет дошёл до сервера и ТСПУ не дропнул ClientHello!
-          sw.stop();
-          result = sw.elapsedMilliseconds;
-        } on TlsException {
-          sw.stop();
-          result = sw.elapsedMilliseconds;
-        } catch (_) {
-          // Таймаут или сброс на ClientHello — узел заблокирован ТСПУ
-          result = -1;
-        } finally {
-          try {
-            socket.destroy();
-          } catch (_) {}
-        }
+      // Резолвим IP заранее вне замера RTT
+      Object connectTarget = targetHost;
+      final parsedIp = InternetAddress.tryParse(targetHost);
+      if (parsedIp != null) {
+        connectTarget = parsedIp;
       } else {
-        sw.stop();
-        await socket.close();
-        result = tcpRtt;
+        final resolved = await InternetAddress.lookup(targetHost)
+            .timeout(const Duration(milliseconds: 2000));
+        if (resolved.isNotEmpty) {
+          connectTarget = resolved.first;
+        }
       }
+
+      final sw = Stopwatch()..start();
+      final socket = await Socket.connect(
+        connectTarget,
+        targetPort,
+        timeout: const Duration(milliseconds: 2200),
+      );
+      sw.stop();
+      result = sw.elapsedMilliseconds;
+      socket.destroy();
     } catch (_) {
       result = -1;
     } finally {
@@ -2550,11 +2674,14 @@ class AppController extends ChangeNotifier {
       }
 
       // 2. Проверяем version.json или последний релиз Dushnilin/tachyon-proxy
+      final ts = DateTime.now().millisecondsSinceEpoch;
       final verBody = await _fetchTextWithFallback(
-            'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json',
+            'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json?t=$ts',
+            headers: const {'Cache-Control': 'no-cache'},
           ) ??
           await _fetchTextWithFallback(
-            'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/version.json',
+            'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/version.json?t=$ts',
+            headers: const {'Cache-Control': 'no-cache'},
           );
       if (verBody != null) {
         final json = jsonDecode(verBody);
@@ -2637,13 +2764,16 @@ class AppController extends ChangeNotifier {
 
       IOSink? sink;
       try {
-        var currUrl = url;
+        final ts = DateTime.now().millisecondsSinceEpoch;
+        var currUrl = url.contains('?') ? '$url&t=$ts' : '$url?t=$ts';
         HttpClientResponse? resp;
         for (var i = 0; i < 8; i++) {
           final req = await client
               .getUrl(Uri.parse(currUrl))
               .timeout(const Duration(seconds: 15));
           req.headers.set('User-Agent', 'TachyonProxy/$appVersion');
+          req.headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+          req.headers.set('Pragma', 'no-cache');
           req.followRedirects = false;
           resp = await req.close().timeout(const Duration(seconds: 20));
           if (resp.statusCode >= 300 && resp.statusCode < 400) {
@@ -2853,6 +2983,11 @@ class AppController extends ChangeNotifier {
 
       const apkName = 'tachyon-update.apk';
       final apkFile = File('${updateDir.path}/$apkName');
+      if (apkFile.existsSync()) {
+        try {
+          apkFile.deleteSync();
+        } catch (_) {}
+      }
       final candidateApkUrls = <String>[
         'https://github.com/Dushnilin/tachyon-proxy/releases/latest/download/tachyon-proxy-$abiSuffix.apk',
         'https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/tachyon-proxy-$abiSuffix.apk',

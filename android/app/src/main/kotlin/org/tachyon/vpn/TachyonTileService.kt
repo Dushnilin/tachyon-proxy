@@ -43,6 +43,13 @@ class TachyonTileService : TileService() {
             }
             TunnelStateHolder.State.Stopped,
             TunnelStateHolder.State.Failed -> {
+                if (TunnelStateHolder.pausedByWifiSsid.isNotEmpty()) {
+                    val resumeIntent = Intent(this, TachyonVpnService::class.java).setAction(
+                        TachyonVpnService.ACTION_FORCE_RESUME,
+                    )
+                    startService(resumeIntent)
+                    return
+                }
                 val sessionFile = File(filesDir, TachyonVpnService.LAST_SESSION_FILE)
                 if (VpnService.prepare(this) == null && sessionFile.exists()) {
                     val startIntent = Intent(this, TachyonVpnService::class.java).setAction(
@@ -93,7 +100,12 @@ class TachyonTileService : TileService() {
                 tile.state = Tile.STATE_INACTIVE
                 tile.label = "Tachyon"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Отключено"
+                    val pausedWifi = TunnelStateHolder.pausedByWifiSsid
+                    tile.subtitle = if (pausedWifi.isNotEmpty()) {
+                        "🏠 Пауза ($pausedWifi)"
+                    } else {
+                        "Отключено"
+                    }
                 }
             }
         }

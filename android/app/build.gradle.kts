@@ -30,6 +30,17 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val ciKeystore = file("tachyon.keystore")
+            val homeKeystore = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storeFile = if (ciKeystore.exists()) ciKeystore else homeKeystore
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             // Подпись debug-ключом: сборка ставится на устройство без

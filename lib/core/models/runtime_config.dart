@@ -2373,7 +2373,7 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
   if (out.containsKey('session_table') && !out.containsKey('session_length')) {
     out['session_length'] = '8-14';
   } else if (out.containsKey('session_length') && !out.containsKey('session_table')) {
-    out['session_table'] = 'Base62';
+    out['session_table'] = 'hex';
   }
 
   return out;

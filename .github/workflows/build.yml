@@ -3,7 +3,9 @@ name: Build & Auto-Sync Android APK & iOS IPA
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    paths-ignore:
+      - 'README.md'
+      - 'assets/readme/**'
   pull_request:
     branches: [main]
   schedule:

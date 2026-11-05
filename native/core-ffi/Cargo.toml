@@ -3,7 +3,7 @@ name = "core-ffi"
 # Версия совпадает с версией ядра tachyon-core, который собирается рядом:
 # `version()` в JNI отдаёт CARGO_PKG_VERSION, и приложение сверяет её с
 # версией движка, чтобы поймать рассинхрон .so и ядра.
-version = "0.3.1"
+version = "0.3.9"
 edition = "2024"
 rust-version = "1.89"
 license = "LicenseRef-Proprietary"

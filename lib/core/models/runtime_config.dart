@@ -1346,6 +1346,265 @@ class DesyncSettings {
       );
 }
 
+/// Описание режима нативного балансировщика `tachyon-core` 0.3.9.
+class BalancerModeOption {
+  const BalancerModeOption({
+    required this.id,
+    required this.title,
+    required this.shortLabel,
+    required this.subtitle,
+  });
+
+  final String id;
+  final String title;
+  final String shortLabel;
+  final String subtitle;
+
+  String get shortBadge => shortLabel.toUpperCase();
+}
+
+/// Настройки нативного lock-free балансировщика `urltest` в `tachyon-core` 0.3.9+.
+class BalancerSettings {
+  const BalancerSettings({
+    this.mode = 'stability',
+    this.pool = 4,
+    this.poolTolerance = 80,
+    this.stickyHash = const ['domain', 'dest_ip'],
+    this.quotaMib = 0,
+    this.url = 'https://www.gstatic.com/generate_204',
+    this.interval = '3m',
+    this.tolerance = 50,
+  });
+
+  /// Алгоритм выбора узла:
+  /// `stability`, `least_test`, `sticky`, `least_load`, `weighted`,
+  /// `passive`, `priority`, `hedged`, `throughput`, `quota`, `round_robin`, `failover`.
+  final String mode;
+
+  /// Размер пула лучших живых кандидатов (Top-N).
+  final int pool;
+
+  /// Допустимое отклонение задержки (мс) от лучшего узла для включения в Top-N пул.
+  final int poolTolerance;
+
+  /// Поля метаданных для консистентного хэширования в режиме `sticky`:
+  /// `domain`, `dest_ip`, `dest_port`, `source_ip`, `process`, `none`.
+  final List<String> stickyHash;
+
+  /// Лимит переданных данных на узел в МБ для режима `quota` (0 — без лимита).
+  final int quotaMib;
+
+  /// URL проверочного запроса для активного измерения задержки.
+  final String url;
+
+  /// Интервал фоновых проб (`1m`, `3m`, `5m` и т.д.).
+  final String interval;
+
+  /// Гистерезис переключения в мс для режима `least_test`.
+  final int tolerance;
+
+  static const List<BalancerModeOption> modes = [
+    BalancerModeOption(
+      id: 'stability',
+      title: 'Стабильность (EWMA + Jitter)',
+      shortLabel: 'Stability',
+      subtitle: 'Сглаженный пинг с учётом джиттера и автокарантином нестабильных узлов',
+    ),
+    BalancerModeOption(
+      id: 'least_test',
+      title: 'Минимальный пинг (Least Test)',
+      shortLabel: 'Least RTT',
+      subtitle: 'Переключение на сервер с наименьшей задержкой отклика',
+    ),
+    BalancerModeOption(
+      id: 'sticky',
+      title: 'Липкие сессии (Sticky Hash)',
+      shortLabel: 'Sticky',
+      subtitle: 'Привязка доменов и IP к одному узлу из пула без смены выходного адреса',
+    ),
+    BalancerModeOption(
+      id: 'least_load',
+      title: 'Наименьшая нагрузка (Least Load)',
+      shortLabel: 'Least Load',
+      subtitle: 'Выбор менее загруженного узла с учётом активных соединений (Power of 2)',
+    ),
+    BalancerModeOption(
+      id: 'weighted',
+      title: 'Взвешенный (Smooth WRR)',
+      shortLabel: 'Weighted',
+      subtitle: 'Распределение потоков пропорционально скорости отклика серверов',
+    ),
+    BalancerModeOption(
+      id: 'hedged',
+      title: 'Параллельный старт (Hedged)',
+      shortLabel: 'Hedged',
+      subtitle: 'Резервная попытка через второй узел при задержке рукопожатия',
+    ),
+    BalancerModeOption(
+      id: 'throughput',
+      title: 'Пиковая скорость (Throughput)',
+      shortLabel: 'Throughput',
+      subtitle: 'Приоритет узлу с максимальной измеренной пропускной способностью',
+    ),
+    BalancerModeOption(
+      id: 'passive',
+      title: 'Пассивный (Zero Probes)',
+      shortLabel: 'Passive',
+      subtitle: 'Без фоновых HTTP-проб, переключение только при ошибке соединения',
+    ),
+    BalancerModeOption(
+      id: 'priority',
+      title: 'Приоритетный (Priority Tier)',
+      shortLabel: 'Priority',
+      subtitle: 'Строгий порядок по списку с автовозвратом на основной сервер',
+    ),
+    BalancerModeOption(
+      id: 'quota',
+      title: 'Квота трафика (Quota)',
+      shortLabel: 'Quota',
+      subtitle: 'Автоматическая ротация серверов по лимиту переданных мегабайт',
+    ),
+    BalancerModeOption(
+      id: 'round_robin',
+      title: 'По кругу (Round Robin)',
+      shortLabel: 'Round Robin',
+      subtitle: 'Равномерное чередование быстрых серверов из Top-N пула',
+    ),
+    BalancerModeOption(
+      id: 'failover',
+      title: 'Отказоустойчивый (Failover)',
+      shortLabel: 'Failover',
+      subtitle: 'Удержание текущего рабочего узла до полного отказа',
+    ),
+  ];
+
+  static const Set<String> _modesWithBalancerBlock = {
+    'round_robin',
+    'sticky',
+    'stability',
+    'least_load',
+    'weighted',
+    'passive',
+    'priority',
+    'hedged',
+    'throughput',
+    'quota',
+  };
+
+  static const Set<String> _validStickyFields = {
+    'none',
+    'source_ip',
+    'domain',
+    'dest_ip',
+    'dest_port',
+    'process',
+  };
+
+  static bool supportsBalancerBlock(String mode) =>
+      _modesWithBalancerBlock.contains(mode.trim().toLowerCase());
+
+  static BalancerModeOption optionFor(String mode) {
+    final normalized = mode.trim().toLowerCase();
+    for (final opt in modes) {
+      if (opt.id == normalized) return opt;
+    }
+    return modes.first;
+  }
+
+  BalancerModeOption get modeOption => optionFor(mode);
+
+  Map<String, dynamic> toUrltestOutbound({
+    required String tag,
+    required List<String> outbounds,
+  }) {
+    final cleanMode = mode.trim().toLowerCase().isEmpty
+        ? 'least_test'
+        : mode.trim().toLowerCase();
+    final safePool = pool.clamp(1, 32);
+    final safePoolTol = poolTolerance.clamp(1, 5000);
+    final safeTol = tolerance.clamp(1, 5000);
+    final cleanSticky = stickyHash
+        .map((e) => e.trim().toLowerCase())
+        .where(_validStickyFields.contains)
+        .toList(growable: false);
+
+    return {
+      'type': 'urltest',
+      'tag': tag,
+      'outbounds': outbounds,
+      'url': url.trim().isEmpty ? 'https://www.gstatic.com/generate_204' : url.trim(),
+      'interval': interval.trim().isEmpty ? '3m' : interval.trim(),
+      'tolerance': safeTol,
+      'mode': cleanMode,
+      if (supportsBalancerBlock(cleanMode))
+        'balancer': {
+          'pool': safePool,
+          'pool_tolerance': safePoolTol,
+          if (cleanSticky.isNotEmpty) 'sticky_hash': cleanSticky,
+          if (quotaMib > 0) 'quota_mib': quotaMib,
+        },
+    };
+  }
+
+  BalancerSettings copyWith({
+    String? mode,
+    int? pool,
+    int? poolTolerance,
+    List<String>? stickyHash,
+    int? quotaMib,
+    String? url,
+    String? interval,
+    int? tolerance,
+  }) {
+    return BalancerSettings(
+      mode: mode ?? this.mode,
+      pool: pool ?? this.pool,
+      poolTolerance: poolTolerance ?? this.poolTolerance,
+      stickyHash: stickyHash ?? this.stickyHash,
+      quotaMib: quotaMib ?? this.quotaMib,
+      url: url ?? this.url,
+      interval: interval ?? this.interval,
+      tolerance: tolerance ?? this.tolerance,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'mode': mode,
+        'pool': pool,
+        'poolTolerance': poolTolerance,
+        'stickyHash': stickyHash,
+        'quotaMib': quotaMib,
+        'url': url,
+        'interval': interval,
+        'tolerance': tolerance,
+      };
+
+  static BalancerSettings fromJson(Map<String, dynamic> json) {
+    final rawSticky = (json['stickyHash'] as List?)
+        ?.map((e) => e.toString().trim().toLowerCase())
+        .where(_validStickyFields.contains)
+        .toList(growable: false);
+    final rawMode = (json['mode'] as String?)?.trim().toLowerCase() ?? 'stability';
+    final knownMode = modes.any((m) => m.id == rawMode) ? rawMode : 'stability';
+    return BalancerSettings(
+      mode: knownMode,
+      pool: ((json['pool'] as num?)?.toInt() ?? 4).clamp(1, 32),
+      poolTolerance: ((json['poolTolerance'] as num?)?.toInt() ?? 80).clamp(1, 5000),
+      stickyHash: (rawSticky != null && rawSticky.isNotEmpty)
+          ? rawSticky
+          : const ['domain', 'dest_ip'],
+      quotaMib: ((json['quotaMib'] as num?)?.toInt() ?? 0).clamp(0, 1024 * 1024),
+      url: (json['url'] as String?)?.trim().isNotEmpty == true
+          ? (json['url'] as String).trim()
+          : 'https://www.gstatic.com/generate_204',
+      interval: (json['interval'] as String?)?.trim().isNotEmpty == true
+          ? (json['interval'] as String).trim()
+          : '3m',
+      tolerance: ((json['tolerance'] as num?)?.toInt() ?? 50).clamp(1, 5000),
+    );
+  }
+}
+
 /// Подписка: URL, который ядро качает и обновляет само.
 ///
 /// Заголовки железа (`X-HWID` и компания) ядро добавляет само - панели,
@@ -1461,6 +1720,7 @@ class RuntimeConfig {
     this.detourProfile,
     this.extraProfiles = const [],
     this.proxyTlsFragment = false,
+    this.balancer = const BalancerSettings(),
   });
 
   final Profile profile;
@@ -1472,6 +1732,9 @@ class RuntimeConfig {
 
   /// Пакетная десинхронизация: настройки нативного desync-аутбаунда.
   final DesyncSettings desync;
+
+  /// Настройки нативного балансировщика `urltest` в `tachyon-core` 0.3.9+.
+  final BalancerSettings balancer;
 
   /// Подписки: ядро качает их само и строит urltest-группы.
   final List<SubscriptionEntry> subscriptions;
@@ -1500,7 +1763,7 @@ class RuntimeConfig {
   /// Все доступные профили для привязки конкретных сервисов (`profile:<id>`).
   final List<Profile> extraProfiles;
 
-  /// Включать ли `tls.record_fragment: true` на исходящих прокси-соединениях (против глушилок LTE).
+  /// Включать ли `tls.record_fragment: true` на исходящих прокси-соединениях (для мобильных сетей с фильтрацией пакетов).
   final bool proxyTlsFragment;
 
   /// Есть ли хоть один источник серверов или активный режим DPI.
@@ -1521,6 +1784,21 @@ class RuntimeConfig {
   /// Тег прямого резолвера — для доменов, которые идут без туннеля.
   static const directTag = 'dns-direct';
 
+  /// Возвращает упорядоченный список профилей-кандидатов для активного балансировщика (`auto-srv-0`, `auto-srv-1`, ...).
+  static List<Profile> resolveAutoCandidates(Profile profile, List<Profile> extraProfiles) {
+    if (profile.type != 'urltest' && !profile.id.startsWith('auto:')) {
+      return const <Profile>[];
+    }
+    return extraProfiles
+        .where((p) =>
+            p.server.isNotEmpty &&
+            p.type != 'urltest' &&
+            p.type != 'direct' &&
+            (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
+        .take(50)
+        .toList(growable: false);
+  }
+
   /// Собирает конфигурацию sing-box, которую принимает ядро.
   ///
   /// Платформенные поля (`fd`, `protect_path`, путь лога) добавляет нативная
@@ -1530,15 +1808,7 @@ class RuntimeConfig {
     final isAutoGroup = routingMode != RoutingMode.desync &&
         (profile.type == 'urltest' || profile.id.startsWith('auto:'));
     final autoCandidates = isAutoGroup
-        ? extraProfiles
-            .where((p) =>
-                p.server.isNotEmpty &&
-                p.type != 'wireguard' &&
-                p.type != 'urltest' &&
-                p.type != 'direct' &&
-                (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
-            .take(50)
-            .toList(growable: false)
+        ? resolveAutoCandidates(profile, extraProfiles)
         : const <Profile>[];
 
     final hasStatic = routingMode != RoutingMode.desync &&
@@ -1852,11 +2122,18 @@ class RuntimeConfig {
 
     final autoMemberTags = <String>[];
     final autoMemberOutbounds = <Map<String, dynamic>>[];
+    final autoMemberEndpoints = <Map<String, dynamic>>[];
     if (autoCandidates.isNotEmpty) {
       for (var i = 0; i < autoCandidates.length; i++) {
         final cand = autoCandidates[i];
         final memberTag = 'auto-srv-$i';
+        if (cand.type == 'wireguard') {
+          autoMemberEndpoints.add(cand.toWireGuardEndpoint(tag: memberTag));
+          autoMemberTags.add(memberTag);
+          continue;
+        }
         final node = cand.toOutbound(tag: memberTag);
+        final nodeInsertIdx = autoMemberOutbounds.length;
         if (cand.extra['chain_outbounds'] is List && (cand.extra['chain_outbounds'] as List).isNotEmpty) {
           final rawHops = cand.extra['chain_outbounds'] as List;
           final tagMap = <String, String>{};
@@ -1883,28 +2160,25 @@ class RuntimeConfig {
           }
         }
         autoMemberTags.add(memberTag);
-        autoMemberOutbounds.insert(autoMemberTags.length - 1, node);
+        autoMemberOutbounds.insert(nodeInsertIdx, node);
       }
     }
 
     final endpoints = <Map<String, dynamic>>[
-      if (subTags.isEmpty && isMainWg) buildMainProfileEndpoint(),
-      if (subTags.isNotEmpty && isMainWg) buildMainProfileEndpoint(tag: 'profile'),
+      if (autoMemberTags.isEmpty && subTags.isEmpty && isMainWg) buildMainProfileEndpoint(),
+      if (autoMemberTags.isEmpty && subTags.isNotEmpty && isMainWg) buildMainProfileEndpoint(tag: 'profile'),
       if (isDetourWg) detourProfile!.toWireGuardEndpoint(tag: 'detour-proxy'),
+      ...autoMemberEndpoints,
       ...chainEndpoints,
       ...dedicatedEndpoints.values,
     ];
 
     final outbounds = <Map<String, dynamic>>[
       if (autoMemberTags.isNotEmpty) ...[
-        {
-          'type': 'urltest',
-          'tag': 'proxy',
-          'outbounds': autoMemberTags,
-          'url': 'https://www.gstatic.com/generate_204',
-          'interval': '3m',
-          'tolerance': 50,
-        },
+        balancer.toUrltestOutbound(
+          tag: 'proxy',
+          outbounds: autoMemberTags,
+        ),
         ...autoMemberOutbounds,
       ],
       if (autoMemberTags.isEmpty && subTags.isEmpty && hasStatic && !isMainWg)

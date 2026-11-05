@@ -14,9 +14,22 @@ class RulesTab extends StatefulWidget {
   State<RulesTab> createState() => _RulesTabState();
 }
 
+enum _RulesSubPage {
+  routes('Маршруты и сервисы', Icons.alt_route_rounded),
+  desync('Десинхронизация', Icons.tune_rounded),
+  catalog('Каталог списков', Icons.folder_copy_outlined);
+
+  const _RulesSubPage(this.label, this.icon);
+  final String label;
+  final IconData icon;
+}
+
 class _RulesTabState extends State<RulesTab> {
+  _RulesSubPage _page = _RulesSubPage.routes;
   String _listQuery = '';
   bool _onlyEnabledLists = false;
+  String _selectedCategory = 'Все';
+  final Set<String> _collapsedGroups = {'Прочее'};
 
   @override
   void initState() {
@@ -29,19 +42,32 @@ class _RulesTabState extends State<RulesTab> {
     });
   }
 
+  static String _groupOf(String id) {
+    const names = <String, String>{
+      'ai': 'ИИ-сервисы',
+      'block': 'Блокировки',
+      'direct': 'Напрямую',
+      'gaming': 'Игры',
+      'infra': 'Инфраструктура',
+      'internal': 'Внутренние',
+      'media': 'Медиа',
+      'other': 'Прочее',
+      'regional': 'Регион',
+      'social': 'Соцсети',
+      'tech': 'Технологии',
+    };
+    for (final entry in names.entries) {
+      if (id.startsWith(entry.key)) return entry.value;
+    }
+    return 'Прочее';
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
     final tokens = context.tokens;
     final sets = controller.settings.ruleSets;
     final customRules = controller.settings.customRules;
-
-    final filteredSets = sets.where((s) {
-      if (_onlyEnabledLists && !s.enabled) return false;
-      final q = _listQuery.trim().toLowerCase();
-      if (q.isEmpty) return true;
-      return s.title.toLowerCase().contains(q) || s.id.toLowerCase().contains(q);
-    }).toList();
 
     return Scaffold(
       backgroundColor: tokens.surface,
@@ -60,102 +86,345 @@ class _RulesTabState extends State<RulesTab> {
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          Space.lg,
-          Space.sm,
-          Space.lg,
-          Space.xxl,
-        ),
+      body: Column(
         children: [
-          const SectionLabel('Режим работы'),
-          _ModeSelector(controller: controller),
-          if (controller.settings.profiles.length > 1) ...[
-            const SizedBox(height: Space.md),
-            _DetourChainCard(controller: controller),
-          ],
-          const SizedBox(height: Space.xl),
-          SectionLabel(
-            'Пользовательские правила',
-            trailing: TextButton.icon(
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.lg, Space.xs, Space.lg, Space.sm),
+            child: HairlineCard(
+              padding: const EdgeInsets.all(4),
+              child: Row(
+                children: [
+                  for (final subPage in _RulesSubPage.values)
+                    Expanded(
+                      child: FocusableTap(
+                        borderRadius: BorderRadius.circular(Radii.control),
+                        onTap: () => setState(() => _page = subPage),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 8,
+                            horizontal: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _page == subPage
+                                ? tokens.accentSoft
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(Radii.control),
+                            border: Border.all(
+                              color: _page == subPage
+                                  ? tokens.accent
+                                  : Colors.transparent,
+                            ),
+                          ),
+                          child: Text(
+                            subPage == _RulesSubPage.catalog && sets.isNotEmpty
+                                ? 'Списки (${sets.where((s) => s.enabled).length}/${sets.length})'
+                                : subPage.label,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: _page == subPage
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                              color: _page == subPage ? tokens.ink : tokens.muted,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
-              onPressed: () => _showAddCustomRuleDialog(context, controller),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('Добавить'),
             ),
           ),
-          _CustomRulesSection(
-            controller: controller,
-            rules: customRules,
-            onAdd: () => _showAddCustomRuleDialog(context, controller),
-          ),
-          const SizedBox(height: Space.xl),
-          const SectionLabel('Точечно по сервисам'),
-          _ServiceRoutesSection(controller: controller),
-          const SizedBox(height: Space.xl),
-          const SectionLabel('Настройка десинхронизации (Desync)'),
-          _DesyncModeCard(controller: controller),
-          const SizedBox(height: Space.xl),
-          SectionLabel(
-            'Каталог списков (tachyon-lists)',
-            trailing: sets.isEmpty
-                ? null
-                : Text(
-                    '${sets.where((set) => set.enabled).length} из ${sets.length}',
-                    style: Theme.of(context).textTheme.bodySmall,
+          Expanded(
+            child: switch (_page) {
+              _RulesSubPage.routes => ListView(
+                  padding: const EdgeInsets.fromLTRB(
+                    Space.lg,
+                    Space.xs,
+                    Space.lg,
+                    Space.xxl,
                   ),
-          ),
-          if (sets.isNotEmpty) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    onChanged: (v) => setState(() => _listQuery = v),
-                    decoration: const InputDecoration(
-                      hintText: 'Поиск по спискам...',
-                      prefixIcon: Icon(Icons.search, size: 18),
-                      isDense: true,
+                  children: [
+                    const SectionLabel('Режим работы'),
+                    _ModeSelector(controller: controller),
+                    if (controller.settings.profiles.length > 1) ...[
+                      const SizedBox(height: Space.md),
+                      _DetourChainCard(controller: controller),
+                    ],
+                    const SizedBox(height: Space.xl),
+                    SectionLabel(
+                      'Пользовательские правила',
+                      trailing: TextButton.icon(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: () =>
+                            _showAddCustomRuleDialog(context, controller),
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text('Добавить'),
+                      ),
                     ),
+                    _CustomRulesSection(
+                      controller: controller,
+                      rules: customRules,
+                      onAdd: () => _showAddCustomRuleDialog(context, controller),
+                    ),
+                    const SizedBox(height: Space.xl),
+                    const SectionLabel('Точечно по сервисам'),
+                    _ServiceRoutesSection(controller: controller),
+                  ],
+                ),
+              _RulesSubPage.desync => ListView(
+                  padding: const EdgeInsets.fromLTRB(
+                    Space.lg,
+                    Space.xs,
+                    Space.lg,
+                    Space.xxl,
+                  ),
+                  children: [
+                    const SectionLabel('Настройка десинхронизации (Desync)'),
+                    _DesyncModeCard(controller: controller),
+                  ],
+                ),
+              _RulesSubPage.catalog => _buildCatalogPage(
+                  context,
+                  controller,
+                  sets,
+                ),
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCatalogPage(
+    BuildContext context,
+    AppController controller,
+    List<RuleSetEntry> sets,
+  ) {
+    final tokens = context.tokens;
+    if (sets.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(Space.lg, Space.sm, Space.lg, Space.xxl),
+        children: [
+          HairlineCard(
+            padding: const EdgeInsets.all(Space.md),
+            child: Row(
+              children: [
+                Icon(Icons.rule_folder_outlined, size: 20, color: tokens.muted),
+                const SizedBox(width: Space.md),
+                Expanded(
+                  child: Text(
+                    'Дополнительные региональные и доменные списки (.trs)',
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
                 const SizedBox(width: Space.sm),
-                FilterChip(
-                  label: const Text('Активные'),
-                  selected: _onlyEnabledLists,
-                  onSelected: (v) => setState(() => _onlyEnabledLists = v),
+                FilledButton(
+                  onPressed: () => controller.refreshLists(),
+                  child: const Text('Загрузить'),
                 ),
               ],
             ),
-            const SizedBox(height: Space.md),
-          ],
-          if (sets.isEmpty)
-            HairlineCard(
-              padding: const EdgeInsets.all(Space.md),
-              child: Row(
+          ),
+        ],
+      );
+    }
+
+    final categoryCounts = <String, int>{};
+    for (final s in sets) {
+      final cat = _groupOf(s.id);
+      categoryCounts[cat] = (categoryCounts[cat] ?? 0) + 1;
+    }
+    final categories = ['Все', ...categoryCounts.keys];
+
+    final q = _listQuery.trim().toLowerCase();
+    final filteredSets = sets.where((s) {
+      if (_onlyEnabledLists && !s.enabled) return false;
+      if (_selectedCategory != 'Все' && _groupOf(s.id) != _selectedCategory) {
+        return false;
+      }
+      if (q.isEmpty) return true;
+      return s.title.toLowerCase().contains(q) || s.id.toLowerCase().contains(q);
+    }).toList();
+
+    final groups = <String, List<RuleSetEntry>>{};
+    for (final s in filteredSets) {
+      groups.putIfAbsent(_groupOf(s.id), () => []).add(s);
+    }
+
+    final flatItems = <Object>[];
+    for (final entry in groups.entries) {
+      final isCollapsed = _selectedCategory == 'Все' &&
+          q.isEmpty &&
+          !_onlyEnabledLists &&
+          _collapsedGroups.contains(entry.key);
+      flatItems.add(_CatalogGroupHeader(
+        title: entry.key,
+        count: entry.value.length,
+        enabledCount: entry.value.where((e) => e.enabled).length,
+        isCollapsed: isCollapsed,
+      ));
+      if (!isCollapsed) {
+        flatItems.addAll(entry.value);
+      }
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Icon(Icons.rule_folder_outlined, size: 20, color: tokens.muted),
-                  const SizedBox(width: Space.md),
                   Expanded(
-                    child: Text(
-                      'Дополнительные региональные и доменные списки (.trs)',
-                      style: Theme.of(context).textTheme.bodySmall,
+                    child: TextField(
+                      onChanged: (v) => setState(() => _listQuery = v),
+                      decoration: const InputDecoration(
+                        hintText: 'Поиск по спискам...',
+                        prefixIcon: Icon(Icons.search, size: 18),
+                        isDense: true,
+                      ),
                     ),
                   ),
                   const SizedBox(width: Space.sm),
-                  FilledButton(
-                    onPressed: () => controller.refreshLists(),
-                    child: const Text('Загрузить'),
+                  FilterChip(
+                    label: const Text('Активные'),
+                    selected: _onlyEnabledLists,
+                    onSelected: (v) => setState(() => _onlyEnabledLists = v),
                   ),
                 ],
               ),
-            )
-          else
-            _RuleSetList(controller: controller, sets: filteredSets),
-        ],
-      ),
+              const SizedBox(height: Space.sm),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final cat in categories) ...[
+                      ChoiceChip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(
+                          cat == 'Все'
+                              ? 'Все (${sets.length})'
+                              : '$cat (${categoryCounts[cat] ?? 0})',
+                          style: const TextStyle(fontSize: 11.5),
+                        ),
+                        selected: _selectedCategory == cat,
+                        onSelected: (_) =>
+                            setState(() => _selectedCategory = cat),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: Space.xs),
+            ],
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(
+              Space.lg,
+              Space.xs,
+              Space.lg,
+              Space.xxl,
+            ),
+            itemCount: flatItems.length,
+            itemBuilder: (ctx, idx) {
+              final item = flatItems[idx];
+              if (item is _CatalogGroupHeader) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: Space.sm, bottom: Space.xs),
+                  child: FocusableTap(
+                    borderRadius: BorderRadius.circular(Radii.control),
+                    onTap: () {
+                      setState(() {
+                        if (_collapsedGroups.contains(item.title)) {
+                          _collapsedGroups.remove(item.title);
+                        } else {
+                          _collapsedGroups.add(item.title);
+                        }
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Space.md,
+                        vertical: Space.sm,
+                      ),
+                      decoration: BoxDecoration(
+                        color: tokens.raised,
+                        borderRadius: BorderRadius.circular(Radii.control),
+                        border: Border.all(color: tokens.line),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            item.isCollapsed
+                                ? Icons.chevron_right_rounded
+                                : Icons.expand_more_rounded,
+                            size: 18,
+                            color: tokens.muted,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              item.title,
+                              style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            ),
+                          ),
+                          if (item.enabledCount > 0) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: tokens.accent.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                'вкл: ${item.enabledCount}',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: tokens.accent,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Text(
+                            '${item.count} списков',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              color: tokens.faint,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }
+              final set = item as RuleSetEntry;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: Space.sm),
+                child: _RuleSetTile(controller: controller, set: set),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 
@@ -239,7 +508,7 @@ class _RulesTabState extends State<RulesTab> {
                       DropdownMenuItem(
                         value: 'desync',
                         child: Text(
-                          'Через DPI-обход (Desync)',
+                          'Десинхронизация (Desync)',
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -434,7 +703,7 @@ class _ServiceRoutesSection extends StatelessWidget {
 
   static const _options = <(String, String)>[
     ('off', 'По умолч.'),
-    ('desync', 'DPI (Desync)'),
+    ('desync', 'Desync'),
     ('proxy', 'Прокси'),
     ('direct', 'Напрямую'),
     ('block', 'Блок'),
@@ -712,60 +981,18 @@ class _ModeSelector extends StatelessWidget {
   }
 }
 
-/// Список правил, сгруппированный по назначению.
-class _RuleSetList extends StatelessWidget {
-  const _RuleSetList({required this.controller, required this.sets});
+class _CatalogGroupHeader {
+  const _CatalogGroupHeader({
+    required this.title,
+    required this.count,
+    required this.enabledCount,
+    required this.isCollapsed,
+  });
 
-  final AppController controller;
-  final List<RuleSetEntry> sets;
-
-  @override
-  Widget build(BuildContext context) {
-    final groups = <String, List<RuleSetEntry>>{};
-    for (final set in sets) {
-      groups.putIfAbsent(_groupOf(set.id), () => []).add(set);
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final group in groups.entries) ...[
-          Padding(
-            padding: const EdgeInsets.only(top: Space.sm, bottom: Space.sm),
-            child: Text(
-              group.key,
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-          ),
-          for (final set in group.value) ...[
-            _RuleSetTile(controller: controller, set: set),
-            const SizedBox(height: Space.sm),
-          ],
-          const SizedBox(height: Space.sm),
-        ],
-      ],
-    );
-  }
-
-  String _groupOf(String id) {
-    const names = <String, String>{
-      'ai': 'ИИ-сервисы',
-      'block': 'Блокировки',
-      'direct': 'Напрямую',
-      'gaming': 'Игры',
-      'infra': 'Инфраструктура',
-      'internal': 'Внутренние',
-      'media': 'Медиа',
-      'other': 'Прочее',
-      'regional': 'Регион',
-      'social': 'Соцсети',
-      'tech': 'Технологии',
-    };
-    for (final entry in names.entries) {
-      if (id.startsWith(entry.key)) return entry.value;
-    }
-    return 'Прочее';
-  }
+  final String title;
+  final int count;
+  final int enabledCount;
+  final bool isCollapsed;
 }
 
 /// Плитка списка правил: название, размер и включение.
@@ -864,7 +1091,7 @@ String _updatedLabel(int updatedAt) {
   return '$day.$month';
 }
 
-/// Карточка настроек DPI-обхода на экране Правила.
+/// Карточка настроек пакетной десинхронизации на экране Правила.
 class _DesyncModeCard extends StatelessWidget {
   const _DesyncModeCard({required this.controller});
 
@@ -1013,7 +1240,7 @@ class _DesyncModeCard extends StatelessWidget {
                           final chosen = await controller.autoPickDesyncPreset();
                           if (!context.mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Подобран рецепт DPI: $chosen')),
+                            SnackBar(content: Text('Подобран рецепт десинхронизации: $chosen')),
                           );
                         },
                   icon: const Icon(Icons.bolt_outlined, size: 16),

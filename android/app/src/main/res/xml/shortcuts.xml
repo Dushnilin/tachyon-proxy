@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="connect_tunnel"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_connect"
+        android:shortcutShortLabel="@string/shortcut_connect_short"
+        android:shortcutLongLabel="@string/shortcut_connect_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="app.tachyon.tachyon_proxy"
+            android:targetClass="app.tachyon.tachyon_proxy.MainActivity">
+            <extra android:name="cmd" android:value="connect" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="disconnect_tunnel"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_disconnect"
+        android:shortcutShortLabel="@string/shortcut_disconnect_short"
+        android:shortcutLongLabel="@string/shortcut_disconnect_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="app.tachyon.tachyon_proxy"
+            android:targetClass="app.tachyon.tachyon_proxy.MainActivity">
+            <extra android:name="cmd" android:value="disconnect" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="desync_mode"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_desync"
+        android:shortcutShortLabel="@string/shortcut_desync_short"
+        android:shortcutLongLabel="@string/shortcut_desync_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="app.tachyon.tachyon_proxy"
+            android:targetClass="app.tachyon.tachyon_proxy.MainActivity">
+            <extra android:name="cmd" android:value="mode:desync" />
+        </intent>
+    </shortcut>
+</shortcuts>

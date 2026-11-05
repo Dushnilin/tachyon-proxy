@@ -13,6 +13,7 @@ import '../../core/models/runtime_config.dart';
 import '../../core/models/tunnel_state.dart';
 import '../connections/connections_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
+import '../profiles/profiles_tab.dart' show showBalancerSettingsSheet;
 import '../profiles/tv_receive_dialog.dart';
 
 /// Главный экран: состояние туннеля и его включение.
@@ -444,6 +445,74 @@ class _HomeTabState extends State<HomeTab> {
           if (!isCollapsed) ...[
             if (subProfiles.isNotEmpty) ...[
               const Divider(height: Space.sm),
+              HairlineCard(
+                onTap: () => controller.selectProfile('auto:${sub.id}'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.md,
+                  vertical: Space.sm,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.bolt_rounded,
+                      size: 18,
+                      color: controller.settings.selectedProfileId == 'auto:${sub.id}'
+                          ? tokens.accent
+                          : tokens.muted,
+                    ),
+                    const SizedBox(width: Space.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Автовыбор (${controller.settings.balancer.modeOption.title})',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  color: controller.settings.selectedProfileId == 'auto:${sub.id}'
+                                      ? tokens.accent
+                                      : tokens.ink,
+                                ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            controller.settings.selectedProfileId == 'auto:${sub.id}' &&
+                                    controller.activeBalancerWinner != null
+                                ? 'Активен: ${controller.activeBalancerWinner!.name}'
+                                : controller.settings.balancer.modeOption.subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  fontSize: 11,
+                                  color: controller.settings.selectedProfileId == 'auto:${sub.id}' &&
+                                          controller.activeBalancerWinner != null
+                                      ? tokens.success
+                                      : tokens.faint,
+                                ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.all(4),
+                      constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                      tooltip: 'Алгоритм балансировщика',
+                      onPressed: () => showBalancerSettingsSheet(context, controller),
+                      icon: Icon(
+                        Icons.tune_rounded,
+                        size: 17,
+                        color: controller.settings.selectedProfileId == 'auto:${sub.id}'
+                            ? tokens.accent
+                            : tokens.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
               for (final p in subProfiles) ...[
                 _DashboardServerTile(
                   profile: p,
@@ -1566,6 +1635,9 @@ class _ProfileCard extends StatelessWidget {
     }
 
     final urlPing = controller.urlTestPing;
+    final isAutoBalancer = profile.type == 'urltest';
+    final balancerMode = controller.settings.balancer.modeOption;
+    final winner = controller.activeBalancerWinner;
 
     return HairlineCard(
       child: Column(
@@ -1573,14 +1645,29 @@ class _ProfileCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Pill(label: profile.type.toUpperCase(), color: tokens.accent),
+              Pill(
+                label: isAutoBalancer
+                    ? 'BALANCER · ${balancerMode.shortBadge}'
+                    : profile.type.toUpperCase(),
+                color: tokens.accent,
+              ),
               const Spacer(),
-              Text(
-                '${profile.server}:${profile.port}',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: tokens.faint,
-                  fontFamily: 'monospace',
+              Flexible(
+                child: Text(
+                  isAutoBalancer
+                      ? (winner != null
+                          ? 'Активен: ${winner.name}'
+                          : 'Пул Top-${controller.settings.balancer.pool}')
+                      : '${profile.server}:${profile.port}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isAutoBalancer && winner != null
+                        ? tokens.success
+                        : tokens.faint,
+                    fontFamily: 'monospace',
+                  ),
                 ),
               ),
             ],
@@ -1592,7 +1679,11 @@ class _ProfileCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  profile.fullTransportLabel,
+                  isAutoBalancer
+                      ? '${balancerMode.title} · ${balancerMode.subtitle}'
+                      : profile.fullTransportLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12,
                     color: tokens.accent,
@@ -1650,12 +1741,20 @@ class _ProfileCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: Space.xs),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: 'QR-код и ссылка профиля',
-                onPressed: () => _showProfileQrSheet(context, controller, profile),
-                icon: Icon(Icons.qr_code_2, size: 20, color: tokens.muted),
-              ),
+              if (isAutoBalancer)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Настроить алгоритм балансировщика',
+                  onPressed: () => showBalancerSettingsSheet(context, controller),
+                  icon: Icon(Icons.tune_rounded, size: 20, color: tokens.accent),
+                )
+              else
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'QR-код и ссылка профиля',
+                  onPressed: () => _showProfileQrSheet(context, controller, profile),
+                  icon: Icon(Icons.qr_code_2, size: 20, color: tokens.muted),
+                ),
             ],
           ),
         ],

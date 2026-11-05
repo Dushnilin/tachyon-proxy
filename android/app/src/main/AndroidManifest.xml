@@ -50,6 +50,15 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
 
+            <!-- Долгое нажатие на плитку Быстрых настроек в шторке открывает приложение вместо системного экрана «О приложении» -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
             <!-- Приём любых ссылок (https:// подписок, URI серверов, текста из ботов) через меню «Поделиться -> Tachyon» -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

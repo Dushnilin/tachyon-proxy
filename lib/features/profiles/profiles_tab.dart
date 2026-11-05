@@ -9,6 +9,7 @@ import '../../app/widgets/morphe.dart';
 import '../../app/widgets/qr_code_view.dart';
 import '../../core/app_controller.dart';
 import '../../core/models/runtime_config.dart';
+import '../../core/services/core_bridge.dart';
 import 'tv_receive_dialog.dart';
 
 /// Экран профилей: список серверов и импорт подписки.
@@ -61,6 +62,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
               },
               icon: Icon(Icons.cleaning_services_outlined, color: tokens.danger),
             ),
+          IconButton(
+            tooltip: 'Настройки балансировщика (tachyon-core 0.3.9)',
+            onPressed: () => showBalancerSettingsSheet(context, controller),
+            icon: const Icon(Icons.tune_rounded),
+          ),
           IconButton(
             tooltip: controller.sortByPing
                 ? 'Сортировка по пингу включена'
@@ -155,6 +161,16 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   ),
                   const SizedBox(height: Space.md),
                 ],
+                if (profiles.length >= 2 && _searchQuery.trim().isEmpty) ...[
+                  _AutoBalancerTile(
+                    title: 'Глобальный балансировщик (все серверы)',
+                    selected: controller.settings.selectedProfileId == 'auto:all',
+                    controller: controller,
+                    onSelect: () => controller.selectProfile('auto:all'),
+                    onConfigure: () => showBalancerSettingsSheet(context, controller),
+                  ),
+                  const SizedBox(height: Space.md),
+                ],
                 if (subs.isNotEmpty) ...[
                   _SubscriptionGroupList(
                     controller: controller,
@@ -179,6 +195,9 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       onPing: () => controller.pingProfile(profile.id),
                       ping: controller.pingOf(profile.id),
                       isPinging: controller.isPinging(profile.id),
+                      telemetry: controller.balancerTelemetryOf(profile.id),
+                      isBalancerWinner:
+                          controller.activeBalancerWinner?.id == profile.id,
                     ),
                     const SizedBox(height: Space.sm),
                   ],
@@ -1217,7 +1236,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
   }
 }
 
-/// Плитка профиля: имя, адрес, тип, пинг, QR-код, редактирование и удаление.
+/// Плитка профиля: имя, адрес, тип, пинг, телеметрия балансировщика и компактное меню действий.
 class _ProfileTile extends StatelessWidget {
   const _ProfileTile({
     required this.profile,
@@ -1229,6 +1248,8 @@ class _ProfileTile extends StatelessWidget {
     this.onPing,
     this.ping,
     this.isPinging = false,
+    this.telemetry,
+    this.isBalancerWinner = false,
   });
 
   final Profile profile;
@@ -1240,10 +1261,20 @@ class _ProfileTile extends StatelessWidget {
   final VoidCallback? onPing;
   final int? ping;
   final bool isPinging;
+  final BalancerNodeTelemetry? telemetry;
+  final bool isBalancerWinner;
 
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
+    final tel = telemetry;
+    final telSuffix = tel == null
+        ? ''
+        : tel.quarantined
+            ? ' · КАРАНТИН'
+            : (tel.jitterMs > 0 || tel.activeConns > 0)
+                ? ' · ±${tel.jitterMs}ms${tel.activeConns > 0 ? ' · ${tel.activeConns} сесс.' : ''}'
+                : '';
 
     return HairlineCard(
       onTap: onSelect,
@@ -1258,33 +1289,70 @@ class _ProfileTile extends StatelessWidget {
             height: 8,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: selected ? tokens.accent : tokens.line,
+              color: selected
+                  ? tokens.accent
+                  : isBalancerWinner
+                      ? tokens.success
+                      : tokens.line,
             ),
           ),
-          const SizedBox(width: Space.md),
+          const SizedBox(width: Space.sm),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  profile.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium,
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        profile.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              color: selected
+                                  ? tokens.accent
+                                  : isBalancerWinner
+                                      ? tokens.success
+                                      : tokens.ink,
+                            ),
+                      ),
+                    ),
+                    if (isBalancerWinner && !selected) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: tokens.success.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(3),
+                          border: Border.all(color: tokens.success.withValues(alpha: 0.35)),
+                        ),
+                        child: Text(
+                          'АКТИВЕН',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            fontFamily: 'monospace',
+                            color: tokens.success,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '${profile.fullTransportLabel} · ${profile.server}:${profile.port}',
+                  '${profile.fullTransportLabel} · ${profile.server}:${profile.port}$telSuffix',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         fontSize: 11,
-                        color: tokens.faint,
+                        color: tel?.quarantined == true ? tokens.danger : tokens.faint,
                       ),
                 ),
               ],
             ),
           ),
+          const SizedBox(width: Space.xs),
           FocusableTap(
             borderRadius: BorderRadius.circular(4),
             onTap: onPing,
@@ -1323,23 +1391,187 @@ class _ProfileTile extends StatelessWidget {
                         ),
             ),
           ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'QR-код / Поделиться',
-            onPressed: onShare,
-            icon: Icon(Icons.qr_code_2, size: 18, color: tokens.muted),
+          const SizedBox(width: 2),
+          PopupMenuButton<String>(
+            tooltip: 'Действия с сервером',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 168),
+            icon: SizedBox(
+              width: 28,
+              height: 28,
+              child: Icon(Icons.more_vert_rounded, size: 18, color: tokens.muted),
+            ),
+            onSelected: (action) {
+              switch (action) {
+                case 'ping':
+                  onPing?.call();
+                case 'share':
+                  onShare();
+                case 'edit':
+                  onEdit();
+                case 'delete':
+                  onDelete();
+              }
+            },
+            itemBuilder: (ctx) => [
+              if (onPing != null)
+                const PopupMenuItem<String>(
+                  value: 'ping',
+                  child: Row(
+                    children: [
+                      Icon(Icons.network_ping, size: 17),
+                      SizedBox(width: 10),
+                      Text('Проверить задержку'),
+                    ],
+                  ),
+                ),
+              const PopupMenuItem<String>(
+                value: 'share',
+                child: Row(
+                  children: [
+                    Icon(Icons.qr_code_2, size: 17),
+                    SizedBox(width: 10),
+                    Text('QR-код / Поделиться'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'edit',
+                child: Row(
+                  children: [
+                    Icon(Icons.edit_outlined, size: 17),
+                    SizedBox(width: 10),
+                    Text('Редактировать'),
+                  ],
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'delete',
+                child: Row(
+                  children: [
+                    Icon(Icons.delete_outline, size: 17, color: tokens.danger),
+                    const SizedBox(width: 10),
+                    Text('Удалить', style: TextStyle(color: tokens.danger)),
+                  ],
+                ),
+              ),
+            ],
           ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Редактировать',
-            onPressed: onEdit,
-            icon: Icon(Icons.edit_outlined, size: 18, color: tokens.muted),
+        ],
+      ),
+    );
+  }
+}
+
+/// Плитка интеллектуального балансировщика tachyon-core 0.3.9 (для подписки или всех серверов).
+class _AutoBalancerTile extends StatelessWidget {
+  const _AutoBalancerTile({
+    required this.title,
+    required this.selected,
+    required this.controller,
+    required this.onSelect,
+    required this.onConfigure,
+  });
+
+  final String title;
+  final bool selected;
+  final AppController controller;
+  final VoidCallback onSelect;
+  final VoidCallback onConfigure;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final balancer = controller.settings.balancer;
+    final modeOpt = balancer.modeOption;
+    final winner = selected ? controller.activeBalancerWinner : null;
+    final winnerTel = winner != null ? controller.balancerTelemetryOf(winner.id) : null;
+
+    final subtitle = winner != null
+        ? 'Активен: ${winner.name}${winnerTel != null && winnerTel.ewmaRttMs > 0 ? ' (${winnerTel.ewmaRttMs}ms ±${winnerTel.jitterMs}ms)' : ''} · ${modeOpt.title}'
+        : '${modeOpt.title} · пул Top-${balancer.pool} · ${modeOpt.subtitle}';
+
+    return HairlineCard(
+      onTap: onSelect,
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.md,
+        vertical: Space.sm,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.bolt_rounded,
+            size: 18,
+            color: selected ? tokens.accent : tokens.muted,
           ),
+          const SizedBox(width: Space.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              color: selected ? tokens.accent : tokens.ink,
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? tokens.accent.withValues(alpha: 0.14)
+                            : tokens.raised,
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(
+                          color: selected
+                              ? tokens.accent.withValues(alpha: 0.4)
+                              : tokens.line,
+                        ),
+                      ),
+                      child: Text(
+                        modeOpt.shortBadge,
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          fontFamily: 'monospace',
+                          color: selected ? tokens.accent : tokens.muted,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: 11,
+                        color: winner != null ? tokens.success : tokens.faint,
+                      ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: Space.xs),
           IconButton(
             visualDensity: VisualDensity.compact,
-            tooltip: 'Удалить',
-            onPressed: onDelete,
-            icon: Icon(Icons.close, size: 18, color: tokens.faint),
+            padding: const EdgeInsets.all(4),
+            constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+            tooltip: 'Алгоритм и параметры балансировщика',
+            onPressed: onConfigure,
+            icon: Icon(
+              Icons.tune_rounded,
+              size: 17,
+              color: selected ? tokens.accent : tokens.muted,
+            ),
           ),
         ],
       ),
@@ -1635,54 +1867,64 @@ class _CollapsibleSubCard extends StatelessWidget {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
+                      Flexible(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
                           ),
-                        ),
-                        onPressed: controller.pingingAll ? null : onPingAllSub,
-                        icon: controller.pingingAll
-                            ? SizedBox(
-                                width: 12,
-                                height: 12,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: tokens.accent,
-                                ),
-                              )
-                            : const Icon(Icons.network_ping, size: 14),
-                        label: const Text(
-                          'Пинг всех',
-                          style: TextStyle(fontSize: 11.5),
+                          onPressed: controller.pingingAll ? null : onPingAllSub,
+                          icon: controller.pingingAll
+                              ? SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: tokens.accent,
+                                  ),
+                                )
+                              : const Icon(Icons.network_ping, size: 13),
+                          label: const Text(
+                            'Пинг всех',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 6),
-                      OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
+                      Flexible(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
                           ),
-                        ),
-                        onPressed: onRefreshSub,
-                        icon: const Icon(Icons.sync, size: 14),
-                        label: const Text(
-                          'Обновить',
-                          style: TextStyle(fontSize: 11.5),
+                          onPressed: onRefreshSub,
+                          icon: const Icon(Icons.sync, size: 13),
+                          label: const Text(
+                            'Обновить',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11),
+                          ),
                         ),
                       ),
                       const Spacer(),
                       if (deadCount > 0)
                         IconButton(
                           visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.all(4),
+                          constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
                           tooltip: 'Удалить недоступные ($deadCount)',
                           icon: Icon(
                             Icons.cleaning_services_outlined,
-                            size: 18,
+                            size: 17,
                             color: tokens.danger,
                           ),
                           onPressed: () =>
@@ -1690,28 +1932,34 @@ class _CollapsibleSubCard extends StatelessWidget {
                         ),
                       IconButton(
                         visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(4),
+                        constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
                         tooltip: controller.sortByPing
                             ? 'Сортировка по пингу включена'
                             : 'Сортировать по пингу',
                         icon: Icon(
                           Icons.sort_rounded,
-                          size: 18,
+                          size: 17,
                           color: controller.sortByPing ? tokens.accent : tokens.muted,
                         ),
                         onPressed: controller.toggleSortByPing,
                       ),
                       IconButton(
                         visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(4),
+                        constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
                         tooltip: 'Редактировать ссылку',
-                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        icon: const Icon(Icons.edit_outlined, size: 17),
                         onPressed: onEditSub,
                       ),
                       IconButton(
                         visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(4),
+                        constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
                         tooltip: 'Удалить подписку',
                         icon: Icon(
                           Icons.close_outlined,
-                          size: 18,
+                          size: 17,
                           color: tokens.faint,
                         ),
                         onPressed: onRemoveSub,
@@ -1725,49 +1973,12 @@ class _CollapsibleSubCard extends StatelessWidget {
           if (!isCollapsed) ...[
             if (profiles.isNotEmpty) ...[
               const Divider(height: Space.sm),
-              HairlineCard(
-                onTap: () => onSelectProfile('auto:${sub.id}'),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Space.md,
-                  vertical: Space.sm,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.bolt_rounded,
-                      size: 18,
-                      color: selectedId == 'auto:${sub.id}'
-                          ? tokens.accent
-                          : tokens.muted,
-                    ),
-                    const SizedBox(width: Space.sm),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Автовыбор (лучший сервер)',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  color: selectedId == 'auto:${sub.id}'
-                                      ? tokens.accent
-                                      : tokens.ink,
-                                ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'URLTest · автоматическое переключение по минимальному пингу',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  fontSize: 11,
-                                  color: tokens.faint,
-                                ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              _AutoBalancerTile(
+                title: 'Автовыбор (балансировщик)',
+                selected: selectedId == 'auto:${sub.id}',
+                controller: controller,
+                onSelect: () => onSelectProfile('auto:${sub.id}'),
+                onConfigure: () => showBalancerSettingsSheet(context, controller),
               ),
               const SizedBox(height: 4),
               for (final p in profiles) ...[
@@ -1776,6 +1987,8 @@ class _CollapsibleSubCard extends StatelessWidget {
                   selected: p.id == selectedId,
                   ping: controller.pingOf(p.id),
                   isPinging: controller.isPinging(p.id),
+                  telemetry: controller.balancerTelemetryOf(p.id),
+                  isBalancerWinner: controller.activeBalancerWinner?.id == p.id,
                   onSelect: () => onSelectProfile(p.id),
                   onDelete: () => onDeleteProfile(p.id),
                   onEdit: () => onEditProfile(p),
@@ -1823,4 +2036,365 @@ class _CollapsibleSubCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Панель настройки нативного балансировщика tachyon-core 0.3.9.
+Future<void> showBalancerSettingsSheet(
+  BuildContext context,
+  AppController controller,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (sheetCtx) {
+      return StatefulBuilder(
+        builder: (ctx, setStateModal) {
+          final tokens = ctx.tokens;
+          final current = controller.settings.balancer;
+          final runtimeStatus = controller.activeBalancerStatus;
+          final winner = controller.activeBalancerWinner;
+
+          Future<void> updateBalancer(BalancerSettings next) async {
+            await controller.setBalancer(next);
+            if (ctx.mounted) setStateModal(() {});
+          }
+
+          return DraggableScrollableSheet(
+            initialChildSize: 0.78,
+            minChildSize: 0.45,
+            maxChildSize: 0.94,
+            expand: false,
+            builder: (ctx, scrollCtrl) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: tokens.surface,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                  border: Border.all(color: tokens.line),
+                ),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: tokens.line,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(Space.lg, Space.md, Space.md, Space.sm),
+                      child: Row(
+                        children: [
+                          Icon(Icons.bolt_rounded, color: tokens.accent, size: 22),
+                          const SizedBox(width: Space.sm),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Балансировщик tachyon-core 0.3.9',
+                                  style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                ),
+                                Text(
+                                  'Атомарный выбор узла без блокировок (lock-free) и телеметрия EWMA',
+                                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                                        fontSize: 11,
+                                        color: tokens.faint,
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(sheetCtx).pop(),
+                            icon: const Icon(Icons.close, size: 20),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.fromLTRB(
+                          Space.lg,
+                          Space.md,
+                          Space.lg,
+                          Space.xxl,
+                        ),
+                        children: [
+                          if (runtimeStatus != null) ...[
+                            HairlineCard(
+                              padding: const EdgeInsets.all(Space.md),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.sensors_rounded, size: 18, color: tokens.success),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          winner != null
+                                              ? 'Активный узел: ${winner.name}'
+                                              : 'Текущий тег: ${runtimeStatus.now}',
+                                          style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                                color: tokens.success,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          'Режим ядра: ${runtimeStatus.mode} · Узлов в пуле: ${runtimeStatus.telemetry.length}',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontFamily: 'monospace',
+                                            color: tokens.muted,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: Space.md),
+                          ],
+                          const SectionLabel('Алгоритм выбора узла'),
+                          for (final opt in BalancerSettings.modes) ...[
+                            HairlineCard(
+                              onTap: () => updateBalancer(current.copyWith(mode: opt.id)),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: Space.md,
+                                vertical: Space.sm,
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    current.modeOption == opt
+                                        ? Icons.radio_button_checked
+                                        : Icons.radio_button_unchecked,
+                                    size: 18,
+                                    color: current.modeOption == opt
+                                        ? tokens.accent
+                                        : tokens.muted,
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                opt.title,
+                                                style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                                      color: current.modeOption == opt
+                                                          ? tokens.accent
+                                                          : tokens.ink,
+                                                      fontWeight: FontWeight.w600,
+                                                    ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 5,
+                                                vertical: 1,
+                                              ),
+                                              decoration: BoxDecoration(
+                                                color: tokens.raised,
+                                                borderRadius: BorderRadius.circular(3),
+                                                border: Border.all(color: tokens.line),
+                                              ),
+                                              child: Text(
+                                                opt.shortBadge,
+                                                style: TextStyle(
+                                                  fontSize: 9.5,
+                                                  fontWeight: FontWeight.w700,
+                                                  fontFamily: 'monospace',
+                                                  color: current.modeOption == opt
+                                                      ? tokens.accent
+                                                      : tokens.muted,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          opt.subtitle,
+                                          style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                                                fontSize: 11,
+                                                color: tokens.faint,
+                                              ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                          ],
+                          const SizedBox(height: Space.md),
+                          const SectionLabel('Параметры пула и переключения'),
+                          HairlineCard(
+                            padding: const EdgeInsets.all(Space.md),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Кандидатов в активном пуле (Top-N)',
+                                  style: Theme.of(ctx).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Ограничивает выбор N самыми быстрыми и стабильными серверами.',
+                                  style: TextStyle(fontSize: 11, color: tokens.faint),
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final n in const [2, 3, 4, 6, 8, 12])
+                                      ChoiceChip(
+                                        label: Text('Top-$n'),
+                                        selected: current.pool == n,
+                                        onSelected: (_) =>
+                                            updateBalancer(current.copyWith(pool: n)),
+                                      ),
+                                  ],
+                                ),
+                                const Divider(height: Space.lg),
+                                Text(
+                                  'Допуск гистерезиса по задержке',
+                                  style: Theme.of(ctx).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Защищает от лишних переключений при небольших колебаниях пинга.',
+                                  style: TextStyle(fontSize: 11, color: tokens.faint),
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final ms in const [30, 50, 80, 120, 200])
+                                      ChoiceChip(
+                                        label: Text('$ms мс'),
+                                        selected: current.poolTolerance == ms,
+                                        onSelected: (_) => updateBalancer(
+                                          current.copyWith(
+                                            tolerance: ms,
+                                            poolTolerance: ms,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                const Divider(height: Space.lg),
+                                Text(
+                                  'Интервал проверки доступности',
+                                  style: Theme.of(ctx).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final iv in const ['15s', '30s', '1m', '3m', '5m'])
+                                      ChoiceChip(
+                                        label: Text(iv),
+                                        selected: current.interval == iv,
+                                        onSelected: (_) =>
+                                            updateBalancer(current.copyWith(interval: iv)),
+                                      ),
+                                  ],
+                                ),
+                                if (current.modeOption.id == 'sticky') ...[
+                                  const Divider(height: Space.lg),
+                                  Text(
+                                    'Ключи консистентного хеширования (Sticky)',
+                                    style: Theme.of(ctx).textTheme.titleSmall,
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Закрепляет сессии одного сайта или IP за одним и тем же выходным узлом.',
+                                    style: TextStyle(fontSize: 11, color: tokens.faint),
+                                  ),
+                                  const SizedBox(height: Space.sm),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 6,
+                                    children: [
+                                      for (final entry in const [
+                                        ('domain', 'Домен (SNI)'),
+                                        ('dest_ip', 'IP назначения'),
+                                        ('dest_port', 'Порт'),
+                                        ('source_ip', 'IP источника'),
+                                      ])
+                                        FilterChip(
+                                          label: Text(entry.$2),
+                                          selected: current.stickyHash.contains(entry.$1),
+                                          onSelected: (on) {
+                                            final next = [...current.stickyHash];
+                                            if (on) {
+                                              if (!next.contains(entry.$1)) {
+                                                next.add(entry.$1);
+                                              }
+                                            } else if (next.length > 1) {
+                                              next.remove(entry.$1);
+                                            }
+                                            updateBalancer(
+                                              current.copyWith(stickyHash: next),
+                                            );
+                                          },
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                                if (current.modeOption.id == 'quota') ...[
+                                  const Divider(height: Space.lg),
+                                  Text(
+                                    'Квота трафика на один узел (МБ)',
+                                    style: Theme.of(ctx).textTheme.titleSmall,
+                                  ),
+                                  const SizedBox(height: Space.sm),
+                                  Wrap(
+                                    spacing: 6,
+                                    runSpacing: 6,
+                                    children: [
+                                      for (final mib in const [100, 256, 512, 1024, 2048])
+                                        ChoiceChip(
+                                          label: Text('$mib МБ'),
+                                          selected: current.quotaMib == mib,
+                                          onSelected: (_) =>
+                                              updateBalancer(current.copyWith(quotaMib: mib)),
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      );
+    },
+  );
 }

@@ -129,7 +129,7 @@ import UIKit
             if let ptr = tachyon_core_version() {
                 result(String(cString: ptr))
             } else {
-                result("0.3.1")
+                result("0.3.9")
             }
 
         case "check":

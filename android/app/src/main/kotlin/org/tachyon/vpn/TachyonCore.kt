@@ -20,7 +20,7 @@ object TachyonCore {
 
     private const val LIBRARY = "tachyon"
     const val CUSTOM_SO_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/libtachyon.so"
-    const val CUSTOM_STAMP_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/engine_v029_plus.stamp"
+    const val CUSTOM_STAMP_PATH = "/data/user/0/app.tachyon.tachyon_proxy/code_cache/engine/engine_v039_plus.stamp"
 
     @Volatile
     private var loaded = false

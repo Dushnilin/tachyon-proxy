@@ -412,6 +412,15 @@ class CoreBridge {
     }
   }
 
+  /// Возвращает команду быстрого действия (App Shortcut / Intent extra `cmd`), с которой было открыто приложение.
+  Future<String?> consumeLaunchCommand() async {
+    try {
+      return await _channel.invokeMethod<String>('consumeLaunchCommand');
+    } on PlatformException {
+      return null;
+    }
+  }
+
   /// Установленные приложения — пул для правил «разрешено/запрещено».
   Future<List<InstalledApp>> installedApps() async {
     try {
@@ -434,6 +443,80 @@ class CoreBridge {
   }
 }
 
+/// Живая телеметрия узла в балансировщике `urltest` (`tachyon-core` 0.3.9+).
+class BalancerNodeTelemetry {
+  const BalancerNodeTelemetry({
+    this.rttMs = 0,
+    this.ewmaRttMs = 0,
+    this.jitterMs = 0,
+    this.lossPenaltyMs = 0,
+    this.quarantined = false,
+    this.quarantineRemS = 0,
+    this.activeConns = 0,
+    this.throughputKibS = 0,
+    this.transferredKib = 0,
+  });
+
+  final int rttMs;
+  final int ewmaRttMs;
+  final int jitterMs;
+  final int lossPenaltyMs;
+  final bool quarantined;
+  final int quarantineRemS;
+  final int activeConns;
+  final int throughputKibS;
+  final int transferredKib;
+
+  static BalancerNodeTelemetry fromJson(Map<String, dynamic> json) {
+    return BalancerNodeTelemetry(
+      rttMs: (json['rtt_ms'] as num?)?.toInt() ?? 0,
+      ewmaRttMs: (json['ewma_rtt_ms'] as num?)?.toInt() ?? 0,
+      jitterMs: (json['jitter_ms'] as num?)?.toInt() ?? 0,
+      lossPenaltyMs: (json['loss_penalty_ms'] as num?)?.toInt() ?? 0,
+      quarantined: json['quarantined'] == true,
+      quarantineRemS: (json['quarantine_rem_s'] as num?)?.toInt() ?? 0,
+      activeConns: (json['active_conns'] as num?)?.toInt() ?? 0,
+      throughputKibS: (json['throughput_kib_s'] as num?)?.toInt() ?? 0,
+      transferredKib: (json['transferred_kib'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+/// Состояние активной группы балансировщика `urltest` от ядра.
+class BalancerRuntimeStatus {
+  const BalancerRuntimeStatus({
+    this.tag = 'proxy',
+    this.now = '',
+    this.mode = 'least_test',
+    this.telemetry = const {},
+  });
+
+  final String tag;
+  final String now;
+  final String mode;
+  final Map<String, BalancerNodeTelemetry> telemetry;
+
+  static BalancerRuntimeStatus fromJson(Map<String, dynamic> json) {
+    final rawTel = json['telemetry'];
+    final parsedTel = <String, BalancerNodeTelemetry>{};
+    if (rawTel is Map) {
+      rawTel.forEach((key, value) {
+        if (value is Map) {
+          parsedTel[key.toString()] = BalancerNodeTelemetry.fromJson(
+            value.map((k, v) => MapEntry(k.toString(), v)),
+          );
+        }
+      });
+    }
+    return BalancerRuntimeStatus(
+      tag: (json['tag'] as String?) ?? 'proxy',
+      now: (json['now'] as String?) ?? '',
+      mode: (json['mode'] as String?) ?? 'least_test',
+      telemetry: parsedTel,
+    );
+  }
+}
+
 /// Статистика трафика от ядра.
 class TrafficStats {
   const TrafficStats({
@@ -441,6 +524,7 @@ class TrafficStats {
     required this.up,
     required this.down,
     required this.connections,
+    this.balancer,
   });
 
   /// Работает ли ядро сейчас.
@@ -455,12 +539,23 @@ class TrafficStats {
   /// Активные соединения.
   final int connections;
 
+  /// Снимок телеметрии активного балансировщика `urltest` (`tachyon-core` 0.3.9+).
+  final BalancerRuntimeStatus? balancer;
+
   static TrafficStats fromJson(Map<String, dynamic> json) {
+    final rawBalancer = json['balancer'];
+    BalancerRuntimeStatus? balancer;
+    if (rawBalancer is Map) {
+      balancer = BalancerRuntimeStatus.fromJson(
+        rawBalancer.map((k, v) => MapEntry(k.toString(), v)),
+      );
+    }
     return TrafficStats(
       running: json['running'] == true,
       up: (json['up'] as num?)?.toInt() ?? 0,
       down: (json['down'] as num?)?.toInt() ?? 0,
       connections: (json['connections'] as num?)?.toInt() ?? 0,
+      balancer: balancer,
     );
   }
 

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
+import 'package:tachyon_proxy/core/services/core_bridge.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
 import 'package:tachyon_proxy/core/services/settings_store.dart';
 
@@ -237,5 +238,154 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
 
     final restored = AppSettings.fromJson(hidden.toJson());
     expect(restored.showFreeNodes, isFalse);
+  });
+
+  test('балансировщики tachyon-core 0.3.9 корректно сериализуются для всех режимов и телеметрии', () {
+    const balancerModesWithBlock = [
+      'stability',
+      'sticky',
+      'least_load',
+      'weighted',
+      'passive',
+      'priority',
+      'hedged',
+      'throughput',
+      'quota',
+      'round_robin',
+    ];
+    for (final mode in balancerModesWithBlock) {
+      final settings = BalancerSettings(
+        mode: mode,
+        pool: 5,
+        poolTolerance: 90,
+        stickyHash: const ['domain', 'dest_ip'],
+        quotaMib: 256,
+        interval: '2m',
+        tolerance: 40,
+      );
+      final out = settings.toUrltestOutbound(
+        tag: 'proxy',
+        outbounds: const ['auto-srv-0', 'auto-srv-1'],
+      );
+      expect(out['type'], 'urltest');
+      expect(out['tag'], 'proxy');
+      expect(out['mode'], mode);
+      expect(out['interval'], '2m');
+      expect(out['tolerance'], 40);
+      expect(out['balancer'], isA<Map<String, dynamic>>());
+      final bal = out['balancer'] as Map<String, dynamic>;
+      expect(bal['pool'], 5);
+      expect(bal['pool_tolerance'], 90);
+      expect(bal['sticky_hash'], ['domain', 'dest_ip']);
+      expect(bal['quota_mib'], 256);
+    }
+
+    for (final legacyMode in ['least_test', 'failover']) {
+      final settings = BalancerSettings(
+        mode: legacyMode,
+        pool: 4,
+        poolTolerance: 80,
+      );
+      final out = settings.toUrltestOutbound(
+        tag: 'proxy',
+        outbounds: const ['auto-srv-0'],
+      );
+      expect(out['mode'], legacyMode);
+      expect(out.containsKey('balancer'), isFalse);
+    }
+
+    const wgCandidate = Profile(
+      id: 'wg-1',
+      name: 'WARP 1',
+      type: 'wireguard',
+      server: '162.159.192.1',
+      port: 2408,
+      subscriptionId: 'sub-1',
+    );
+    const vlessCandidate = Profile(
+      id: 'vless-2',
+      name: 'VLESS 2',
+      type: 'vless',
+      server: 'example.org',
+      port: 443,
+      uuid: '00000000-0000-0000-0000-000000000000',
+      subscriptionId: 'sub-1',
+    );
+    const autoProfile = Profile(
+      id: 'auto:sub-1',
+      name: 'Автовыбор',
+      type: 'urltest',
+      server: 'auto',
+      port: 443,
+      subscriptionId: 'sub-1',
+    );
+    const customBalancer = BalancerSettings(
+      mode: 'stability',
+      pool: 6,
+      poolTolerance: 100,
+    );
+
+    final cfg = RuntimeConfig(
+      profile: autoProfile,
+      routingMode: RoutingMode.rules,
+      dns: const DnsSettings(),
+      ruleSets: const [],
+      extraProfiles: const [vlessCandidate, wgCandidate],
+      balancer: customBalancer,
+    ).toJson();
+
+    final outbounds = (cfg['outbounds'] as List).cast<Map<String, dynamic>>();
+    final proxyOut = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+    expect(proxyOut['type'], 'urltest');
+    expect(proxyOut['mode'], 'stability');
+    expect(proxyOut['outbounds'], ['auto-srv-0', 'auto-srv-1']);
+    expect((proxyOut['balancer'] as Map)['pool'], 6);
+    expect((proxyOut['balancer'] as Map)['pool_tolerance'], 100);
+    expect(outbounds.any((o) => o['tag'] == 'auto-srv-0' && o['type'] == 'vless'), isTrue);
+
+    final endpoints = (cfg['endpoints'] as List).cast<Map<String, dynamic>>();
+    expect(endpoints.any((e) => e['tag'] == 'auto-srv-1' && e['type'] == 'wireguard'), isTrue);
+
+    final appSettings = AppSettings(balancer: customBalancer);
+    final restoredSettings = AppSettings.fromJson(appSettings.toJson());
+    expect(restoredSettings.balancer.mode, 'stability');
+    expect(restoredSettings.balancer.pool, 6);
+    expect(restoredSettings.balancer.poolTolerance, 100);
+
+    final stats = TrafficStats.fromJson({
+      'running': true,
+      'up': 1024,
+      'down': 2048,
+      'connections': 3,
+      'balancer': {
+        'tag': 'proxy',
+        'now': 'auto-srv-0',
+        'mode': 'stability',
+        'telemetry': {
+          'auto-srv-0': {
+            'rtt_ms': 42,
+            'ewma_rtt_ms': 45,
+            'jitter_ms': 4,
+            'loss_penalty_ms': 0,
+            'quarantined': false,
+            'quarantine_rem_s': 0,
+            'active_conns': 2,
+            'throughput_kib_s': 1280,
+            'transferred_kib': 4096,
+          },
+        },
+      },
+    });
+    expect(stats.balancer, isNotNull);
+    expect(stats.balancer!.now, 'auto-srv-0');
+    expect(stats.balancer!.mode, 'stability');
+    final nodeTel = stats.balancer!.telemetry['auto-srv-0'];
+    expect(nodeTel, isNotNull);
+    expect(nodeTel!.rttMs, 42);
+    expect(nodeTel.ewmaRttMs, 45);
+    expect(nodeTel.jitterMs, 4);
+    expect(nodeTel.activeConns, 2);
+    expect(nodeTel.throughputKibS, 1280);
+    expect(nodeTel.quarantined, isFalse);
   });
 }

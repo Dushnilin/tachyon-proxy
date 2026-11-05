@@ -57,6 +57,8 @@ class AppController extends ChangeNotifier {
 
   /// Кэш результатов пинга серверов: profileId -> мс (-1 = недоступен).
   final Map<String, int> _pings = {};
+  final Map<String, BalancerNodeTelemetry> _nodeTelemetry = {};
+  Profile? _activeBalancerWinner;
   final Set<String> _pingingIds = {};
   bool _pingingAll = false;
   bool _sortByPing = false;
@@ -111,7 +113,8 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.12';
+  static const String appVersion = '0.0.13';
+  static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
   bool _updatingApp = false;
@@ -184,12 +187,16 @@ class AppController extends ChangeNotifier {
   bool get hasCoreUpdate =>
       _latestCoreVersion.isNotEmpty &&
       _installedCoreVersion.isNotEmpty &&
+      _compareSemver(_latestCoreVersion, minRequiredCoreVersion) >= 0 &&
       _compareSemver(_latestCoreVersion, _installedCoreVersion) > 0;
   bool get hasAppUpdate =>
       _latestAppVersion.isNotEmpty &&
       _compareSemver(_latestAppVersion, appVersion) > 0;
 
   int? pingOf(String id) => _pings[id];
+  BalancerNodeTelemetry? balancerTelemetryOf(String id) => _nodeTelemetry[id];
+  Profile? get activeBalancerWinner => _activeBalancerWinner;
+  BalancerRuntimeStatus? get activeBalancerStatus => _traffic?.balancer;
   bool isPinging(String id) => _pingingIds.contains(id);
 
   bool isSubCollapsed(String subId) => _settings.collapsedSubs.contains(subId);
@@ -310,6 +317,10 @@ class AppController extends ChangeNotifier {
     bridge.listen();
 
     unawaited(() async {
+      final launchCmd = await bridge.consumeLaunchCommand();
+      if (launchCmd != null && launchCmd.trim().isNotEmpty) {
+        await _handleExternalCommand(launchCmd);
+      }
       final launchLink = await bridge.consumeLaunchLink();
       if (launchLink != null && launchLink.trim().isNotEmpty) {
         await _handleIncomingDeepLink(launchLink);
@@ -1267,6 +1278,7 @@ class AppController extends ChangeNotifier {
       detourProfile: _settings.detourProfile,
       extraProfiles: _settings.visibleProfiles,
       proxyTlsFragment: _settings.proxyTlsFragment,
+      balancer: _settings.balancer,
     );
   }
 
@@ -1290,6 +1302,8 @@ class AppController extends ChangeNotifier {
       _exitCity = '';
       _exitFlag = '';
       _exitIsp = '';
+      _activeBalancerWinner = null;
+      _nodeTelemetry.clear();
       _latencyHistory.clear();
       _tunnel = _tunnel.copyWith(
         status: VpnStatus.disconnected,
@@ -1488,6 +1502,7 @@ class AppController extends ChangeNotifier {
       _prevTrafficAt = null;
     }
     _traffic = next;
+    _syncBalancerTelemetry(next?.balancer);
     _pollTickCount++;
 
     // Автоматическое переключение рецепта Desync при смене Wi-Fi <-> Мобильная сеть
@@ -1501,8 +1516,10 @@ class AppController extends ChangeNotifier {
     }
 
     // Smart Failover (Watchdog): раз в 30 сек проверяет живой отклик туннеля
+    // (для одиночного профиля; в режиме auto: балансировщик ядра переключает узлы сам)
     if (_tunnel.status.isActive &&
         _settings.smartFailover &&
+        !_settings.selectedProfileId.startsWith('auto:') &&
         _settings.routingMode != RoutingMode.desync &&
         _settings.profiles.length > 1 &&
         _pollTickCount % 15 == 0) {
@@ -1510,6 +1527,36 @@ class AppController extends ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  void _syncBalancerTelemetry(BalancerRuntimeStatus? bal) {
+    final sel = selectedProfile;
+    if (bal == null || sel == null || (!sel.id.startsWith('auto:') && sel.type != 'urltest')) {
+      _activeBalancerWinner = null;
+      _nodeTelemetry.clear();
+      return;
+    }
+    final candidates = RuntimeConfig.resolveAutoCandidates(sel, _settings.visibleProfiles);
+    _activeBalancerWinner = null;
+    _nodeTelemetry.clear();
+    for (var i = 0; i < candidates.length; i++) {
+      final tag = 'auto-srv-$i';
+      final cand = candidates[i];
+      if (bal.now == tag) {
+        _activeBalancerWinner = cand;
+      }
+      final tel = bal.telemetry[tag];
+      if (tel != null) {
+        _nodeTelemetry[cand.id] = tel;
+        final liveRtt = tel.ewmaRttMs > 0 ? tel.ewmaRttMs : tel.rttMs;
+        if (liveRtt > 0) {
+          _pings[cand.id] = liveRtt;
+          if (bal.now == tag && !_testingUrlPing && (_urlTestPing == null || _urlTestPing! <= 0)) {
+            _urlTestPing = tel.rttMs > 0 ? tel.rttMs : liveRtt;
+          }
+        }
+      }
+    }
   }
 
   Future<void> _checkNetworkDesyncProfile() async {
@@ -2321,6 +2368,16 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Обновляет настройки нативного балансировщика `tachyon-core` 0.3.9+.
+  Future<void> setBalancer(BalancerSettings balancer) async {
+    await _update(_settings.copyWith(balancer: balancer));
+    if (_tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        _settings.selectedProfileId.startsWith('auto:')) {
+      await _restartActiveTunnel();
+    }
+  }
+
   /// Обновляет данные о текущем Wi-Fi SSID, разрешениях и списке сетей вокруг.
   Future<void> refreshWifiInfo({bool requestPermission = false}) async {
     if (requestPermission) {
@@ -2884,6 +2941,13 @@ class AppController extends ChangeNotifier {
     if (isAnyUpdateRunning) return;
     if (Platform.isIOS) {
       await updateAppOnly();
+      return;
+    }
+    if (_latestCoreVersion.isNotEmpty &&
+        _compareSemver(_latestCoreVersion, minRequiredCoreVersion) < 0) {
+      _updateStatusText =
+          'Для приложения v$appVersion требуется ядро tachyon-core v$minRequiredCoreVersion или новее (на сервере: v$_latestCoreVersion)';
+      notifyListeners();
       return;
     }
     _updatingEngine = true;

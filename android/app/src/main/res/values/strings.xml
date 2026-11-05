@@ -6,4 +6,11 @@
     <string name="notification_channel_description">Уведомление о состоянии туннеля</string>
     <string name="notification_title">Tachyon запущен</string>
     <string name="notification_text">Трафик идёт через туннель</string>
+
+    <string name="shortcut_connect_short">Включить</string>
+    <string name="shortcut_connect_long">Включить туннель</string>
+    <string name="shortcut_disconnect_short">Выключить</string>
+    <string name="shortcut_disconnect_long">Выключить туннель</string>
+    <string name="shortcut_desync_short">Режим Desync</string>
+    <string name="shortcut_desync_long">Включить режим Desync</string>
 </resources>

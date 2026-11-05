@@ -257,6 +257,11 @@ class MainActivity : FlutterFragmentActivity() {
                         pendingDeepLink = null
                         result.success(link)
                     }
+                    "consumeLaunchCommand" -> {
+                        val cmd = pendingCmd
+                        pendingCmd = null
+                        result.success(cmd)
+                    }
                     else -> result.notImplemented()
                 }
             }

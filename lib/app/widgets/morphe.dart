@@ -15,22 +15,22 @@ class SectionLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     return Padding(
-      padding: const EdgeInsets.only(bottom: Space.md),
+      padding: const EdgeInsets.only(bottom: Space.sm),
       child: Row(
         children: [
           Text(
             text,
             style: TextStyle(
-              fontSize: 12.5,
+              fontSize: 12,
               fontWeight: FontWeight.w500,
               letterSpacing: 0,
               color: tokens.muted,
             ),
           ),
-          const SizedBox(width: Space.md),
+          const SizedBox(width: Space.sm),
           Expanded(child: Divider(color: tokens.line, height: 1)),
           if (trailing != null) ...[
-            const SizedBox(width: Space.md),
+            const SizedBox(width: Space.sm),
             trailing!,
           ],
         ],
@@ -487,7 +487,7 @@ class _SwitchRowState extends State<SwitchRow> {
         child: Container(
           padding: const EdgeInsets.symmetric(
             horizontal: Space.xs,
-            vertical: Space.xs,
+            vertical: 5,
           ),
           decoration: _focused
               ? BoxDecoration(
@@ -504,22 +504,43 @@ class _SwitchRowState extends State<SwitchRow> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(widget.title, style: Theme.of(context).textTheme.bodyLarge),
+                    Text(
+                      widget.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w500,
+                            color: tokens.ink,
+                          ),
+                    ),
                     if (widget.subtitle != null) ...[
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 1),
                       Text(
                         widget.subtitle!,
-                        style: Theme.of(context).textTheme.bodySmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              fontSize: 11,
+                              color: tokens.muted,
+                            ),
                       ),
                     ],
                   ],
                 ),
               ),
-              const SizedBox(width: Space.md),
+              const SizedBox(width: Space.sm),
               ExcludeFocus(
-                child: Switch(
-                  value: widget.value,
-                  onChanged: widget.onChanged,
+                child: SizedBox(
+                  height: 28,
+                  child: FittedBox(
+                    fit: BoxFit.contain,
+                    child: Switch(
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      value: widget.value,
+                      onChanged: widget.onChanged,
+                    ),
+                  ),
                 ),
               ),
             ],

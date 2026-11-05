@@ -294,9 +294,9 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_version<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `stats(): String?` — счётчики трафика и состояние.
+/// `stats(): String?` — счётчики трафика, состояние и телеметрия активного балансировщика.
 ///
-/// Возвращает JSON: `{"running":true,"up":N,"down":N,"connections":M}`.
+/// Возвращает JSON: `{"running":true,"up":N,"down":N,"connections":M,"balancer":{...}}`.
 /// Ядро считает байты по всем соединениям с момента запуска, поэтому UI
 /// показывает их напрямую, без собственного учёта.
 #[unsafe(no_mangle)]
@@ -308,12 +308,47 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_nativeStats<'caller>(
         .with_env(|env| -> jni::errors::Result<jstring> {
             let guard = CORE.lock().unwrap_or_else(PoisonError::into_inner);
             let running = guard.is_some();
+            let balancer = guard
+                .as_ref()
+                .and_then(|c| c.inst.as_ref())
+                .and_then(|inst| {
+                    let inner = inst.router().inner();
+                    let mut chosen: Option<(&str, &core_runtime::outbound::urltest::Urltest)> = None;
+                    for (_, tag, outbound) in inner.outbound_table() {
+                        if let core_runtime::route::Outbound::Urltest(u) = outbound {
+                            if tag == "proxy" {
+                                chosen = Some((tag, u));
+                                break;
+                            }
+                            if chosen.is_none() {
+                                chosen = Some((tag, u));
+                            }
+                        }
+                    }
+                    chosen.map(|(tag, u)| {
+                        json!({
+                            "tag": tag,
+                            "now": u.now(),
+                            "mode": u.mode_name(),
+                            "telemetry": u.telemetry_snapshot(),
+                        })
+                    })
+                });
             drop(guard);
             let (up, down) = core_runtime::clash_state::traffic_totals();
             let connections = core_runtime::clash_state::snapshot().0.len();
-            let answer = format!(
-                "{{\"running\":{running},\"up\":{up},\"down\":{down},\"connections\":{connections}}}"
-            );
+            let mut root = json!({
+                "running": running,
+                "up": up,
+                "down": down,
+                "connections": connections,
+            });
+            if let Some(bal) = balancer
+                && let Some(obj) = root.as_object_mut()
+            {
+                obj.insert("balancer".to_owned(), bal);
+            }
+            let answer = root.to_string();
             make_jstring(env, &answer)
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
@@ -696,6 +731,47 @@ mod tests {
         assert!(validate("{not json").is_err());
         assert!(validate(r#"{"futureSection":{}}"#).is_err());
         assert!(validate(r#"{"outbounds":[{"type":"direct"}]}"#).is_ok());
+    }
+
+    #[test]
+    fn check_accepts_all_v039_balancer_modes() {
+        for mode in [
+            "stability",
+            "sticky",
+            "least_load",
+            "weighted",
+            "passive",
+            "priority",
+            "hedged",
+            "throughput",
+            "quota",
+            "round_robin",
+        ] {
+            let cfg = json!({
+                "outbounds": [
+                    {
+                        "type": "urltest",
+                        "tag": "proxy",
+                        "outbounds": ["auto-srv-0"],
+                        "url": "https://www.gstatic.com/generate_204",
+                        "interval": "3m",
+                        "tolerance": 50,
+                        "mode": mode,
+                        "balancer": {
+                            "pool": 4,
+                            "pool_tolerance": 80,
+                            "sticky_hash": ["domain", "dest_ip"],
+                            "quota_mib": 256
+                        }
+                    },
+                    {"type": "direct", "tag": "auto-srv-0"}
+                ]
+            });
+            assert!(
+                validate(&cfg.to_string()).is_ok(),
+                "mode {mode} failed validation"
+            );
+        }
     }
 
     /// The wire the Kotlin helper must reproduce: real `protect()` client,

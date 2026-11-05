@@ -75,6 +75,7 @@ class AppSettings {
     this.homeWifiMode = false,
     this.trustedWifiSsids = const [],
     this.showFreeNodes = true,
+    this.balancer = const BalancerSettings(),
   });
 
   final List<Profile> profiles;
@@ -152,6 +153,9 @@ class AppSettings {
 
   /// Показывать ли карточку и списки бесплатных резервных узлов (WARP AmneziaWG и SHARD).
   final bool showFreeNodes;
+
+  /// Настройки нативного балансировщика `urltest` в `tachyon-core` 0.3.9+.
+  final BalancerSettings balancer;
 
   static bool isFreeSubId(String subId) =>
       subId == 'free-warp' || subId == 'free-shard';
@@ -231,6 +235,7 @@ class AppSettings {
     bool? homeWifiMode,
     List<String>? trustedWifiSsids,
     bool? showFreeNodes,
+    BalancerSettings? balancer,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -261,6 +266,7 @@ class AppSettings {
       homeWifiMode: homeWifiMode ?? this.homeWifiMode,
       trustedWifiSsids: trustedWifiSsids ?? this.trustedWifiSsids,
       showFreeNodes: showFreeNodes ?? this.showFreeNodes,
+      balancer: balancer ?? this.balancer,
     );
   }
 
@@ -294,6 +300,7 @@ class AppSettings {
         'homeWifiMode': homeWifiMode,
         'trustedWifiSsids': trustedWifiSsids,
         'showFreeNodes': showFreeNodes,
+        'balancer': balancer.toJson(),
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -357,6 +364,9 @@ class AppSettings {
           .where((item) => item.isNotEmpty)
           .toList(growable: false),
       showFreeNodes: json['showFreeNodes'] != false,
+      balancer: json['balancer'] is Map<String, dynamic>
+          ? BalancerSettings.fromJson(json['balancer'] as Map<String, dynamic>)
+          : const BalancerSettings(),
     );
   }
 }

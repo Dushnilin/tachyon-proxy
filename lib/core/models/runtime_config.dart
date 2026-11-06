@@ -1795,7 +1795,7 @@ class RuntimeConfig {
             p.type != 'urltest' &&
             p.type != 'direct' &&
             (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
-        .take(50)
+        .take(256)
         .toList(growable: false);
   }
 

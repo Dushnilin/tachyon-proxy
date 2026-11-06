@@ -387,5 +387,20 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
     expect(nodeTel.activeConns, 2);
     expect(nodeTel.throughputKibS, 1280);
     expect(nodeTel.quarantined, isFalse);
+
+    final sub77 = List<Profile>.generate(
+      77,
+      (i) => Profile(
+        id: 'srv-$i',
+        name: 'Server $i',
+        type: 'vless',
+        server: 's$i.example.org',
+        port: 443,
+        uuid: '00000000-0000-0000-0000-000000000000',
+        subscriptionId: 'sub-1',
+      ),
+    );
+    final resolved77 = RuntimeConfig.resolveAutoCandidates(autoProfile, sub77);
+    expect(resolved77.length, 77);
   });
 }

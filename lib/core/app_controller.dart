@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 
@@ -113,7 +114,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.13';
+  static const String appVersion = '0.0.14';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -1539,6 +1540,14 @@ class AppController extends ChangeNotifier {
     final candidates = RuntimeConfig.resolveAutoCandidates(sel, _settings.visibleProfiles);
     _activeBalancerWinner = null;
     _nodeTelemetry.clear();
+    var anyProbedAlive = false;
+    for (var i = 0; i < candidates.length; i++) {
+      final tel = bal.telemetry['auto-srv-$i'];
+      if (tel != null && tel.rttMs > 0 && !tel.quarantined) {
+        anyProbedAlive = true;
+        break;
+      }
+    }
     for (var i = 0; i < candidates.length; i++) {
       final tag = 'auto-srv-$i';
       final cand = candidates[i];
@@ -1548,12 +1557,13 @@ class AppController extends ChangeNotifier {
       final tel = bal.telemetry[tag];
       if (tel != null) {
         _nodeTelemetry[cand.id] = tel;
-        final liveRtt = tel.ewmaRttMs > 0 ? tel.ewmaRttMs : tel.rttMs;
-        if (liveRtt > 0) {
-          _pings[cand.id] = liveRtt;
+        if (tel.rttMs > 0 && !tel.quarantined) {
+          _pings[cand.id] = tel.rttMs;
           if (bal.now == tag && !_testingUrlPing && (_urlTestPing == null || _urlTestPing! <= 0)) {
-            _urlTestPing = tel.rttMs > 0 ? tel.rttMs : liveRtt;
+            _urlTestPing = tel.rttMs;
           }
+        } else if (anyProbedAlive && (tel.quarantined || tel.lossPenaltyMs > 0)) {
+          _pings[cand.id] = -1;
         }
       }
     }
@@ -2524,19 +2534,112 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Проверяет доступность и чистую сетевую задержку (TCP RTT) до сервера профиля.
-  /// DNS-резолвинг выполняется до запуска секундомера, чтобы время DNS-запроса
-  /// и пересылки REALITY-хендшейка на внешний SNI не завышало пинг.
+  static Uint8List _buildTlsClientHello(String sni) {
+    final rng = Random();
+    final exts = BytesBuilder(copy: false);
+
+    final cleanSni = sni.trim();
+    if (cleanSni.isNotEmpty && InternetAddress.tryParse(cleanSni) == null) {
+      final hostBytes = ascii.encode(cleanSni);
+      final nameListLen = hostBytes.length + 3;
+      final extLen = nameListLen + 2;
+      exts.add([
+        0x00, 0x00,
+        (extLen >> 8) & 0xff, extLen & 0xff,
+        (nameListLen >> 8) & 0xff, nameListLen & 0xff,
+        0x00,
+        (hostBytes.length >> 8) & 0xff, hostBytes.length & 0xff,
+        ...hostBytes,
+      ]);
+    }
+
+    exts.add(const [0x00, 0x17, 0x00, 0x00, 0xff, 0x01, 0x00, 0x01, 0x00]);
+    exts.add(const [
+      0x00, 0x0a, 0x00, 0x08, 0x00, 0x06,
+      0x00, 0x1d, 0x00, 0x17, 0x00, 0x18,
+    ]);
+    exts.add(const [0x00, 0x0b, 0x00, 0x02, 0x01, 0x00]);
+    exts.add(const [
+      0x00, 0x0d, 0x00, 0x12, 0x00, 0x10,
+      0x04, 0x03, 0x05, 0x03, 0x06, 0x03,
+      0x08, 0x04, 0x08, 0x05, 0x08, 0x06,
+      0x04, 0x01, 0x08, 0x07,
+    ]);
+    exts.add(const [0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x04, 0x03, 0x03]);
+    exts.add(const [0x00, 0x2d, 0x00, 0x02, 0x01, 0x01]);
+    final keyShare = List<int>.generate(32, (_) => rng.nextInt(256));
+    keyShare[0] &= 248;
+    keyShare[31] = (keyShare[31] & 127) | 64;
+    exts.add([
+      0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20,
+      ...keyShare,
+    ]);
+
+    final extBytes = exts.takeBytes();
+    final body = BytesBuilder(copy: false);
+    body.add(const [0x03, 0x03]);
+    body.add(List<int>.generate(32, (_) => rng.nextInt(256)));
+    body.addByte(32);
+    body.add(List<int>.generate(32, (_) => rng.nextInt(256)));
+    body.add(const [
+      0x00, 0x12,
+      0x13, 0x01, 0x13, 0x02, 0x13, 0x03,
+      0xc0, 0x2b, 0xc0, 0x2f, 0xc0, 0x2c,
+      0xc0, 0x30, 0xcc, 0xa9, 0xcc, 0xaa,
+    ]);
+    body.add(const [0x01, 0x00]);
+    body.add([(extBytes.length >> 8) & 0xff, extBytes.length & 0xff]);
+    body.add(extBytes);
+
+    final bodyBytes = body.takeBytes();
+    final hsLen = bodyBytes.length;
+    final recLen = hsLen + 4;
+    final record = BytesBuilder(copy: false);
+    record.add([
+      0x16, 0x03, 0x01,
+      (recLen >> 8) & 0xff, recLen & 0xff,
+      0x01,
+      (hsLen >> 16) & 0xff, (hsLen >> 8) & 0xff, hsLen & 0xff,
+    ]);
+    record.add(bodyBytes);
+    return record.takeBytes();
+  }
+
+  /// Проверяет доступность и задержку до сервера профиля.
+  /// Для TLS/Reality-профилей после TCP-рукопожатия отправляет TLS ClientHello
+  /// с фактическим SNI профиля и проверяет приход ServerHello, чтобы выявлять
+  /// фильтрацию и сброс соединения после SYN-ACK на транзитных узлах.
   Future<int> pingProfile(String id) async {
     final profile = _settings.profiles.where((p) => p.id == id).firstOrNull;
     if (profile == null || profile.server.isEmpty) return -1;
     _pingingIds.add(id);
     notifyListeners();
     var result = -1;
+    Socket? socket;
     try {
+      if (_tunnel.status.isActive && _nodeTelemetry.containsKey(id)) {
+        final tel = _nodeTelemetry[id]!;
+        final anyAlive = _nodeTelemetry.values.any((t) => t.rttMs > 0 && !t.quarantined);
+        if (tel.rttMs > 0 && !tel.quarantined) {
+          result = tel.rttMs;
+          return result;
+        } else if (anyAlive && (tel.quarantined || tel.lossPenaltyMs > 0)) {
+          result = -1;
+          return result;
+        }
+      }
+
       // Если профиль использует цепочку прокси (detour), проверяем первый входной узел цепочки
       var targetHost = profile.server.trim();
       var targetPort = profile.port;
+      var useTlsProbe = profile.hasTls &&
+          profile.type != 'hysteria2' &&
+          profile.type != 'hysteria' &&
+          profile.type != 'tuic' &&
+          profile.type != 'masque' &&
+          profile.type != 'wireguard';
+      var probeSni = profile.sni.trim().isNotEmpty ? profile.sni.trim() : targetHost;
+
       final chain = profile.extra['chain_outbounds'];
       if (chain is List && chain.isNotEmpty && chain.last is Map) {
         final entryHop = chain.last as Map;
@@ -2545,6 +2648,14 @@ class AppController extends ChangeNotifier {
         if (h.isNotEmpty && p > 0) {
           targetHost = h;
           targetPort = p;
+          final hopTls = entryHop['tls'];
+          if (hopTls is Map && hopTls['enabled'] == true) {
+            useTlsProbe = true;
+            final hopSni = (hopTls['server_name'] ?? '').toString().trim();
+            probeSni = hopSni.isNotEmpty ? hopSni : targetHost;
+          } else {
+            useTlsProbe = false;
+          }
         }
       }
 
@@ -2562,17 +2673,31 @@ class AppController extends ChangeNotifier {
       }
 
       final sw = Stopwatch()..start();
-      final socket = await Socket.connect(
+      socket = await Socket.connect(
         connectTarget,
         targetPort,
         timeout: const Duration(milliseconds: 2200),
       );
       sw.stop();
-      result = sw.elapsedMilliseconds;
-      socket.destroy();
+      final tcpMs = sw.elapsedMilliseconds.clamp(1, 9999);
+
+      if (useTlsProbe) {
+        final tlsSw = Stopwatch()..start();
+        socket.add(_buildTlsClientHello(probeSni));
+        final chunk = await socket.first.timeout(const Duration(milliseconds: 2200));
+        tlsSw.stop();
+        if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
+          result = tcpMs;
+        } else {
+          result = -1;
+        }
+      } else {
+        result = tcpMs;
+      }
     } catch (_) {
       result = -1;
     } finally {
+      socket?.destroy();
       _pings[id] = result;
       _pingingIds.remove(id);
       notifyListeners();

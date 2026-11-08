@@ -107,7 +107,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.15';
+  static const String appVersion = '0.0.16';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -582,21 +582,39 @@ class AppController extends ChangeNotifier {
     return false;
   }
 
-  /// Перезапускает активный туннель с новой конфигурацией.
+  /// Перезапускает активный туннель с новой конфигурацией без разрыва VPN-сессии.
   Future<void> _restartActiveTunnel() async {
     for (var i = 0; i < 20 && _tunnel.status.isBusy; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     if (!_tunnel.status.isActive) return;
-    await toggleTunnel();
-    for (var i = 0; i < 20 && _tunnel.status.isBusy; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    final config = buildConfig();
+    if (config == null) return;
+
+    final currentServer = _settings.routingMode == RoutingMode.desync
+        ? 'Режим Десинхронизации (Desync)'
+        : (selectedProfile?.name ?? (config.profile.name.isNotEmpty ? config.profile.name : ''));
+
+    final error = await bridge.start(
+      config.encode(),
+      allowedApps: _allowedApps,
+      disallowedApps: _disallowedApps,
+      serverName: currentServer,
+      mtu: _settings.mtu,
+      proxyOnly: _settings.proxyOnly,
+    );
+    if (error != null) {
+      _lastError = error;
+      notifyListeners();
+      return;
     }
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (!_tunnel.status.isActive && !_tunnel.status.isBusy) {
-      await toggleTunnel();
-      await _waitForLocalProxyReady();
-    }
+
+    _tunnel = _tunnel.copyWith(
+      serverName: currentServer.isNotEmpty ? currentServer : config.profile.name,
+    );
+    notifyListeners();
+    await _waitForLocalProxyReady();
   }
 
   /// Добавляет или обновляет профиль в списке (сохраняя позицию при редактировании).
@@ -899,6 +917,17 @@ class AppController extends ChangeNotifier {
       }
     } catch (_) {}
 
+    final prevSubOutboundsJson = jsonEncode(
+      _settings.profiles
+          .where((p) => p.subscriptionId == subId || (p.type == 'fptn' && p.subscriptionId.isEmpty))
+          .map((p) => p.toOutbound(tag: p.name))
+          .toList(),
+    );
+    final nextSubOutboundsJson = jsonEncode(
+      scopedFresh.map((p) => p.toOutbound(tag: p.name)).toList(),
+    );
+    final nodesChanged = prevSubOutboundsJson != nextSubOutboundsJson;
+
     // Удаляем старые серверы этой FPTN-группы И старые разрозненные серверы FPTN без группы
     final otherProfiles = _settings.profiles
         .where((p) => p.subscriptionId != subId && !(p.type == 'fptn' && p.subscriptionId.isEmpty))
@@ -960,7 +989,10 @@ class AppController extends ChangeNotifier {
 
     if (_tunnel.status.isActive &&
         _settings.routingMode != RoutingMode.desync &&
-        (nextSelected == 'auto:$subId' || scopedFresh.any((p) => p.id == nextSelected))) {
+        nodesChanged &&
+        (nextSelected == 'auto:all' ||
+            nextSelected == 'auto:$subId' ||
+            scopedFresh.any((p) => p.id == nextSelected))) {
       await _restartActiveTunnel();
     }
     return scopedFresh.length;
@@ -1135,19 +1167,15 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 15)
-        ..badCertificateCallback = ((cert, host, port) => true);
-
       final globalHwid = effectiveHwid;
       final hwid = sub.customHwid.trim().isNotEmpty
           ? sub.customHwid.trim()
           : globalHwid;
 
       const userAgents = [
-        'v2rayNG/1.8.5 (Linux; Android)',
-        'Tachyon/0.0.3 (Android; compatible; sing-box/1.11; HiddifyNext)',
-        'Happ/1.6.0 (Android; compatible; sing-box; Mihomo)',
+        'Tachyon/0.0.16 (Android; compatible; sing-box 1.14.3; HiddifyNext)',
+        'v2rayNG/1.8.29 (Linux; Android)',
+        'Happ/3.9.2 (Android; compatible; sing-box; Mihomo)',
         'v2rayTun/1.8.20 (Android)',
         'ClashMetaForAndroid/2.11.2.Meta',
       ];
@@ -1159,121 +1187,217 @@ class AppController extends ChangeNotifier {
       var gotHtml = false;
       var targetSubUrl = sub.url.trim();
       Map<String, dynamic>? nativeUserInfo;
+      Map<String, dynamic>? nativeRes;
 
-      // 1. Сначала пробуем адаптивную загрузку и разбор напрямую через нативный движок tachyon-core
-      final nativeRes = await bridge.fetchSubscription(
-        targetSubUrl,
-        sendHwid: true,
-        customHwid: hwid,
-        insecure: true,
-      );
-      if (nativeRes != null &&
-          nativeRes['ok'] == true &&
-          nativeRes['nodes'] is List) {
-        fresh = parser.parseEngineNodes(
-          nativeRes['nodes'] as List,
-          (nativeRes['primary_tags'] as List?) ?? const [],
-          subscriptionId: subId,
+      Future<void> tryNativeFetch() async {
+        if (fresh.isNotEmpty) return;
+        nativeRes = await bridge.fetchSubscription(
+          targetSubUrl,
+          sendHwid: true,
+          customHwid: hwid,
+          insecure: true,
         );
-        if (nativeRes['user_info'] is Map) {
-          nativeUserInfo = Map<String, dynamic>.from(nativeRes['user_info'] as Map);
+        if (nativeRes != null &&
+            nativeRes!['ok'] == true &&
+            nativeRes!['nodes'] is List) {
+          fresh = parser.parseEngineNodes(
+            nativeRes!['nodes'] as List,
+            (nativeRes!['primary_tags'] as List?) ?? const [],
+            subscriptionId: subId,
+          );
+          if (nativeRes!['user_info'] is Map) {
+            nativeUserInfo = Map<String, dynamic>.from(nativeRes!['user_info'] as Map);
+          }
         }
       }
 
-      // 2. Фоллбэк: если провайдер отдал HTML-лендинг или кастомную схему роутера
-      for (final ua in fresh.isNotEmpty ? const <String>[] : userAgents) {
-        var currentUrl = targetSubUrl;
-        HttpClientResponse? attemptResp;
-        for (var redirect = 0; redirect < 6; redirect++) {
-          final uri = Uri.tryParse(currentUrl);
-          if (uri == null) {
-            _lastError = 'Некорректная ссылка: $currentUrl';
-            notifyListeners();
-            return 0;
-          }
-          final request = await client.getUrl(uri);
-          request.headers.set('User-Agent', ua);
-          request.headers.set('Accept', 'application/json, text/plain, */*');
-          request.headers.set('Accept-Encoding', 'gzip, deflate');
-          request.headers.set('X-Hwid', hwid);
-          request.headers.set('x-device-os', 'Android');
-          request.headers.set('x-ver-os', '14');
-          request.headers.set('x-device-model', 'Android');
-          request.followRedirects = false;
-          attemptResp = await request.close();
+      Future<void> tryHttpCascade({required bool viaProxy}) async {
+        if (fresh.isNotEmpty) return;
+        final client = HttpClient()
+          ..connectionTimeout = Duration(seconds: viaProxy ? 10 : 15)
+          ..badCertificateCallback = ((cert, host, port) => true);
+        if (viaProxy) {
+          client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+        }
+        try {
+          for (final ua in userAgents) {
+            if (fresh.isNotEmpty) break;
+            try {
+              var currentUrl = targetSubUrl;
+              HttpClientResponse? attemptResp;
+              for (var redirect = 0; redirect < 6; redirect++) {
+                final uri = Uri.tryParse(currentUrl);
+                if (uri == null || (!uri.isScheme('http') && !uri.isScheme('https'))) {
+                  break;
+                }
+                final request = await client.getUrl(uri);
+                request.headers.set('User-Agent', ua);
+                request.headers.set('Accept', 'application/json, text/plain, */*');
+                request.headers.set('Accept-Encoding', 'gzip, deflate');
+                request.headers.set('X-Hwid', hwid);
+                request.headers.set('x-device-os', 'Android');
+                request.headers.set('x-ver-os', '14');
+                request.headers.set('x-device-model', 'Android');
+                request.followRedirects = false;
+                attemptResp = await request.close().timeout(
+                      Duration(seconds: viaProxy ? 12 : 15),
+                    );
 
-          if (attemptResp.statusCode >= 300 && attemptResp.statusCode < 400) {
-            final loc = attemptResp.headers.value(HttpHeaders.locationHeader);
-            await attemptResp.drain();
-            if (loc != null && loc.isNotEmpty) {
-              currentUrl = uri.resolve(loc).toString();
+                if (attemptResp.statusCode >= 300 && attemptResp.statusCode < 400) {
+                  final loc = attemptResp.headers.value(HttpHeaders.locationHeader);
+                  await attemptResp.drain();
+                  if (loc != null && loc.isNotEmpty) {
+                    currentUrl = uri.resolve(loc).toString();
+                    continue;
+                  }
+                }
+                break;
+              }
+
+              if (attemptResp == null) continue;
+              lastStatusCode = attemptResp.statusCode;
+              if (attemptResp.statusCode != 200) {
+                await attemptResp.drain();
+                continue;
+              }
+
+              var bytes = await attemptResp
+                  .fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk))
+                  .timeout(Duration(seconds: viaProxy ? 15 : 20));
+              if (bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) {
+                try {
+                  bytes = gzip.decode(bytes);
+                } catch (_) {}
+              }
+
+              String body;
+              try {
+                body = utf8.decode(bytes);
+              } catch (_) {
+                body = latin1.decode(bytes);
+              }
+
+              final trimmed = body.trim();
+              if (trimmed.toLowerCase().startsWith('<!doctype html') ||
+                  trimmed.toLowerCase().startsWith('<html')) {
+                gotHtml = true;
+                final (extractedSubUrl, extractedProfiles) = _extractFromHtmlLanding(
+                  trimmed,
+                  subId,
+                  parser,
+                );
+                if (extractedProfiles.isNotEmpty) {
+                  fresh = extractedProfiles;
+                  response = attemptResp;
+                  break;
+                }
+                if (extractedSubUrl != null &&
+                    extractedSubUrl.isNotEmpty &&
+                    extractedSubUrl != targetSubUrl) {
+                  targetSubUrl = extractedSubUrl;
+                }
+                continue;
+              }
+
+              // Синтез секции [Peer] из HTTP-заголовков для AmneziaWG / WireGuard подписок
+              if (RegExp(r'^\s*\[Interface\]\s*$', multiLine: true, caseSensitive: false)
+                      .hasMatch(body) &&
+                  !RegExp(r'^\s*\[Peer\]\s*$', multiLine: true, caseSensitive: false)
+                      .hasMatch(body)) {
+                String? hdr(List<String> names) {
+                  for (final n in names) {
+                    final v = attemptResp!.headers.value(n)?.trim();
+                    if (v != null && v.isNotEmpty) return v;
+                  }
+                  return null;
+                }
+
+                final pk = hdr([
+                  'x-peer-public-key',
+                  'x-wg-public-key',
+                  'x-awg-public-key',
+                  'x-server-public-key',
+                  'peer-public-key',
+                ]);
+                var ep = hdr([
+                  'x-peer-endpoint',
+                  'x-wg-endpoint',
+                  'x-awg-endpoint',
+                  'x-endpoint',
+                  'peer-endpoint',
+                ]);
+                if (ep == null) {
+                  final host = hdr(['x-peer-host', 'x-server-host', 'x-wg-host', 'x-awg-host']);
+                  if (host != null) {
+                    final port =
+                        hdr(['x-peer-port', 'x-server-port', 'x-wg-port', 'x-awg-port']) ?? '51820';
+                    ep = (host.contains(':') && !host.startsWith('['))
+                        ? '[$host]:$port'
+                        : '$host:$port';
+                  }
+                }
+                final psk = hdr([
+                  'x-preshared-key',
+                  'x-peer-preshared-key',
+                  'x-wg-preshared-key',
+                  'x-awg-preshared-key',
+                ]);
+                if (pk != null && ep != null) {
+                  final buf = StringBuffer(body);
+                  if (!body.endsWith('\n')) buf.writeln();
+                  buf.writeln('\n[Peer]');
+                  buf.writeln('PublicKey = $pk');
+                  if (psk != null) buf.writeln('PresharedKey = $psk');
+                  buf.writeln('Endpoint = $ep');
+                  buf.writeln('AllowedIPs = 0.0.0.0/0, ::/0');
+                  body = buf.toString();
+                }
+              }
+
+              var parsed = <Profile>[];
+              final nativeBodyParsed = await bridge.parseSubscription(body);
+              if (nativeBodyParsed != null &&
+                  nativeBodyParsed['ok'] == true &&
+                  nativeBodyParsed['nodes'] is List) {
+                parsed = parser.parseEngineNodes(
+                  nativeBodyParsed['nodes'] as List,
+                  (nativeBodyParsed['primary_tags'] as List?) ?? const [],
+                  subscriptionId: subId,
+                );
+              }
+              if (parsed.isEmpty) {
+                parsed = parser.parseSubscription(body, subscriptionId: subId);
+              }
+              if (parsed.isNotEmpty) {
+                fresh = parsed;
+                response = attemptResp;
+                break;
+              }
+            } catch (_) {
               continue;
             }
           }
-          break;
+        } finally {
+          client.close(force: false);
         }
+      }
 
-        if (attemptResp == null) continue;
-        lastStatusCode = attemptResp.statusCode;
-        if (attemptResp.statusCode != 200) {
-          await attemptResp.drain();
-          continue;
+      // При активном VPN-туннеле приложение исключено из TUN (addDisallowedApplication),
+      // поэтому сначала загружаем подписку ЧЕРЕЗ локальный прокси ядра (127.0.0.1:2080),
+      // чтобы обновление работало даже при сетевых ограничениях оператора (белых списках),
+      // не разрывая текущее соединение.
+      if (_tunnel.status.isActive) {
+        await tryHttpCascade(viaProxy: true);
+        if (fresh.isEmpty) {
+          await tryNativeFetch();
         }
-
-        var bytes = await attemptResp.fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk));
-        if (bytes.length >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) {
-          try {
-            bytes = gzip.decode(bytes);
-          } catch (_) {}
+        if (fresh.isEmpty) {
+          await tryHttpCascade(viaProxy: false);
         }
-
-        String body;
-        try {
-          body = utf8.decode(bytes);
-        } catch (_) {
-          body = latin1.decode(bytes);
-        }
-
-        final trimmed = body.trim();
-        if (trimmed.toLowerCase().startsWith('<!doctype html') ||
-            trimmed.toLowerCase().startsWith('<html')) {
-          gotHtml = true;
-          final (extractedSubUrl, extractedProfiles) = _extractFromHtmlLanding(
-            trimmed,
-            subId,
-            parser,
-          );
-          if (extractedProfiles.isNotEmpty) {
-            fresh = extractedProfiles;
-            response = attemptResp;
-            break;
-          }
-          if (extractedSubUrl != null &&
-              extractedSubUrl.isNotEmpty &&
-              extractedSubUrl != targetSubUrl) {
-            targetSubUrl = extractedSubUrl;
-          }
-          continue;
-        }
-
-        var parsed = <Profile>[];
-        final nativeBodyParsed = await bridge.parseSubscription(body);
-        if (nativeBodyParsed != null &&
-            nativeBodyParsed['ok'] == true &&
-            nativeBodyParsed['nodes'] is List) {
-          parsed = parser.parseEngineNodes(
-            nativeBodyParsed['nodes'] as List,
-            (nativeBodyParsed['primary_tags'] as List?) ?? const [],
-            subscriptionId: subId,
-          );
-        }
-        if (parsed.isEmpty) {
-          parsed = parser.parseSubscription(body, subscriptionId: subId);
-        }
-        if (parsed.isNotEmpty) {
-          fresh = parsed;
-          response = attemptResp;
-          break;
+      } else {
+        await tryNativeFetch();
+        if (fresh.isEmpty) {
+          await tryHttpCascade(viaProxy: false);
         }
       }
 
@@ -1330,14 +1454,6 @@ class AppController extends ChangeNotifier {
           response?.headers.value('profile-web-page-url') ??
           sub.supportUrl;
 
-      // Сохраняем файл кэша для ядра в виде готового списка outbounds (sing-box JSON)
-      try {
-        final cacheFile = File('$filesDirPath/subs/$subId.txt');
-        await cacheFile.parent.create(recursive: true);
-        final outboundsList = fresh.map((p) => p.toOutbound(tag: p.name)).toList();
-        await cacheFile.writeAsString(jsonEncode(outboundsList));
-      } catch (_) {}
-
       // Заменяем старые профили этой подписки свежими (сохраняя пользовательские network_scope)
       final prevScopes = <String, String>{
         for (final p in _settings.profiles)
@@ -1359,6 +1475,24 @@ class AppController extends ChangeNotifier {
                 else
                   p,
             ];
+
+      final prevSubOutboundsJson = jsonEncode(
+        _settings.profiles
+            .where((p) => p.subscriptionId == subId)
+            .map((p) => p.toOutbound(tag: p.name))
+            .toList(),
+      );
+      final nextSubOutboundsList = scopedFresh.map((p) => p.toOutbound(tag: p.name)).toList();
+      final nextSubOutboundsJson = jsonEncode(nextSubOutboundsList);
+      final nodesChanged = prevSubOutboundsJson != nextSubOutboundsJson;
+
+      // Сохраняем файл кэша для ядра в виде готового списка outbounds (sing-box JSON)
+      try {
+        final cacheFile = File('$filesDirPath/subs/$subId.txt');
+        await cacheFile.parent.create(recursive: true);
+        await cacheFile.writeAsString(nextSubOutboundsJson);
+      } catch (_) {}
+
       final otherProfiles = _settings.profiles.where((p) => p.subscriptionId != subId).toList();
       final updatedProfiles = [...otherProfiles, ...scopedFresh];
       final keepSelected = _settings.selectedProfileId.startsWith('auto:') ||
@@ -1387,6 +1521,17 @@ class AppController extends ChangeNotifier {
         selectedProfileId: newSelected,
         subscriptions: updatedSubs,
       ));
+
+      final usesThisSub = newSelected == 'auto:all' ||
+          newSelected == 'auto:$subId' ||
+          scopedFresh.any((p) => p.id == newSelected);
+      if (_tunnel.status.isActive &&
+          _settings.routingMode != RoutingMode.desync &&
+          usesThisSub &&
+          nodesChanged) {
+        await _restartActiveTunnel();
+      }
+
       _lastError = '';
       return scopedFresh.length;
     } catch (e) {
@@ -1722,7 +1867,6 @@ class AppController extends ChangeNotifier {
     }
 
     await _checkNetworkDesyncProfile(forceCheck: true);
-    await ensureRequiredListsDownloaded();
     final config = buildConfig();
     if (config == null) {
       _lastError = 'нет профиля или подписки';
@@ -1764,6 +1908,7 @@ class AppController extends ChangeNotifier {
     // интерфейс остаётся в состоянии «подключение».
     _tunnel = _tunnel.copyWith(serverName: currentServer.isNotEmpty ? currentServer : config.profile.name);
     notifyListeners();
+    unawaited(ensureRequiredListsDownloaded());
   }
 
   /// Состояние от нативного слоя: оно авторитетнее локального.
@@ -3047,15 +3192,9 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Принудительно обновляет подписку: перезапускает ядро с тем же конфигом,
-  /// что заставляет ядро перекачать все подписки немедленно.
-  Future<void> refreshSubscription(String id) async {
-    await fetchSubscription(id);
-    if (_tunnel.status.isActive) {
-      await toggleTunnel();
-      await Future<void>.delayed(const Duration(milliseconds: 800));
-      await toggleTunnel();
-    }
+  /// Принудительно обновляет подписку по её ID без отключения активного VPN-туннеля.
+  Future<int> refreshSubscription(String id) {
+    return fetchSubscription(id);
   }
 
   /// Версия нативного ядра.

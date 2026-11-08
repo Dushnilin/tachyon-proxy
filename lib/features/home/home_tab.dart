@@ -431,8 +431,30 @@ class _HomeTabState extends State<HomeTab> {
                   IconButton(
                     visualDensity: VisualDensity.compact,
                     tooltip: 'Обновить подписку',
-                    icon: const Icon(Icons.sync, size: 18),
-                    onPressed: () => controller.fetchSubscription(sub.id),
+                    icon: controller.loadingSubscription
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.sync, size: 18),
+                    onPressed: controller.loadingSubscription
+                        ? null
+                        : () async {
+                            final count = await controller.fetchSubscription(sub.id);
+                            if (!context.mounted) return;
+                            final msg = count > 0
+                                ? 'Подписка обновлена (серверов: $count)'
+                                : (controller.lastError.isNotEmpty
+                                    ? controller.lastError
+                                    : 'Не удалось обновить подписку');
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(msg),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                          },
                   ),
                 ],
               ),

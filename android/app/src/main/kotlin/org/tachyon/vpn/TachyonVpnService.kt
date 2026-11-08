@@ -600,13 +600,15 @@ class TachyonVpnService : VpnService() {
         statsThread?.interrupt()
         statsThread = null
 
+        runCatching { coreThread?.join(2000) }
+        coreThread = null
+
         runCatching { TachyonCore.stop() }
             .onFailure { Log.e(TAG, "остановка ядра не удалась", it) }
         runCatching { TachyonCore.protectClose() }
 
-        coreThread?.interrupt()
-        coreThread = null
         protectThread?.interrupt()
+        runCatching { protectThread?.join(300) }
         protectThread = null
 
         closeTun()

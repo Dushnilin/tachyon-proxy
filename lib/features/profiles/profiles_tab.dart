@@ -2110,14 +2110,30 @@ class _SubscriptionGroupList extends StatelessWidget {
             onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
             onToggleSub: () => controller.toggleSubscription(sub.id),
             onRemoveSub: () => controller.removeSubscription(sub.id),
-            onRefreshSub: () => sub.isFptnToken
-                ? showFptnTokenDialog(
-                    context,
-                    controller,
-                    sub.url,
-                    existingSub: sub,
-                  )
-                : controller.refreshSubscription(sub.id),
+            onRefreshSub: () async {
+              if (sub.isFptnToken) {
+                await showFptnTokenDialog(
+                  context,
+                  controller,
+                  sub.url,
+                  existingSub: sub,
+                );
+                return;
+              }
+              final count = await controller.refreshSubscription(sub.id);
+              if (!context.mounted) return;
+              final msg = count > 0
+                  ? 'Подписка обновлена (серверов: $count)'
+                  : (controller.lastError.isNotEmpty
+                      ? controller.lastError
+                      : 'Не удалось обновить подписку');
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(msg),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
             onPingAllSub: () => controller.pingAllProfiles(subscriptionId: sub.id),
             onSelectProfile: (id) => controller.selectProfile(id),
             onDeleteProfile: (id) => controller.removeProfile(id),
@@ -2600,13 +2616,21 @@ class _CollapsibleSubCard extends StatelessWidget {
                               vertical: 4,
                             ),
                           ),
-                          onPressed: onRefreshSub,
-                          icon: Icon(
-                            sub.isFptnToken ? Icons.checklist_rounded : Icons.sync,
-                            size: 13,
-                          ),
+                          onPressed: controller.loadingSubscription ? null : onRefreshSub,
+                          icon: controller.loadingSubscription && !sub.isFptnToken
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(strokeWidth: 1.8),
+                                )
+                              : Icon(
+                                  sub.isFptnToken ? Icons.checklist_rounded : Icons.sync,
+                                  size: 13,
+                                ),
                           label: Text(
-                            sub.isFptnToken ? 'Токен / Серверы' : 'Обновить',
+                            sub.isFptnToken
+                                ? 'Токен / Серверы'
+                                : (controller.loadingSubscription ? 'Обновление...' : 'Обновить'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(fontSize: 11),

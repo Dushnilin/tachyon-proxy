@@ -57,13 +57,106 @@ class Profile {
   /// Прочие поля аутбаунда sing-box как есть.
   final Map<String, dynamic> extra;
 
+  /// Сетевая область действия профиля: `'all'`, `'wifi'` или `'cellular'`.
+  String get networkScope {
+    final raw = (extra['network_scope'] as String?)?.trim().toLowerCase() ?? '';
+    return (raw == 'wifi' || raw == 'cellular') ? raw : 'all';
+  }
+
   bool get isReality =>
       publicKey.isNotEmpty && type != 'wireguard' && type != 'masque';
 
-  bool get isAmneziaWg =>
-      type == 'wireguard' &&
-      ((extra['jc'] is num && (extra['jc'] as num) > 0) ||
-          (extra['i1']?.toString().isNotEmpty ?? false));
+  static const Set<String> _awgKeys = {
+    'jc',
+    'jmin',
+    'jmax',
+    's1',
+    's2',
+    's3',
+    's4',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'i1',
+    'i2',
+    'i3',
+    'i4',
+    'i5',
+    'id',
+    'ip',
+    'ib',
+    'header_protection_key',
+    'content_padding_addition',
+    'rekey_after_time',
+    'rekey_timeout',
+    'reject_after_time',
+    'keepalive_timeout',
+    'max_handshake_attempts',
+    'random_trailers',
+    'disable_cookies',
+  };
+
+  bool get isAmneziaWg {
+    if (type != 'wireguard') return false;
+    for (final k in _awgKeys) {
+      final v = extra[k];
+      if (v == null) continue;
+      if (v is bool && v) return true;
+      if (v is num) {
+        if (k == 'h1' && v == 1) continue;
+        if (k == 'h2' && v == 2) continue;
+        if (k == 'h3' && v == 3) continue;
+        if (k == 'h4' && v == 4) continue;
+        if (v > 0) return true;
+      }
+      if (v is String) {
+        final s = v.trim();
+        if (s.isEmpty || s == '0') continue;
+        if (k == 'h1' && s == '1') continue;
+        if (k == 'h2' && s == '2') continue;
+        if (k == 'h3' && s == '3') continue;
+        if (k == 'h4' && s == '4') continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Определяет версию протокола AmneziaWG (1.5 / 2.0 / 3.0 / 3.1) по задействованным параметрам.
+  String get awgVersionLabel {
+    if (!isAmneziaWg) return 'WIREGUARD';
+    if (extra['random_trailers'] == true || extra['disable_cookies'] == true) {
+      return 'AMNEZIAWG 3.1';
+    }
+    for (final k in const [
+      'header_protection_key',
+      'content_padding_addition',
+      'id',
+      'ip',
+      'ib',
+      'rekey_after_time',
+      'rekey_timeout',
+      'reject_after_time',
+      'keepalive_timeout',
+      'max_handshake_attempts',
+    ]) {
+      final v = extra[k];
+      if (v != null && v.toString().trim().isNotEmpty && v.toString().trim() != '0') {
+        return 'AMNEZIAWG 3.0';
+      }
+    }
+    for (final k in const ['s3', 's4', 'i1', 'i2', 'i3', 'i4', 'i5']) {
+      final v = extra[k];
+      if (v is num && v > 0) return 'AMNEZIAWG 2.0';
+      if (v is String && v.trim().isNotEmpty && v.trim() != '0') return 'AMNEZIAWG 2.0';
+    }
+    for (final k in const ['h1', 'h2', 'h3', 'h4']) {
+      final v = extra[k];
+      if (v is String && v.contains('-')) return 'AMNEZIAWG 2.0';
+    }
+    return 'AMNEZIAWG';
+  }
 
   bool get hasTls {
     if (const {'wireguard', 'shadowsocks', 'socks', 'ssh', 'snell', 'mtproto', 'mieru'}.contains(type)) {
@@ -84,7 +177,7 @@ class Profile {
     }
     final parts = <String>[];
     if (isAmneziaWg) {
-      parts.add('AMNEZIAWG');
+      parts.add(awgVersionLabel);
     } else if (type == 'hysteria2') {
       parts.add('HYSTERIA 2');
     } else {
@@ -142,6 +235,32 @@ class Profile {
     return parts.join(' · ');
   }
 
+  static const Set<String> _allowedWgEndpointFields = {
+    'system',
+    'name',
+    'mtu',
+    'listen_port',
+    'udp_timeout',
+    'udp_mapping',
+    'udp_filtering',
+    'udp_nat_max',
+    'workers',
+    'network_strategy',
+    'detour',
+    'bind_interface',
+    'inet4_bind_address',
+    'inet6_bind_address',
+    'routing_mark',
+    'reuse_addr',
+    'connect_timeout',
+    'tcp_fast_open',
+    'tcp_multi_path',
+    'udp_fragment',
+    'domain_strategy',
+    'fallback_delay',
+    ..._awgKeys,
+  };
+
   /// Собирает канонический WireGuard/AmneziaWG эндпоинт для массива `endpoints` ядра.
   Map<String, dynamic> toWireGuardEndpoint({String tag = 'proxy'}) {
     final cleanExtra = Map<String, dynamic>.from(extra);
@@ -152,17 +271,57 @@ class Profile {
         .toString();
     final psk = cleanExtra.remove('pre_shared_key')?.toString() ?? '';
     final reserved = cleanExtra.remove('reserved');
+    final rawKeepalive = cleanExtra.remove('persistent_keepalive_interval') ??
+        cleanExtra.remove('keepalive');
+    Object? keepaliveVal;
+    if (rawKeepalive is num && rawKeepalive.toInt() > 0) {
+      keepaliveVal = rawKeepalive.toInt();
+    } else if (rawKeepalive is String && rawKeepalive.trim().isNotEmpty) {
+      final s = rawKeepalive.trim();
+      final asInt = int.tryParse(s);
+      if (asInt != null && asInt > 0) {
+        keepaliveVal = asInt;
+      } else if (s.contains('-')) {
+        keepaliveVal = s;
+      }
+    }
+
+    final rawAllowed = cleanExtra.remove('allowed_ips');
+    final allowedIps = rawAllowed is List && rawAllowed.isNotEmpty
+        ? rawAllowed.map((e) => e.toString().trim()).where((s) => s.isNotEmpty).toList()
+        : <String>['0.0.0.0/0', '::/0'];
+
     final localAddr = cleanExtra.remove('local_address') ?? cleanExtra.remove('address');
     final addrs = localAddr is List && localAddr.isNotEmpty
         ? localAddr.map((e) => e.toString()).toList()
         : <String>['10.0.0.2/32'];
-    cleanExtra
-      ..remove('tls')
-      ..remove('transport')
-      ..remove('security')
-      ..remove('pcs')
-      ..remove('certificate_sha256')
-      ..remove('chain_outbounds');
+
+    // AmneziaWG 3.0+: если задан header_protection_key, s1..s4 должны быть >= 12 (по умолчанию 20)
+    final hpk = cleanExtra['header_protection_key']?.toString().trim() ?? '';
+    if (hpk.isNotEmpty) {
+      for (final sk in const ['s1', 's2', 's3', 's4']) {
+        final cur = (cleanExtra[sk] is num)
+            ? (cleanExtra[sk] as num).toInt()
+            : (int.tryParse(cleanExtra[sk]?.toString() ?? '') ?? 0);
+        if (cur < 12) {
+          cleanExtra[sk] = 20;
+        }
+      }
+    }
+    // Если задан явный i1, удаляем декларативные id/ip/ib во избежание конфликта генератора awg_masque
+    final i1 = cleanExtra['i1']?.toString().trim() ?? '';
+    if (i1.isNotEmpty) {
+      cleanExtra
+        ..remove('id')
+        ..remove('ip')
+        ..remove('ib');
+    }
+
+    cleanExtra.removeWhere((k, v) =>
+        !_allowedWgEndpointFields.contains(k) ||
+        v == null ||
+        (v is String && v.trim().isEmpty));
+
     return {
       'type': 'wireguard',
       'tag': tag,
@@ -174,7 +333,8 @@ class Profile {
           'port': port,
           'public_key': pubKey,
           if (psk.isNotEmpty) 'pre_shared_key': psk,
-          'allowed_ips': ['0.0.0.0/0', '::/0'],
+          'allowed_ips': allowedIps.isEmpty ? ['0.0.0.0/0', '::/0'] : allowedIps,
+          'persistent_keepalive_interval': ?keepaliveVal,
           'reserved': ?reserved,
         },
       ],
@@ -197,7 +357,8 @@ class Profile {
     final pq = cleanExtra.remove('pq') == true;
     cleanExtra
       ..remove('pcs')
-      ..remove('chain_outbounds');
+      ..remove('chain_outbounds')
+      ..remove('network_scope');
     final certSha256 = cleanExtra.remove('certificate_sha256');
     if (cleanExtra['transport'] is Map) {
       final tr = cleanExtra['transport'] as Map;
@@ -768,12 +929,49 @@ class Profile {
         final params = <String, String>{
           'publickey': pubKey,
           'address': addrs,
-          if (extra['pre_shared_key'] != null) 'psk': extra['pre_shared_key'].toString(),
+          if (extra['pre_shared_key'] != null && extra['pre_shared_key'].toString().isNotEmpty)
+            'psk': extra['pre_shared_key'].toString(),
           if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+          if (extra['persistent_keepalive_interval'] != null)
+            'keepalive': extra['persistent_keepalive_interval'].toString(),
         };
-        for (final k in ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1']) {
+        for (final k in const [
+          'jc',
+          'jmin',
+          'jmax',
+          's1',
+          's2',
+          's3',
+          's4',
+          'h1',
+          'h2',
+          'h3',
+          'h4',
+          'i1',
+          'i2',
+          'i3',
+          'i4',
+          'i5',
+          'id',
+          'ib',
+          'header_protection_key',
+          'content_padding_addition',
+          'rekey_after_time',
+          'rekey_timeout',
+          'reject_after_time',
+          'keepalive_timeout',
+          'max_handshake_attempts',
+        ]) {
           if (extra[k] != null && extra[k].toString().isNotEmpty) {
             params[k] = extra[k].toString();
+          }
+        }
+        if (extra['ip'] != null && extra['ip'].toString().isNotEmpty) {
+          params['awg_ip'] = extra['ip'].toString();
+        }
+        for (final bk in const ['random_trailers', 'disable_cookies']) {
+          if (extra[bk] == true) {
+            params[bk] = '1';
           }
         }
         final q = params.entries
@@ -1623,6 +1821,9 @@ class SubscriptionEntry {
     this.expireUnix = 0,
     this.updatedAt = 0,
     this.supportUrl = '',
+    this.customHwid = '',
+    this.networkScope = 'all',
+    this.selectedServerKeys = const [],
   });
 
   /// Идентификатор: стабилен, участвует в тегах аутбаундов и файлах кэша.
@@ -1640,6 +1841,27 @@ class SubscriptionEntry {
   final int updatedAt;
   final String supportUrl;
 
+  /// Переопределённый аппаратный идентификатор (`X-HWID`) для конкретной подписки.
+  /// Если пусто — используется глобальный HWID устройства.
+  final String customHwid;
+
+  /// Сетевая область действия подписки: `'all'`, `'wifi'` или `'cellular'`.
+  final String networkScope;
+
+  /// Список выбранных пользователем ключей серверов (`host:port` или `name`),
+  /// если пользователь выбрал только часть серверов из токена FPTN.
+  final List<String> selectedServerKeys;
+
+  bool get isFptnToken {
+    final u = url.trim().toLowerCase();
+    return u.startsWith('fptn:') ||
+        u.startsWith('fptn://') ||
+        u.startsWith('fptnb:') ||
+        u.startsWith('fptnb//') ||
+        u.startsWith('fptnb://') ||
+        (u.startsWith('{') && u.contains('"servers"') && u.contains('"username"'));
+  }
+
   bool get hasTrafficInfo => totalBytes > 0 || uploadBytes > 0 || downloadBytes > 0;
   int get usedBytes => uploadBytes + downloadBytes;
   double get usageRatio => totalBytes > 0 ? (usedBytes / totalBytes).clamp(0.0, 1.0) : 0.0;
@@ -1655,6 +1877,9 @@ class SubscriptionEntry {
     int? expireUnix,
     int? updatedAt,
     String? supportUrl,
+    String? customHwid,
+    String? networkScope,
+    List<String>? selectedServerKeys,
   }) =>
       SubscriptionEntry(
         id: id,
@@ -1668,6 +1893,9 @@ class SubscriptionEntry {
         expireUnix: expireUnix ?? this.expireUnix,
         updatedAt: updatedAt ?? this.updatedAt,
         supportUrl: supportUrl ?? this.supportUrl,
+        customHwid: customHwid ?? this.customHwid,
+        networkScope: networkScope ?? this.networkScope,
+        selectedServerKeys: selectedServerKeys ?? this.selectedServerKeys,
       );
 
   Map<String, dynamic> toJson() => {
@@ -1682,22 +1910,37 @@ class SubscriptionEntry {
         if (expireUnix > 0) 'expireUnix': expireUnix,
         if (updatedAt > 0) 'updatedAt': updatedAt,
         if (supportUrl.isNotEmpty) 'supportUrl': supportUrl,
+        if (customHwid.isNotEmpty) 'customHwid': customHwid,
+        if (networkScope != 'all' && networkScope.isNotEmpty)
+          'networkScope': networkScope,
+        if (selectedServerKeys.isNotEmpty)
+          'selectedServerKeys': selectedServerKeys,
       };
 
-  static SubscriptionEntry fromJson(Map<String, dynamic> json) =>
-      SubscriptionEntry(
-        id: (json['id'] as String?) ?? '',
-        url: (json['url'] as String?) ?? '',
-        name: (json['name'] as String?) ?? '',
-        group: (json['group'] as String?) ?? '',
-        enabled: json['enabled'] != false,
-        uploadBytes: (json['uploadBytes'] as num?)?.toInt() ?? 0,
-        downloadBytes: (json['downloadBytes'] as num?)?.toInt() ?? 0,
-        totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,
-        expireUnix: (json['expireUnix'] as num?)?.toInt() ?? 0,
-        updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
-        supportUrl: (json['supportUrl'] as String?) ?? '',
-      );
+  static SubscriptionEntry fromJson(Map<String, dynamic> json) {
+    final rawScope = (json['networkScope'] as String?)?.trim().toLowerCase() ?? 'all';
+    final rawSelected = (json['selectedServerKeys'] as List?)
+            ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+    return SubscriptionEntry(
+      id: (json['id'] as String?) ?? '',
+      url: (json['url'] as String?) ?? '',
+      name: (json['name'] as String?) ?? '',
+      group: (json['group'] as String?) ?? '',
+      enabled: json['enabled'] != false,
+      uploadBytes: (json['uploadBytes'] as num?)?.toInt() ?? 0,
+      downloadBytes: (json['downloadBytes'] as num?)?.toInt() ?? 0,
+      totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,
+      expireUnix: (json['expireUnix'] as num?)?.toInt() ?? 0,
+      updatedAt: (json['updatedAt'] as num?)?.toInt() ?? 0,
+      supportUrl: (json['supportUrl'] as String?) ?? '',
+      customHwid: (json['customHwid'] as String?)?.trim() ?? '',
+      networkScope: (rawScope == 'wifi' || rawScope == 'cellular') ? rawScope : 'all',
+      selectedServerKeys: rawSelected,
+    );
+  }
 }
 
 /// Всё, что нужно ядру для запуска туннеля.
@@ -1711,6 +1954,7 @@ class RuntimeConfig {
     this.mtu = 9000,
     this.desync = const DesyncSettings(),
     this.subscriptions = const [],
+    this.allSubscriptions = const [],
     this.filesDir = '',
     this.appRoutes = const {},
     this.serviceRoutes = const {},
@@ -1721,6 +1965,7 @@ class RuntimeConfig {
     this.extraProfiles = const [],
     this.proxyTlsFragment = false,
     this.balancer = const BalancerSettings(),
+    this.activeNetworkType = '',
   });
 
   final Profile profile;
@@ -1738,6 +1983,9 @@ class RuntimeConfig {
 
   /// Подписки: ядро качает их само и строит urltest-группы.
   final List<SubscriptionEntry> subscriptions;
+
+  /// Полный список подписок для определения сетевой области действия (`networkScope`).
+  final List<SubscriptionEntry> allSubscriptions;
 
   /// Приватный каталог приложения: кэш подписок и логи ядра.
   final String filesDir;
@@ -1766,6 +2014,9 @@ class RuntimeConfig {
   /// Включать ли `tls.record_fragment: true` на исходящих прокси-соединениях (для мобильных сетей с фильтрацией пакетов).
   final bool proxyTlsFragment;
 
+  /// Активный тип сети (`'wifi'`, `'cellular'` или `''`) для фильтрации кандидатов балансировщика.
+  final String activeNetworkType;
+
   /// Есть ли хоть один источник серверов или активный режим DPI.
   bool get hasSources =>
       routingMode == RoutingMode.desync ||
@@ -1785,18 +2036,45 @@ class RuntimeConfig {
   static const directTag = 'dns-direct';
 
   /// Возвращает упорядоченный список профилей-кандидатов для активного балансировщика (`auto-srv-0`, `auto-srv-1`, ...).
-  static List<Profile> resolveAutoCandidates(Profile profile, List<Profile> extraProfiles) {
+  static List<Profile> resolveAutoCandidates(
+    Profile profile,
+    List<Profile> extraProfiles, {
+    String activeNetworkType = '',
+    List<SubscriptionEntry> subscriptions = const [],
+  }) {
     if (profile.type != 'urltest' && !profile.id.startsWith('auto:')) {
       return const <Profile>[];
     }
-    return extraProfiles
+    final basePool = extraProfiles
         .where((p) =>
             p.server.isNotEmpty &&
             p.type != 'urltest' &&
             p.type != 'direct' &&
             (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
-        .take(256)
         .toList(growable: false);
+    if (basePool.isEmpty) return const <Profile>[];
+
+    final net = activeNetworkType.trim().toLowerCase();
+    if (net != 'wifi' && net != 'cellular') {
+      return basePool.take(256).toList(growable: false);
+    }
+
+    final subScopes = <String, String>{
+      for (final s in subscriptions)
+        if (s.id.isNotEmpty) s.id: s.networkScope,
+    };
+
+    final filtered = basePool.where((p) {
+      final profScope = p.networkScope;
+      final effectiveScope = profScope != 'all'
+          ? profScope
+          : (subScopes[p.subscriptionId] ?? 'all');
+      return effectiveScope == 'all' || effectiveScope == net;
+    }).take(256).toList(growable: false);
+
+    return filtered.isNotEmpty
+        ? filtered
+        : basePool.take(256).toList(growable: false);
   }
 
   /// Собирает конфигурацию sing-box, которую принимает ядро.
@@ -1808,7 +2086,12 @@ class RuntimeConfig {
     final isAutoGroup = routingMode != RoutingMode.desync &&
         (profile.type == 'urltest' || profile.id.startsWith('auto:'));
     final autoCandidates = isAutoGroup
-        ? resolveAutoCandidates(profile, extraProfiles)
+        ? resolveAutoCandidates(
+            profile,
+            extraProfiles,
+            activeNetworkType: activeNetworkType,
+            subscriptions: allSubscriptions.isNotEmpty ? allSubscriptions : subscriptions,
+          )
         : const <Profile>[];
 
     final hasStatic = routingMode != RoutingMode.desync &&

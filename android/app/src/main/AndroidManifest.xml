@@ -96,6 +96,7 @@
                 <data android:scheme="wireguard" />
                 <data android:scheme="amneziawg" />
                 <data android:scheme="awg" />
+                <data android:scheme="vpn" />
                 <data android:scheme="anytls" />
                 <data android:scheme="snell" />
                 <data android:scheme="shadowtls" />

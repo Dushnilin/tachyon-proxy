@@ -197,7 +197,7 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
     expect(reOutbound['mtu'], 1400);
   });
 
-  test('отключение бесплатных узлов скрывает WARP и SHARD из видимых списков', () {
+  test('устаревшие бесплатные узлы (WARP и SHARD) автоматически отфильтровываются из списков', () {
     const warpProfile = Profile(
       id: 'warp-1',
       name: 'WARP AWG 1',
@@ -225,19 +225,19 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
       name: 'Cloudflare WARP (AmneziaWG)',
     );
 
-    final hidden = AppSettings(
+    final settingsWithLegacy = AppSettings(
       profiles: const [warpProfile, shardProfile, profile],
       subscriptions: const [warpSub, userSub],
       selectedProfileId: 'warp-1',
-      showFreeNodes: false,
     );
 
-    expect(hidden.visibleProfiles.map((p) => p.id), ['vless-1']);
-    expect(hidden.visibleSubscriptions.map((s) => s.id), ['sub-user']);
-    expect(hidden.selectedProfile?.id, 'vless-1');
+    expect(settingsWithLegacy.visibleProfiles.map((p) => p.id), ['vless-1']);
+    expect(settingsWithLegacy.visibleSubscriptions.map((s) => s.id), ['sub-user']);
+    expect(settingsWithLegacy.selectedProfile?.id, 'vless-1');
 
-    final restored = AppSettings.fromJson(hidden.toJson());
-    expect(restored.showFreeNodes, isFalse);
+    final restored = AppSettings.fromJson(settingsWithLegacy.toJson());
+    expect(restored.profiles.map((p) => p.id), ['vless-1']);
+    expect(restored.subscriptions.map((s) => s.id), ['sub-user']);
   });
 
   test('балансировщики tachyon-core 0.3.9 корректно сериализуются для всех режимов и телеметрии', () {
@@ -402,5 +402,95 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
     );
     final resolved77 = RuntimeConfig.resolveAutoCandidates(autoProfile, sub77);
     expect(resolved77.length, 77);
+  });
+
+  test('Subscription customHwid, updatedAt and Wi-Fi / Cellular network server lists work', () {
+    const wifiSub = SubscriptionEntry(
+      id: 'sub-wifi',
+      url: 'https://example.org/wifi',
+      name: 'Домашняя подписка',
+      updatedAt: 1730970000000,
+      customHwid: 'aabbccddeeff00112233445566778899',
+      networkScope: 'wifi',
+    );
+    const cellSub = SubscriptionEntry(
+      id: 'sub-lte',
+      url: 'https://example.org/lte',
+      name: 'Мобильная подписка',
+      updatedAt: 1730973600000,
+      networkScope: 'cellular',
+    );
+
+    final restoredSub = SubscriptionEntry.fromJson(wifiSub.toJson());
+    expect(restoredSub.updatedAt, 1730970000000);
+    expect(restoredSub.customHwid, 'aabbccddeeff00112233445566778899');
+    expect(restoredSub.networkScope, 'wifi');
+
+    const srvWifi = Profile(
+      id: 'srv-wifi-1',
+      name: 'Wi-Fi Node',
+      type: 'vless',
+      server: 'wifi.example.org',
+      port: 443,
+      uuid: '00000000-0000-0000-0000-000000000001',
+      subscriptionId: 'sub-wifi',
+    );
+    const srvCell = Profile(
+      id: 'srv-lte-1',
+      name: 'LTE Whitelist Node',
+      type: 'vless',
+      server: 'lte.example.org',
+      port: 443,
+      uuid: '00000000-0000-0000-0000-000000000002',
+      subscriptionId: 'sub-lte',
+    );
+    const srvManualCell = Profile(
+      id: 'srv-manual-lte',
+      name: 'Manual LTE Node',
+      type: 'vless',
+      server: 'm-lte.example.org',
+      port: 443,
+      uuid: '00000000-0000-0000-0000-000000000003',
+      extra: {'network_scope': 'cellular'},
+    );
+
+    expect(srvManualCell.networkScope, 'cellular');
+    expect(srvManualCell.toOutbound().containsKey('network_scope'), isFalse);
+
+    const globalAuto = Profile(
+      id: 'auto:all',
+      name: 'Автовыбор',
+      type: 'urltest',
+      server: 'auto',
+      port: 443,
+    );
+    final allProfiles = [srvWifi, srvCell, srvManualCell];
+    final allSubs = [wifiSub, cellSub];
+
+    final onWifi = RuntimeConfig.resolveAutoCandidates(
+      globalAuto,
+      allProfiles,
+      activeNetworkType: 'wifi',
+      subscriptions: allSubs,
+    );
+    expect(onWifi.map((p) => p.id).toList(), ['srv-wifi-1']);
+
+    final onCellular = RuntimeConfig.resolveAutoCandidates(
+      globalAuto,
+      allProfiles,
+      activeNetworkType: 'cellular',
+      subscriptions: allSubs,
+    );
+    expect(onCellular.map((p) => p.id).toList(), ['srv-lte-1', 'srv-manual-lte']);
+
+    final settings = AppSettings(
+      wifiProfileId: 'auto:sub-wifi',
+      cellularProfileId: 'auto:sub-lte',
+      subscriptions: allSubs,
+      profiles: allProfiles,
+    );
+    final restoredSettings = AppSettings.fromJson(settings.toJson());
+    expect(restoredSettings.wifiProfileId, 'auto:sub-wifi');
+    expect(restoredSettings.cellularProfileId, 'auto:sub-lte');
   });
 }

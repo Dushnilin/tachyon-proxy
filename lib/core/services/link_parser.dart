@@ -26,8 +26,8 @@ class LinkParser {
     final trimmed = content.trim().replaceFirst('\uFEFF', '');
     if (trimmed.isEmpty) return const [];
 
-    // 1. Токены FPTN (fptn: / fptnb:)
-    if (_isFptnToken(trimmed)) {
+    // 1. Токены FPTN (fptn: / fptnb: или JSON токена FPTN)
+    if (isFptnPayload(trimmed)) {
       final fptnProfiles = _parseFptnToken(trimmed, subscriptionId: subscriptionId);
       if (fptnProfiles.isNotEmpty) return fptnProfiles;
     }
@@ -39,9 +39,9 @@ class LinkParser {
     }
 
     // 3. WireGuard / AmneziaWG INI-конфиг ([Interface] ... [Peer])
-    if (trimmed.contains('[Interface]') && trimmed.contains('[Peer]')) {
-      final wgProfile = _parseWireGuardConf(trimmed, subscriptionId: subscriptionId);
-      if (wgProfile != null) return [wgProfile];
+    if (looksLikeWireGuardConf(trimmed)) {
+      final wgProfiles = parseWireGuardConfAll(trimmed, subscriptionId: subscriptionId);
+      if (wgProfiles.isNotEmpty) return wgProfiles;
     }
 
     // 4. Clash / Mihomo YAML (секция proxies:)
@@ -160,12 +160,12 @@ class LinkParser {
     final value = link.trim().replaceFirst('\uFEFF', '');
     if (value.isEmpty) return null;
 
-    if (_isFptnToken(value)) {
+    if (isFptnPayload(value)) {
       final list = _parseFptnToken(value, subscriptionId: subscriptionId);
       return list.isNotEmpty ? list.first : null;
     }
 
-    if (value.contains('[Interface]') && value.contains('[Peer]')) {
+    if (looksLikeWireGuardConf(value)) {
       return _parseWireGuardConf(value, subscriptionId: subscriptionId);
     }
 
@@ -671,6 +671,12 @@ class LinkParser {
   // WireGuard & AmneziaWG (URI, amneziawg://<base64-ini>#name и .conf INI)
   // ---------------------------------------------------------------------------
 
+  /// Проверяет, является ли текст конфигурационным файлом `.conf` WireGuard / AmneziaWG.
+  bool looksLikeWireGuardConf(String s) {
+    return RegExp(r'\[\s*interface\s*\]', caseSensitive: false).hasMatch(s) &&
+        RegExp(r'\[\s*peer\s*\]', caseSensitive: false).hasMatch(s);
+  }
+
   Profile? _parseWireGuardUri(String link, {String subscriptionId = ''}) {
     final schemeIdx = link.indexOf('://');
     if (schemeIdx > 0) {
@@ -682,7 +688,7 @@ class LinkParser {
       if (!bodyPart.contains('@') && !bodyPart.contains('?')) {
         try {
           final decoded = utf8.decode(base64.decode(_normalizeBase64(bodyPart)), allowMalformed: true);
-          if (decoded.contains('[Interface]') || decoded.contains('[interface]')) {
+          if (looksLikeWireGuardConf(decoded)) {
             String? nameOverride;
             if (fragPart.isNotEmpty) {
               try {
@@ -717,7 +723,17 @@ class LinkParser {
     );
     if (privKey.isEmpty || pubKey.isEmpty) return null;
 
-    final addrsRaw = query['address'] ?? query['ip'] ?? '10.0.0.2/32';
+    bool isMasqueProto(String? v) {
+      if (v == null) return false;
+      final t = v.trim().toLowerCase();
+      return t == 'dns' || t == 'stun' || t == 'sip' || t == 'quic';
+    }
+
+    final rawQueryIp = query['ip'];
+    final addrsRaw = query['address'] ??
+        query['local_address'] ??
+        (!isMasqueProto(rawQueryIp) ? rawQueryIp : null) ??
+        '10.0.0.2/32';
     final localAddress = addrsRaw
         .split(',')
         .map((s) => _formatWgCidr(s.trim()))
@@ -736,10 +752,24 @@ class LinkParser {
     final mtu = _toInt(query['mtu']);
     if (mtu != null && mtu > 0) extra['mtu'] = mtu;
 
+    final rawKeepalive = (query['keepalive'] ??
+            query['persistent_keepalive'] ??
+            query['persistent_keepalive_interval'] ??
+            '')
+        .trim();
+    if (rawKeepalive.isNotEmpty) {
+      final kaInt = _toInt(rawKeepalive);
+      if (kaInt != null && kaInt > 0) {
+        extra['persistent_keepalive_interval'] = kaInt;
+      } else if (rawKeepalive.contains('-')) {
+        extra['persistent_keepalive_interval'] = rawKeepalive;
+      }
+    }
+
     final reserved = _parseWgReserved(query['reserved']);
     if (reserved != null) extra['reserved'] = reserved;
 
-    _extractAwgParams(query, extra);
+    _extractAwgParams(query, extra, fromUriQuery: true);
 
     return Profile(
       id: _id('wireguard', '$server:$port:$privKey:$pubKey'),
@@ -759,45 +789,101 @@ class LinkParser {
     String subscriptionId = '',
     String? nameOverride,
   }) {
+    final list = parseWireGuardConfAll(
+      conf,
+      subscriptionId: subscriptionId,
+      nameOverride: nameOverride,
+    );
+    return list.isNotEmpty ? list.first : null;
+  }
+
+  /// Разбирает конфигурационный файл `.conf` WireGuard / AmneziaWG (1.5, 2.0, 3.0, 3.1)
+  /// с поддержкой одной или нескольких секций `[Peer]`.
+  List<Profile> parseWireGuardConfAll(
+    String conf, {
+    String subscriptionId = '',
+    String? nameOverride,
+  }) {
     var section = '';
     final iface = <String, String>{};
-    final peer = <String, String>{};
-    var commentName = '';
+    final peers = <Map<String, String>>[];
+    var ifaceCommentName = '';
 
     for (final rawLine in conf.split(RegExp(r'[\r\n]+'))) {
-      final line = rawLine.trim();
-      if (line.isEmpty) continue;
-      if (line.startsWith('#') || line.startsWith(';')) {
-        if (commentName.isEmpty && line.length > 1) {
-          final candidate = line.substring(1).trim();
-          if (candidate.isNotEmpty && !candidate.contains('=')) {
-            commentName = candidate;
+      final trimmed = rawLine.trim();
+      if (trimmed.isEmpty) continue;
+      if (trimmed.startsWith('#') || trimmed.startsWith(';')) {
+        final comment = trimmed.substring(1).trim();
+        if (comment.isNotEmpty) {
+          final eqIdx = comment.indexOf('=');
+          if (eqIdx > 0) {
+            final ck = comment.substring(0, eqIdx).trim().toLowerCase();
+            final cv = comment.substring(eqIdx + 1).trim();
+            if (cv.isNotEmpty &&
+                (ck == 'name' || ck == 'description' || ck == 'title' || ck == 'tag')) {
+              if (section == 'peer' && peers.isNotEmpty) {
+                peers.last.putIfAbsent('_comment_name', () => cv);
+              } else if (ifaceCommentName.isEmpty) {
+                ifaceCommentName = cv;
+              }
+            }
+          } else if (ifaceCommentName.isEmpty &&
+              section.isEmpty &&
+              comment.length <= 64 &&
+              !comment.toLowerCase().startsWith('generated')) {
+            ifaceCommentName = comment;
           }
         }
         continue;
       }
+
+      // Срезаем inline-комментарий `# ...`, если он находится вне угловых скобок CPS `<...>`
+      var line = trimmed;
+      final hashIdx = line.indexOf('#');
+      if (hashIdx > 0 && !line.substring(hashIdx).contains('>')) {
+        line = line.substring(0, hashIdx).trim();
+      }
+
       if (line.startsWith('[') && line.endsWith(']')) {
         section = line.substring(1, line.length - 1).trim().toLowerCase();
+        if (section == 'peer') {
+          peers.add(<String, String>{});
+        }
         continue;
       }
       final eq = line.indexOf('=');
       if (eq <= 0) continue;
-      final key = line.substring(0, eq).trim().toLowerCase();
-      final val = line.substring(eq + 1).trim();
+      final key = line
+          .substring(0, eq)
+          .trim()
+          .toLowerCase()
+          .replaceAll('-', '_');
+      var val = line.substring(eq + 1).trim();
+      if (val.length >= 2 &&
+          ((val.startsWith('"') && val.endsWith('"')) ||
+              (val.startsWith("'") && val.endsWith("'")))) {
+        val = val.substring(1, val.length - 1).trim();
+      }
+      if (val.isEmpty) continue;
+
       if (section == 'interface') {
-        iface[key] = val;
-      } else if (section == 'peer') {
-        peer[key] = val;
+        if (key == 'address' && iface.containsKey('address')) {
+          iface['address'] = '${iface['address']}, $val';
+        } else {
+          iface[key] = val;
+        }
+      } else if (section == 'peer' && peers.isNotEmpty) {
+        if ((key == 'allowedips' || key == 'allowed_ips') &&
+            peers.last.containsKey('allowed_ips')) {
+          peers.last['allowed_ips'] = '${peers.last['allowed_ips']}, $val';
+        } else {
+          peers.last[key == 'allowedips' ? 'allowed_ips' : key] = val;
+        }
       }
     }
 
     final privKey = iface['privatekey'] ?? iface['private_key'] ?? '';
-    final pubKey = peer['publickey'] ?? peer['public_key'] ?? '';
-    final endpoint = peer['endpoint'] ?? '';
-    if (privKey.isEmpty || pubKey.isEmpty || endpoint.isEmpty) return null;
-
-    final hp = _splitHostPort(endpoint, 51820);
-    if (hp == null) return null;
+    if (privKey.isEmpty || peers.isEmpty) return const [];
 
     final addrRaw = iface['address'] ?? '10.0.0.2/32';
     final localAddress = addrRaw
@@ -805,49 +891,217 @@ class LinkParser {
         .map((s) => _formatWgCidr(s.trim()))
         .where((s) => s.isNotEmpty)
         .toList();
-
-    final extra = <String, dynamic>{
-      'private_key': privKey,
-      'peer_public_key': pubKey,
-      'local_address': localAddress.isEmpty ? ['10.0.0.2/32'] : localAddress,
-    };
-    final psk = peer['presharedkey'] ?? peer['pre_shared_key'] ?? '';
-    if (psk.isNotEmpty) extra['pre_shared_key'] = psk;
     final mtu = _toInt(iface['mtu']);
-    if (mtu != null && mtu > 0) extra['mtu'] = mtu;
 
-    _extractAwgParams(iface, extra);
-
-    final resolvedName = (nameOverride != null && nameOverride.trim().isNotEmpty)
+    final baseName = (nameOverride != null && nameOverride.trim().isNotEmpty)
         ? nameOverride.trim()
-        : (commentName.isNotEmpty ? commentName : '${hp.$1}:${hp.$2}');
-    return Profile(
-      id: _id('wireguard', '${hp.$1}:${hp.$2}:$privKey:$pubKey'),
-      name: resolvedName,
-      type: 'wireguard',
-      server: hp.$1,
-      port: hp.$2,
-      password: privKey,
-      publicKey: pubKey,
-      subscriptionId: subscriptionId,
-      extra: extra,
-    );
+        : ifaceCommentName;
+
+    final results = <Profile>[];
+    final validPeers = peers.where((p) {
+      final pk = p['publickey'] ?? p['public_key'] ?? '';
+      final ep = p['endpoint'] ?? '';
+      return pk.isNotEmpty && ep.isNotEmpty;
+    }).toList();
+
+    for (var i = 0; i < validPeers.length; i++) {
+      final peer = validPeers[i];
+      final pubKey = peer['publickey'] ?? peer['public_key'] ?? '';
+      final endpoint = peer['endpoint'] ?? '';
+      final hp = _splitHostPort(endpoint, 51820);
+      if (hp == null) continue;
+
+      final extra = <String, dynamic>{
+        'private_key': privKey,
+        'peer_public_key': pubKey,
+        'local_address': localAddress.isEmpty ? ['10.0.0.2/32'] : localAddress,
+      };
+      final psk = peer['presharedkey'] ?? peer['pre_shared_key'] ?? '';
+      if (psk.isNotEmpty) extra['pre_shared_key'] = psk;
+      if (mtu != null && mtu > 0) extra['mtu'] = mtu;
+
+      final allowedRaw = peer['allowed_ips'] ?? '';
+      if (allowedRaw.isNotEmpty) {
+        final allowedList = allowedRaw
+            .split(',')
+            .map((s) => s.trim())
+            .where((s) => s.isNotEmpty)
+            .toList();
+        if (allowedList.isNotEmpty) {
+          extra['allowed_ips'] = allowedList;
+        }
+      }
+
+      final kaRaw = (peer['persistentkeepalive'] ??
+              peer['persistent_keepalive'] ??
+              peer['persistent_keepalive_interval'] ??
+              '')
+          .trim();
+      if (kaRaw.isNotEmpty) {
+        final kaInt = _toInt(kaRaw);
+        if (kaInt != null && kaInt > 0) {
+          extra['persistent_keepalive_interval'] = kaInt;
+        } else if (kaRaw.contains('-')) {
+          extra['persistent_keepalive_interval'] = kaRaw;
+        }
+      }
+
+      final reserved = _parseWgReserved(peer['reserved']);
+      if (reserved != null) extra['reserved'] = reserved;
+
+      _extractAwgParams(iface, extra);
+
+      final peerComment = peer['_comment_name'] ?? '';
+      final String resolvedName;
+      if (peerComment.isNotEmpty) {
+        resolvedName = peerComment;
+      } else if (baseName.isNotEmpty) {
+        resolvedName = validPeers.length > 1 ? '$baseName (${i + 1})' : baseName;
+      } else {
+        resolvedName = '${hp.$1}:${hp.$2}';
+      }
+
+      results.add(Profile(
+        id: _id('wireguard', '${hp.$1}:${hp.$2}:$privKey:$pubKey'),
+        name: resolvedName,
+        type: 'wireguard',
+        server: hp.$1,
+        port: hp.$2,
+        password: privKey,
+        publicKey: pubKey,
+        subscriptionId: subscriptionId,
+        extra: extra,
+      ));
+    }
+    return results;
   }
 
-  void _extractAwgParams(Map<String, dynamic> src, Map<String, dynamic> dst) {
-    for (final k in ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4']) {
-      final v = _toInt(src[k] ?? src[k.toUpperCase()]);
-      if (v != null) dst[k] = v;
+  Object _parseAwgIntOrRange(String raw) {
+    final s = raw.trim();
+    final asInt = int.tryParse(s);
+    if (asInt != null) {
+      if (asInt < 0 && asInt >= -2147483648) {
+        return asInt + 4294967296;
+      }
+      return asInt;
     }
-    for (final k in ['h1', 'h2', 'h3', 'h4']) {
-      final raw = (src[k] ?? src[k.toUpperCase()] ?? '').toString().trim();
-      if (raw.isEmpty) continue;
-      final asInt = int.tryParse(raw);
-      dst[k] = asInt ?? raw;
+    return s;
+  }
+
+  void _extractAwgParams(
+    Map<String, dynamic> src,
+    Map<String, dynamic> dst, {
+    bool fromUriQuery = false,
+  }) {
+    String? pickStr(List<String> keys) {
+      for (final k in keys) {
+        final v = src[k] ?? src[k.toUpperCase()] ?? src[k.toLowerCase()];
+        if (v != null) {
+          final s = v.toString().trim();
+          if (s.isNotEmpty) return s;
+        }
+      }
+      return null;
     }
-    for (final k in ['i1', 'i2', 'i3', 'i4', 'i5']) {
-      final raw = (src[k] ?? src[k.toUpperCase()] ?? '').toString().trim();
-      if (raw.isNotEmpty) dst[k] = raw;
+
+    for (final k in const ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4']) {
+      final raw = pickStr([k]);
+      final v = _toInt(raw);
+      if (v != null && v >= 0) dst[k] = v;
+    }
+
+    for (final (target, aliases) in const [
+      ('h1', ['h1']),
+      ('h2', ['h2']),
+      ('h3', ['h3']),
+      ('h4', ['h4']),
+      (
+        'content_padding_addition',
+        ['content_padding_addition', 'contentpaddingaddition', 'ContentPaddingAddition'],
+      ),
+      (
+        'rekey_after_time',
+        ['rekey_after_time', 'rekeyaftertime', 'RekeyAfterTime'],
+      ),
+      (
+        'rekey_timeout',
+        ['rekey_timeout', 'rekeytimeout', 'RekeyTimeout'],
+      ),
+      (
+        'reject_after_time',
+        ['reject_after_time', 'rejectaftertime', 'RejectAfterTime'],
+      ),
+      (
+        'keepalive_timeout',
+        ['keepalive_timeout', 'keepalivetimeout', 'KeepaliveTimeout', 'itime', 'ITime'],
+      ),
+      (
+        'max_handshake_attempts',
+        ['max_handshake_attempts', 'maxhandshakeattempts', 'MaxHandshakeAttempts'],
+      ),
+    ]) {
+      final raw = pickStr(aliases);
+      if (raw != null) {
+        dst[target] = _parseAwgIntOrRange(raw);
+      }
+    }
+
+    for (final (target, aliases) in const [
+      ('i1', ['i1', 'j1']),
+      ('i2', ['i2', 'j2']),
+      ('i3', ['i3', 'j3']),
+      ('i4', ['i4']),
+      ('i5', ['i5']),
+      ('id', ['id']),
+      ('ib', ['ib']),
+      (
+        'header_protection_key',
+        ['header_protection_key', 'headerprotectionkey', 'HeaderProtectionKey', 'hpk'],
+      ),
+    ]) {
+      final raw = pickStr(aliases);
+      if (raw != null) {
+        dst[target] = raw;
+      }
+    }
+
+    final rawIp = pickStr(fromUriQuery ? ['awg_ip', 'ip'] : ['ip', 'awg_ip']);
+    if (rawIp != null) {
+      final lowerIp = rawIp.toLowerCase();
+      if (!fromUriQuery ||
+          lowerIp == 'dns' ||
+          lowerIp == 'stun' ||
+          lowerIp == 'sip' ||
+          lowerIp == 'quic') {
+        // В Clash YAML `ip` может быть IPv4-адресом клиента (`10.0.0.2`), поэтому проверяем, что это не IP
+        if (!RegExp(r'^\d+\.\d+\.\d+\.\d+').hasMatch(rawIp) && !rawIp.contains(':')) {
+          dst['ip'] = lowerIp;
+        }
+      }
+    }
+
+    for (final (target, aliases) in const [
+      ('random_trailers', ['random_trailers', 'randomtrailers', 'RandomTrailers']),
+      ('disable_cookies', ['disable_cookies', 'disablecookies', 'DisableCookies']),
+    ]) {
+      final raw = pickStr(aliases);
+      if (raw != null && (_isTruthy(raw) || raw.toLowerCase() == 'on')) {
+        dst[target] = true;
+      }
+    }
+
+    // AmneziaWG 3.0+: если задан header_protection_key, s1..s4 должны быть >= 12 (по умолчанию 20)
+    if ((dst['header_protection_key']?.toString().trim() ?? '').isNotEmpty) {
+      for (final sk in const ['s1', 's2', 's3', 's4']) {
+        final cur = _toInt(dst[sk]) ?? 0;
+        if (cur < 12) dst[sk] = 20;
+      }
+    }
+    if ((dst['i1']?.toString().trim() ?? '').isNotEmpty) {
+      dst
+        ..remove('id')
+        ..remove('ip')
+        ..remove('ib');
     }
   }
 
@@ -992,6 +1246,54 @@ class LinkParser {
     );
   }
 
+  /// Проверяет, является ли строка токеном или JSON-конфигом FPTN (`fptn:`, `fptnb:` или JSON с `servers` и `username`).
+  bool isFptnPayload(String s) {
+    final trimmed = s.trim();
+    if (_isFptnToken(trimmed)) return true;
+    if (trimmed.startsWith('{') &&
+        trimmed.contains('"servers"') &&
+        trimmed.contains('"username"') &&
+        trimmed.contains('"password"')) {
+      return true;
+    }
+    return false;
+  }
+
+  /// Извлекает название сервиса (`service_name` или `#fragment`) из токена FPTN.
+  String extractFptnServiceName(String raw) {
+    final trimmed = raw.trim();
+    final hashIdx = trimmed.indexOf('#');
+    if (hashIdx >= 0 && hashIdx + 1 < trimmed.length) {
+      final rawFrag = trimmed.substring(hashIdx + 1).trim();
+      if (rawFrag.isNotEmpty) {
+        try {
+          return Uri.decodeComponent(rawFrag);
+        } catch (_) {
+          return rawFrag;
+        }
+      }
+    }
+    try {
+      Map<dynamic, dynamic>? map;
+      if (trimmed.startsWith('{')) {
+        final parsed = jsonDecode(trimmed);
+        if (parsed is Map) map = parsed;
+      } else if (trimmed.toLowerCase().startsWith('fptn:') ||
+          trimmed.toLowerCase().startsWith('fptn://')) {
+        final cleanToken = hashIdx >= 0 ? trimmed.substring(0, hashIdx).trim() : trimmed;
+        final body = cleanToken
+            .replaceFirst(RegExp(r'^fptn(://|:)', caseSensitive: false), '')
+            .replaceAll(RegExp(r'\s+'), '');
+        final decoded = utf8.decode(base64.decode(_normalizeBase64(body)));
+        final parsed = jsonDecode(decoded);
+        if (parsed is Map) map = parsed;
+      }
+      final svc = map?['service_name']?.toString().trim() ?? '';
+      if (svc.isNotEmpty) return svc;
+    } catch (_) {}
+    return 'FPTN';
+  }
+
   bool _isFptnToken(String s) {
     final lower = s.toLowerCase();
     return lower.startsWith('fptn:') ||
@@ -1004,9 +1306,11 @@ class LinkParser {
   List<Profile> _parseFptnToken(String raw, {String subscriptionId = ''}) {
     final trimmed = raw.trim();
     final hashIdx = trimmed.indexOf('#');
-    final cleanToken = hashIdx >= 0 ? trimmed.substring(0, hashIdx).trim() : trimmed;
+    final cleanToken = (!trimmed.startsWith('{') && hashIdx >= 0)
+        ? trimmed.substring(0, hashIdx).trim()
+        : trimmed;
     var fragName = '';
-    if (hashIdx >= 0 && hashIdx + 1 < trimmed.length) {
+    if (!trimmed.startsWith('{') && hashIdx >= 0 && hashIdx + 1 < trimmed.length) {
       final rawFrag = trimmed.substring(hashIdx + 1).trim();
       try {
         fragName = Uri.decodeComponent(rawFrag);
@@ -1029,12 +1333,17 @@ class LinkParser {
         ),
       ];
     }
-    final body = cleanToken
-        .replaceFirst(RegExp(r'^fptn(://|:)', caseSensitive: false), '')
-        .replaceAll(RegExp(r'\s+'), '');
     try {
-      final decoded = utf8.decode(base64.decode(_normalizeBase64(body)));
-      final map = jsonDecode(decoded);
+      final String jsonStr;
+      if (cleanToken.startsWith('{')) {
+        jsonStr = cleanToken;
+      } else {
+        final body = cleanToken
+            .replaceFirst(RegExp(r'^fptn(://|:)', caseSensitive: false), '')
+            .replaceAll(RegExp(r'\s+'), '');
+        jsonStr = utf8.decode(base64.decode(_normalizeBase64(body)));
+      }
+      final map = jsonDecode(jsonStr);
       if (map is! Map) return const [];
       final user = (map['username'] ?? '').toString();
       final pass = (map['password'] ?? '').toString();
@@ -2429,6 +2738,9 @@ class LinkParser {
     // Для WireGuard-эндпоинтов с массивом peers[]
     String peerPubFromPeers = '';
     String pskFromPeers = '';
+    Object? keepaliveFromPeers;
+    Object? reservedFromPeers;
+    List<String>? allowedIpsFromPeers;
     if (item['peers'] is List && (item['peers'] as List).isNotEmpty) {
       final peer = (item['peers'] as List).first;
       if (peer is Map) {
@@ -2438,6 +2750,14 @@ class LinkParser {
         port = _toInt(peer['port'] ?? peer['server_port']) ?? 51820;
         peerPubFromPeers = (peer['public_key'] ?? '').toString();
         pskFromPeers = (peer['pre_shared_key'] ?? '').toString();
+        keepaliveFromPeers = peer['persistent_keepalive_interval'];
+        reservedFromPeers = peer['reserved'];
+        if (peer['allowed_ips'] is List) {
+          allowedIpsFromPeers = (peer['allowed_ips'] as List)
+              .map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty)
+              .toList();
+        }
       }
     }
     if (server.isEmpty && item['token'] == null) return null;
@@ -2452,12 +2772,25 @@ class LinkParser {
     if (type == 'wireguard') {
       if (rest['address'] is List && !rest.containsKey('local_address')) {
         rest['local_address'] = rest.remove('address');
+      } else {
+        rest.remove('address');
       }
       if (peerPubFromPeers.isNotEmpty && !rest.containsKey('peer_public_key')) {
         rest['peer_public_key'] = peerPubFromPeers;
       }
       if (pskFromPeers.isNotEmpty && !rest.containsKey('pre_shared_key')) {
         rest['pre_shared_key'] = pskFromPeers;
+      }
+      if (keepaliveFromPeers != null && !rest.containsKey('persistent_keepalive_interval')) {
+        rest['persistent_keepalive_interval'] = keepaliveFromPeers;
+      }
+      if (reservedFromPeers != null && !rest.containsKey('reserved')) {
+        rest['reserved'] = reservedFromPeers;
+      }
+      if (allowedIpsFromPeers != null &&
+          allowedIpsFromPeers.isNotEmpty &&
+          !rest.containsKey('allowed_ips')) {
+        rest['allowed_ips'] = allowedIpsFromPeers;
       }
     }
 

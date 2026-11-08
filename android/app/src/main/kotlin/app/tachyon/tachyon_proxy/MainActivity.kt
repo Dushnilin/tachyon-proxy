@@ -47,7 +47,27 @@ class MainActivity : FlutterFragmentActivity() {
     /** Запрос, ждущий разрешения на VPN. */
     private var pendingStart: PendingStart? = null
     private var pendingQrResult: MethodChannel.Result? = null
+    private var pendingFileResult: MethodChannel.Result? = null
     private var pendingWifiPermResult: MethodChannel.Result? = null
+
+    /** Выбор конфигурационного файла (.conf / .fptn / .json / .txt) через системный пикер. */
+    private val filePickerLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { answer ->
+            val res = pendingFileResult
+            pendingFileResult = null
+            if (res == null) return@registerForActivityResult
+            if (answer.resultCode != RESULT_OK) {
+                res.success(null)
+                return@registerForActivityResult
+            }
+            val uri = answer.data?.data
+            if (uri == null) {
+                res.success(null)
+                return@registerForActivityResult
+            }
+            val parsed = readContentUriMap(uri)
+            res.success(parsed)
+        }
 
     /** Запрос разрешения геолокации для чтения SSID Wi-Fi в режиме «Домашний интернет». */
     private val wifiPermissionLauncher =
@@ -186,15 +206,44 @@ class MainActivity : FlutterFragmentActivity() {
         if (intent == null) return null
         when (intent.action) {
             Intent.ACTION_VIEW -> {
+                val uri = intent.data
+                if (uri != null && (uri.scheme == "content" || uri.scheme == "file")) {
+                    val content = readContentUriMap(uri)?.get("content")?.trim()
+                    if (!content.isNullOrEmpty()) return content
+                }
                 val data = intent.dataString?.trim()
                 if (!data.isNullOrEmpty()) return data
             }
             Intent.ACTION_SEND -> {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
                 if (!text.isNullOrEmpty()) return text
+                @Suppress("DEPRECATION")
+                val streamUri = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                if (streamUri != null) {
+                    val content = readContentUriMap(streamUri)?.get("content")?.trim()
+                    if (!content.isNullOrEmpty()) return content
+                }
             }
         }
         return null
+    }
+
+    private fun readContentUriMap(uri: android.net.Uri): Map<String, String>? {
+        return runCatching {
+            var displayName = uri.lastPathSegment.orEmpty()
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && cursor.moveToFirst()) {
+                    displayName = cursor.getString(idx).orEmpty()
+                }
+            }
+            val content = contentResolver.openInputStream(uri)?.use { stream ->
+                val bytes = stream.readBytes()
+                if (bytes.size > 4 * 1024 * 1024) return@runCatching null
+                String(bytes, Charsets.UTF_8)
+            }.orEmpty()
+            if (content.isBlank()) null else mapOf("name" to displayName, "content" to content)
+        }.getOrNull()
     }
 
     private fun dumpDiagnostics() {
@@ -242,6 +291,7 @@ class MainActivity : FlutterFragmentActivity() {
                     "shareText" -> handleShareText(call, result)
                     "openUrl" -> handleOpenUrl(call, result)
                     "scanQr" -> handleScanQr(call, result)
+                    "pickConfigFile" -> handlePickConfigFile(result)
                     "networkInfo" -> result.success(currentNetworkType())
                     "wifiInfo" -> result.success(currentWifiInfo())
                     "requestWifiPermission" -> handleRequestWifiPermission(result)
@@ -524,6 +574,22 @@ class MainActivity : FlutterFragmentActivity() {
             putExtra(QrScannerActivity.EXTRA_GALLERY_ONLY, fromGallery)
         }
         qrScannerLauncher.launch(intent)
+    }
+
+    /** Открывает системный выбор документа (.conf, .fptn, .json, .txt). */
+    private fun handlePickConfigFile(result: MethodChannel.Result) {
+        pendingFileResult?.success(null)
+        pendingFileResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        runCatching {
+            filePickerLauncher.launch(intent)
+        }.onFailure {
+            pendingFileResult = null
+            result.success(null)
+        }
     }
 
     /** Определяет активный тип сети: wifi / cellular / ethernet / none (игнорируя VPN поверх сети). */

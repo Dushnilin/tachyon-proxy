@@ -299,6 +299,20 @@ class CoreBridge {
     }
   }
 
+  /// Открывает системный выбор файла (.conf / .fptn / .json / .txt) и возвращает его имя и содержимое.
+  Future<Map<String, String>?> pickConfigFile() async {
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>('pickConfigFile');
+      if (raw == null) return null;
+      final name = (raw['name'] as String?) ?? '';
+      final content = (raw['content'] as String?) ?? '';
+      if (content.trim().isEmpty) return null;
+      return {'name': name, 'content': content};
+    } on PlatformException {
+      return null;
+    }
+  }
+
   /// Определяет активный тип подключения: `wifi`, `cellular`, `ethernet`, `none`.
   Future<String> networkType() async {
     try {

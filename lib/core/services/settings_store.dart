@@ -74,8 +74,9 @@ class AppSettings {
     this.proxyTlsFragment = false,
     this.homeWifiMode = false,
     this.trustedWifiSsids = const [],
-    this.showFreeNodes = true,
     this.balancer = const BalancerSettings(),
+    this.wifiProfileId = '',
+    this.cellularProfileId = '',
   });
 
   final List<Profile> profiles;
@@ -151,22 +152,23 @@ class AppSettings {
   /// Список SSID доверенных Wi-Fi сетей (дом, офис, работа и т.д.).
   final List<String> trustedWifiSsids;
 
-  /// Показывать ли карточку и списки бесплатных резервных узлов (WARP AmneziaWG и SHARD).
-  final bool showFreeNodes;
-
   /// Настройки нативного балансировщика `urltest` в `tachyon-core` 0.3.9+.
   final BalancerSettings balancer;
+
+  /// Профиль / список автовыбора для автоматического включения в сети Wi-Fi (`''` = не менять).
+  final String wifiProfileId;
+
+  /// Профиль / список автовыбора для автоматического включения в мобильной сети (`''` = не менять).
+  final String cellularProfileId;
 
   static bool isFreeSubId(String subId) =>
       subId == 'free-warp' || subId == 'free-shard';
 
-  List<Profile> get visibleProfiles => showFreeNodes
-      ? profiles
-      : profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
+  List<Profile> get visibleProfiles =>
+      profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
 
-  List<SubscriptionEntry> get visibleSubscriptions => showFreeNodes
-      ? subscriptions
-      : subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
+  List<SubscriptionEntry> get visibleSubscriptions =>
+      subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
 
   Profile? get detourProfile {
     if (detourProfileId.isEmpty) return null;
@@ -234,8 +236,9 @@ class AppSettings {
     bool? proxyTlsFragment,
     bool? homeWifiMode,
     List<String>? trustedWifiSsids,
-    bool? showFreeNodes,
     BalancerSettings? balancer,
+    String? wifiProfileId,
+    String? cellularProfileId,
   }) {
     return AppSettings(
       profiles: profiles ?? this.profiles,
@@ -265,8 +268,9 @@ class AppSettings {
       proxyTlsFragment: proxyTlsFragment ?? this.proxyTlsFragment,
       homeWifiMode: homeWifiMode ?? this.homeWifiMode,
       trustedWifiSsids: trustedWifiSsids ?? this.trustedWifiSsids,
-      showFreeNodes: showFreeNodes ?? this.showFreeNodes,
       balancer: balancer ?? this.balancer,
+      wifiProfileId: wifiProfileId ?? this.wifiProfileId,
+      cellularProfileId: cellularProfileId ?? this.cellularProfileId,
     );
   }
 
@@ -299,8 +303,9 @@ class AppSettings {
         'proxyTlsFragment': proxyTlsFragment,
         'homeWifiMode': homeWifiMode,
         'trustedWifiSsids': trustedWifiSsids,
-        'showFreeNodes': showFreeNodes,
         'balancer': balancer.toJson(),
+        if (wifiProfileId.isNotEmpty) 'wifiProfileId': wifiProfileId,
+        if (cellularProfileId.isNotEmpty) 'cellularProfileId': cellularProfileId,
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
@@ -308,6 +313,7 @@ class AppSettings {
       profiles: ((json['profiles'] as List?) ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(Profile.fromJson)
+          .where((p) => !isFreeSubId(p.subscriptionId))
           .toList(growable: false),
       selectedProfileId: (json['selectedProfileId'] as String?) ?? '',
       routingMode: RoutingMode.fromName(json['routingMode'] as String?),
@@ -341,6 +347,7 @@ class AppSettings {
       subscriptions: ((json['subscriptions'] as List?) ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(SubscriptionEntry.fromJson)
+          .where((s) => !isFreeSubId(s.id))
           .toList(growable: false),
       hwid: (json['hwid'] as String?) ?? '',
       customRules: ((json['customRules'] as List?) ?? const [])
@@ -363,10 +370,11 @@ class AppSettings {
           .map((item) => item.toString().trim())
           .where((item) => item.isNotEmpty)
           .toList(growable: false),
-      showFreeNodes: json['showFreeNodes'] != false,
       balancer: json['balancer'] is Map<String, dynamic>
           ? BalancerSettings.fromJson(json['balancer'] as Map<String, dynamic>)
           : const BalancerSettings(),
+      wifiProfileId: (json['wifiProfileId'] as String?) ?? '',
+      cellularProfileId: (json['cellularProfileId'] as String?) ?? '',
     );
   }
 }

@@ -284,13 +284,6 @@ class _SettingsTabState extends State<SettingsTab> {
                           value: settings.autoUpdateSubs,
                           onChanged: controller.setAutoUpdateSubs,
                         ),
-                        const Hairline(),
-                        SwitchRow(
-                          title: 'Блок резервных узлов (WARP · SHARD)',
-                          subtitle: 'Показывать генератор на главном экране',
-                          value: settings.showFreeNodes,
-                          onChanged: controller.setShowFreeNodes,
-                        ),
                       ],
                     ),
                   ),

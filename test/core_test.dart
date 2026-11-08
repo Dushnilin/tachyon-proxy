@@ -5,7 +5,6 @@ import 'package:tachyon_proxy/core/models/app_rules.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/models/tunnel_state.dart';
 import 'package:tachyon_proxy/core/services/dns_benchmark.dart';
-import 'package:tachyon_proxy/core/services/free_nodes_service.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
 
 Profile _vlessProfile() => const Profile(
@@ -294,7 +293,7 @@ void main() {
       expect(awg, isNotNull);
       expect(awg!.type, 'wireguard');
       expect(awg.isAmneziaWg, isTrue);
-      expect(awg.fullTransportLabel, 'AMNEZIAWG · UDP');
+      expect(awg.fullTransportLabel, 'AMNEZIAWG 2.0 · UDP');
       final out = awg.toOutbound();
       expect(out['private_key'], 'privKey123');
       expect((out['peers'] as List).first['public_key'], 'pubKey456');
@@ -736,11 +735,109 @@ proxies:
       expect((cfgWithoutProxyDesyncFinal['route'] as Map)['final'], 'desync');
     });
 
-    test('FreeNodesService.generateX25519KeyPair генерирует валидные 32-байтные ключи Curve25519', () {
-      final kp = FreeNodesService.generateX25519KeyPair();
-      expect(kp.privateKey.isNotEmpty, isTrue);
-      expect(kp.publicKey.isNotEmpty, isTrue);
-      expect(kp.privateKey, isNot(equals(kp.publicKey)));
+    test('AmneziaWG 2.0, 3.0 и 3.1 .conf файлы разбираются и сериализуются в endpoints', () {
+      const conf31 = '''
+# Helsinki AWG 3.1
+[Interface]
+PrivateKey = priv31Key===
+Address = 10.10.0.2/32, fd00::2/128
+MTU = 1360
+Jc = 6
+Jmin = 60
+Jmax = 500
+S1 = 15
+S2 = 25
+S3 = 32
+S4 = 16
+H1 = 100000-200000
+H2 = 300000-400000
+H3 = 500000-600000
+H4 = 700000-800000
+I2 = <b 0xdeadbeef><r 8>
+HeaderProtectionKey = aHBrMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
+ContentPaddingAddition = 64
+ID = 0x1234
+IP = dns
+IB = dGVzdA==
+RekeyAfterTime = 110-130
+RekeyTimeout = 4-7
+RejectAfterTime = 175-185
+ITime = 20-35
+MaxHandshakeAttempts = 12
+RandomTrailers = true
+DisableCookies = 1
+
+[Peer]
+PublicKey = pub31Key===
+PresharedKey = psk31Key===
+Endpoint = 198.51.100.77:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 15-30
+''';
+
+      const parser = LinkParser();
+      expect(parser.looksLikeWireGuardConf(conf31), isTrue);
+      final profiles = parser.parseWireGuardConfAll(conf31, nameOverride: 'Helsinki AWG 3.1');
+      expect(profiles.length, 1);
+      final p = profiles.first;
+      expect(p.name, 'Helsinki AWG 3.1');
+      expect(p.isAmneziaWg, isTrue);
+      expect(p.awgVersionLabel, 'AMNEZIAWG 3.1');
+      expect(p.fullTransportLabel, 'AMNEZIAWG 3.1 · UDP');
+      expect(p.extra['s3'], 32);
+      expect(p.extra['s4'], 16);
+      expect(p.extra['h1'], '100000-200000');
+      expect(p.extra['header_protection_key'], 'aHBrMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=');
+      expect(p.extra['content_padding_addition'], 64);
+      expect(p.extra['random_trailers'], isTrue);
+      expect(p.extra['disable_cookies'], isTrue);
+      expect(p.extra['persistent_keepalive_interval'], '15-30');
+
+      final endpoint = p.toWireGuardEndpoint(tag: 'proxy');
+      expect(endpoint['type'], 'wireguard');
+      expect(endpoint.containsKey('persistent_keepalive_interval'), isFalse);
+      final peer = (endpoint['peers'] as List).single as Map<String, dynamic>;
+      expect(peer['persistent_keepalive_interval'], '15-30');
+      expect(peer['allowed_ips'], ['0.0.0.0/0', '::/0']);
+      expect(endpoint['random_trailers'], isTrue);
+      expect(endpoint['disable_cookies'], isTrue);
+      // При наличии IP/ID/IB поле i1 исключается из сериализованного endpoint по спецификации AWG 3.0
+      expect(endpoint['ip'], 'dns');
+      expect(endpoint.containsKey('i1'), isFalse);
+    });
+
+    test('FPTN-токен распознаётся как групповая подписка с сохранением выбранных серверов', () {
+      const fptnJson = '''
+{
+  "version": 1,
+  "service_name": "MyFptnService",
+  "username": "user1",
+  "password": "pw1",
+  "servers": [
+    {"name": "NL-1", "host": "198.51.100.1", "port": 443, "md5_fingerprint": "aa"},
+    {"name": "DE-1", "host": "198.51.100.2", "port": 443, "md5_fingerprint": "bb"}
+  ]
+}
+''';
+      final token = 'fptn:${_base64(fptnJson)}';
+      const parser = LinkParser();
+      expect(parser.isFptnPayload(token), isTrue);
+      expect(parser.extractFptnServiceName(token), 'MyFptnService');
+
+      final parsed = parser.parseSubscription(token, subscriptionId: 's_fptn');
+      expect(parsed.length, 2);
+      expect(parsed.every((p) => p.type == 'fptn' && p.subscriptionId == 's_fptn'), isTrue);
+
+      final sub = SubscriptionEntry(
+        id: 's_fptn',
+        url: token,
+        name: 'MyFptnService',
+        selectedServerKeys: const ['198.51.100.1:443'],
+      );
+      expect(sub.isFptnToken, isTrue);
+      final restored = SubscriptionEntry.fromJson(sub.toJson());
+      expect(restored.isFptnToken, isTrue);
+      expect(restored.selectedServerKeys, ['198.51.100.1:443']);
     });
   });
 }

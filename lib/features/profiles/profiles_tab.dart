@@ -10,6 +10,7 @@ import '../../app/widgets/qr_code_view.dart';
 import '../../core/app_controller.dart';
 import '../../core/models/runtime_config.dart';
 import '../../core/services/core_bridge.dart';
+import '../../core/services/link_parser.dart';
 import 'tv_receive_dialog.dart';
 
 /// Экран профилей: список серверов и импорт подписки.
@@ -62,6 +63,21 @@ class _ProfilesTabState extends State<ProfilesTab> {
               },
               icon: Icon(Icons.cleaning_services_outlined, color: tokens.danger),
             ),
+          IconButton(
+            tooltip: 'Списки серверов для Wi-Fi и Мобильной сети',
+            onPressed: (profiles.isEmpty && subs.isEmpty)
+                ? null
+                : () => showNetworkListsSheet(context, controller),
+            icon: Icon(
+              Icons.swap_calls_rounded,
+              color: (controller.settings.wifiProfileId.isNotEmpty ||
+                      controller.settings.cellularProfileId.isNotEmpty ||
+                      subs.any((s) => s.networkScope != 'all') ||
+                      profiles.any((p) => p.networkScope != 'all'))
+                  ? tokens.accent
+                  : null,
+            ),
+          ),
           IconButton(
             tooltip: 'Настройки балансировщика (tachyon-core 0.3.9)',
             onPressed: () => showBalancerSettingsSheet(context, controller),
@@ -169,6 +185,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     onSelect: () => controller.selectProfile('auto:all'),
                     onConfigure: () => showBalancerSettingsSheet(context, controller),
                   ),
+                  const SizedBox(height: Space.sm),
+                  _NetworkListsSummaryTile(
+                    controller: controller,
+                    onTap: () => showNetworkListsSheet(context, controller),
+                  ),
                   const SizedBox(height: Space.md),
                 ],
                 if (subs.isNotEmpty) ...[
@@ -193,6 +214,8 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       onEdit: () => _showManualDialog(context, controller, edit: profile),
                       onShare: () => _showQrDialog(context, controller, profile),
                       onPing: () => controller.pingProfile(profile.id),
+                      onChangeNetworkScope: (scope) =>
+                          controller.setProfileNetworkScope(profile.id, scope),
                       ping: controller.pingOf(profile.id),
                       isPinging: controller.isPinging(profile.id),
                       telemetry: controller.balancerTelemetryOf(profile.id),
@@ -340,8 +363,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (ctx, setStateLocal) {
+            final currentText = textController.text.trim();
+            final isFptn = LinkParser().isFptnPayload(currentText);
+
             return AlertDialog(
-              title: const Text('Импорт подписки и QR'),
+              title: const Text('Импорт подписки, файла или QR'),
               content: SizedBox(
                 width: 420,
                 child: Column(
@@ -349,8 +375,8 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Отсканируйте QR-код подписки/сервера или вставьте ссылку, конфиг WG/AmneziaWG, '
-                      'Clash YAML, Sing-box/Xray JSON, FPTN-токен или любой URI протокола.',
+                      'Отсканируйте QR-код, выберите файл (.conf AmneziaWG 2.0/3.0/3.1, .fptn, .json) '
+                      'или вставьте ссылку подписки, токен FPTN или любой URI протокола.',
                       style: Theme.of(dialogContext).textTheme.bodyMedium,
                     ),
                     const SizedBox(height: Space.md),
@@ -387,6 +413,54 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final picked = await CoreBridge.instance.pickConfigFile();
+                          if (picked == null) return;
+                          final fileName = picked['name'] ?? '';
+                          final fileContent = picked['content'] ?? '';
+                          if (fileContent.trim().isEmpty) return;
+                          if (dialogContext.mounted) {
+                            Navigator.of(dialogContext).pop();
+                          }
+                          if (!rootContext.mounted) return;
+                          if (LinkParser().isFptnPayload(fileContent)) {
+                            await showFptnTokenDialog(
+                              rootContext,
+                              controller,
+                              fileContent,
+                              initialName: fileName
+                                  .replaceAll(
+                                    RegExp(r'\.(fptn|json|txt)$', caseSensitive: false),
+                                    '',
+                                  )
+                                  .trim(),
+                            );
+                            return;
+                          }
+                          final added = await controller.importProfiles(
+                            fileContent,
+                            fileName: fileName,
+                          );
+                          if (!rootContext.mounted) return;
+                          final msg = switch (added) {
+                            -1 => 'Подписка из файла добавлена — серверы загружены',
+                            0 => controller.lastError.isNotEmpty
+                                ? controller.lastError
+                                : 'Не удалось распознать формат файла',
+                            _ => 'Импортировано из файла «$fileName»: $added',
+                          };
+                          ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
+                            SnackBar(content: Text(msg)),
+                          );
+                        },
+                        icon: const Icon(Icons.folder_open_rounded, size: 18),
+                        label: const Text('Выбрать файл (.conf / .fptn / .json)'),
+                      ),
+                    ),
+                    const SizedBox(height: Space.sm),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
                         onPressed: () {
                           Navigator.of(dialogContext).pop();
                           showTvReceiveDialog(rootContext, controller);
@@ -401,19 +475,22 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       maxLines: 5,
                       minLines: 3,
                       autofocus: true,
+                      onChanged: (_) => setStateLocal(() {}),
                       style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
                       decoration: InputDecoration(
-                        hintText: 'https://... или vless://...',
+                        hintText: 'https://..., vless://..., fptn:... или [Interface]',
                         suffixIcon: IconButton(
                           tooltip: 'Вставить из буфера',
                           icon: const Icon(Icons.content_paste_rounded),
                           onPressed: () async {
                             final d = await Clipboard.getData(Clipboard.kTextPlain);
                             if (d?.text != null) {
-                              textController.text = d!.text!.trim();
-                              textController.selection = TextSelection.collapsed(
-                                offset: textController.text.length,
-                              );
+                              setStateLocal(() {
+                                textController.text = d!.text!.trim();
+                                textController.selection = TextSelection.collapsed(
+                                  offset: textController.text.length,
+                                );
+                              });
                             }
                           },
                         ),
@@ -427,6 +504,16 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   onPressed: () => Navigator.of(dialogContext).pop(),
                   child: const Text('Отмена'),
                 ),
+                if (isFptn)
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      final value = textController.text.trim();
+                      Navigator.of(dialogContext).pop();
+                      showFptnTokenDialog(rootContext, controller, value);
+                    },
+                    icon: const Icon(Icons.checklist_rounded, size: 16),
+                    label: const Text('Выбрать серверы…'),
+                  ),
                 FilledButton(
                   onPressed: () async {
                     final value = textController.text.trim();
@@ -441,13 +528,15 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       0 => controller.lastError.isNotEmpty
                           ? controller.lastError
                           : 'Ничего не распознано',
-                      _ => 'Добавлено профилей: $added',
+                      _ => isFptn
+                          ? 'Группа FPTN обновлена: $added серверов'
+                          : 'Добавлено профилей: $added',
                     };
                     ScaffoldMessenger.maybeOf(rootContext)?.showSnackBar(
                       SnackBar(content: Text(msg)),
                     );
                   },
-                  child: const Text('Импортировать'),
+                  child: Text(isFptn ? 'Импортировать все' : 'Импортировать'),
                 ),
               ],
             );
@@ -597,15 +686,36 @@ class _ProfilesTabState extends State<ProfilesTab> {
     final wgMtu = TextEditingController(
       text: (edit?.extra['mtu'] ?? '1420').toString(),
     );
+    final wgKeepalive = TextEditingController(
+      text: (edit?.extra['persistent_keepalive_interval'] ?? '').toString(),
+    );
     final awgJc = TextEditingController(text: (edit?.extra['jc'] ?? '').toString());
     final awgJmin = TextEditingController(text: (edit?.extra['jmin'] ?? '').toString());
     final awgJmax = TextEditingController(text: (edit?.extra['jmax'] ?? '').toString());
     final awgS1 = TextEditingController(text: (edit?.extra['s1'] ?? '').toString());
     final awgS2 = TextEditingController(text: (edit?.extra['s2'] ?? '').toString());
+    final awgS3 = TextEditingController(text: (edit?.extra['s3'] ?? '').toString());
+    final awgS4 = TextEditingController(text: (edit?.extra['s4'] ?? '').toString());
     final awgH1 = TextEditingController(text: (edit?.extra['h1'] ?? '').toString());
     final awgH2 = TextEditingController(text: (edit?.extra['h2'] ?? '').toString());
     final awgH3 = TextEditingController(text: (edit?.extra['h3'] ?? '').toString());
     final awgH4 = TextEditingController(text: (edit?.extra['h4'] ?? '').toString());
+    final awgI1 = TextEditingController(text: (edit?.extra['i1'] ?? '').toString());
+    final awgI2 = TextEditingController(text: (edit?.extra['i2'] ?? '').toString());
+    final awgI3 = TextEditingController(text: (edit?.extra['i3'] ?? '').toString());
+    final awgI4 = TextEditingController(text: (edit?.extra['i4'] ?? '').toString());
+    final awgI5 = TextEditingController(text: (edit?.extra['i5'] ?? '').toString());
+    final awgHpk = TextEditingController(
+      text: (edit?.extra['header_protection_key'] ?? '').toString(),
+    );
+    final awgCpa = TextEditingController(
+      text: (edit?.extra['content_padding_addition'] ?? '').toString(),
+    );
+    final awgId = TextEditingController(text: (edit?.extra['id'] ?? '').toString());
+    final awgIp = TextEditingController(text: (edit?.extra['ip'] ?? '').toString());
+    final awgIb = TextEditingController(text: (edit?.extra['ib'] ?? '').toString());
+    var awgRandomTrailers = edit?.extra['random_trailers'] == true;
+    var awgDisableCookies = edit?.extra['disable_cookies'] == true;
 
     await showDialog<void>(
       context: context,
@@ -731,7 +841,74 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         ),
                         const SizedBox(height: Space.sm),
                       ],
-                      if (type == 'wireguard' || type == 'masque') ...[
+                       if (type == 'wireguard' || type == 'masque') ...[
+                        if (type == 'wireguard') ...[
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                final picked = await CoreBridge.instance.pickConfigFile();
+                                if (picked == null) return;
+                                final fileName = (picked['name'] ?? '')
+                                    .replaceAll(RegExp(r'\.(conf|txt)$', caseSensitive: false), '')
+                                    .trim();
+                                final content = picked['content'] ?? '';
+                                final parsedList = LinkParser().parseWireGuardConfAll(
+                                  content,
+                                  nameOverride: fileName.isNotEmpty ? fileName : null,
+                                );
+                                if (parsedList.isEmpty) return;
+                                final p = parsedList.first;
+                                setState(() {
+                                  if (name.text.trim().isEmpty || fileName.isNotEmpty) {
+                                    name.text = p.name;
+                                  }
+                                  address.text = '${p.server}:${p.port}';
+                                  password.text = (p.extra['private_key'] ?? p.password).toString();
+                                  pbk.text = (p.extra['peer_public_key'] ?? p.publicKey).toString();
+                                  if (p.extra['local_address'] is List &&
+                                      (p.extra['local_address'] as List).isNotEmpty) {
+                                    wgLocalIp.text = (p.extra['local_address'] as List).join(',');
+                                  }
+                                  wgMtu.text = (p.extra['mtu'] ?? '1280').toString();
+                                  wgKeepalive.text =
+                                      (p.extra['persistent_keepalive_interval'] ?? '').toString();
+                                  awgJc.text = (p.extra['jc'] ?? '').toString();
+                                  awgJmin.text = (p.extra['jmin'] ?? '').toString();
+                                  awgJmax.text = (p.extra['jmax'] ?? '').toString();
+                                  awgS1.text = (p.extra['s1'] ?? '').toString();
+                                  awgS2.text = (p.extra['s2'] ?? '').toString();
+                                  awgS3.text = (p.extra['s3'] ?? '').toString();
+                                  awgS4.text = (p.extra['s4'] ?? '').toString();
+                                  awgH1.text = (p.extra['h1'] ?? '').toString();
+                                  awgH2.text = (p.extra['h2'] ?? '').toString();
+                                  awgH3.text = (p.extra['h3'] ?? '').toString();
+                                  awgH4.text = (p.extra['h4'] ?? '').toString();
+                                  awgI1.text = (p.extra['i1'] ?? '').toString();
+                                  awgI2.text = (p.extra['i2'] ?? '').toString();
+                                  awgI3.text = (p.extra['i3'] ?? '').toString();
+                                  awgI4.text = (p.extra['i4'] ?? '').toString();
+                                  awgI5.text = (p.extra['i5'] ?? '').toString();
+                                  awgHpk.text =
+                                      (p.extra['header_protection_key'] ?? '').toString();
+                                  awgCpa.text =
+                                      (p.extra['content_padding_addition'] ?? '').toString();
+                                  awgId.text = (p.extra['id'] ?? '').toString();
+                                  awgIp.text = (p.extra['ip'] ?? '').toString();
+                                  awgIb.text = (p.extra['ib'] ?? '').toString();
+                                  awgRandomTrailers = p.extra['random_trailers'] == true;
+                                  awgDisableCookies = p.extra['disable_cookies'] == true;
+                                });
+                              },
+                              icon: const Icon(Icons.folder_open_rounded, size: 17),
+                              label: const Text(
+                                'Загрузить из .conf файла (AmneziaWG 1.5 / 2.0 / 3.0 / 3.1)',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: Space.sm),
+                        ],
                         TextField(
                           controller: pbk,
                           decoration: const InputDecoration(
@@ -759,6 +936,18 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                 decoration: const InputDecoration(labelText: 'MTU'),
                               ),
                             ),
+                            if (type == 'wireguard') ...[
+                              const SizedBox(width: Space.sm),
+                              Expanded(
+                                child: TextField(
+                                  controller: wgKeepalive,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Keepalive',
+                                    hintText: '25 / 15-30',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                         if (type == 'wireguard') ...[
@@ -766,7 +955,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                           ExpansionTile(
                             tilePadding: EdgeInsets.zero,
                             title: const Text(
-                              'Обфускация AmneziaWG (Jc, Jmin, Jmax, S1..H4)',
+                              'Параметры AmneziaWG 1.5 / 2.0 / 3.0 / 3.1',
                               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                             ),
                             children: [
@@ -815,6 +1004,22 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                       decoration: const InputDecoration(labelText: 'S2'),
                                     ),
                                   ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgS3,
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(labelText: 'S3 (v2.0+)'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgS4,
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(labelText: 'S4 (v2.0+)'),
+                                    ),
+                                  ),
                                 ],
                               ),
                               const SizedBox(height: Space.sm),
@@ -823,31 +1028,184 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                   Expanded(
                                     child: TextField(
                                       controller: awgH1,
-                                      decoration: const InputDecoration(labelText: 'H1'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'H1',
+                                        hintText: 'число / min-max',
+                                      ),
                                     ),
                                   ),
                                   const SizedBox(width: Space.sm),
                                   Expanded(
                                     child: TextField(
                                       controller: awgH2,
-                                      decoration: const InputDecoration(labelText: 'H2'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'H2',
+                                        hintText: 'число / min-max',
+                                      ),
                                     ),
                                   ),
                                   const SizedBox(width: Space.sm),
                                   Expanded(
                                     child: TextField(
                                       controller: awgH3,
-                                      decoration: const InputDecoration(labelText: 'H3'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'H3',
+                                        hintText: 'число / min-max',
+                                      ),
                                     ),
                                   ),
                                   const SizedBox(width: Space.sm),
                                   Expanded(
                                     child: TextField(
                                       controller: awgH4,
-                                      decoration: const InputDecoration(labelText: 'H4'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'H4',
+                                        hintText: 'число / min-max',
+                                      ),
                                     ),
                                   ),
                                 ],
+                              ),
+                              const SizedBox(height: Space.sm),
+                              TextField(
+                                controller: awgI1,
+                                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                decoration: const InputDecoration(
+                                  labelText: 'I1 (CPS Signature Packet 1 — AWG 2.0)',
+                                  hintText: '<b 0x...><r 16><t><c>',
+                                ),
+                              ),
+                              const SizedBox(height: Space.xs),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgI2,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(labelText: 'I2'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgI3,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(labelText: 'I3'),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: Space.xs),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgI4,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(labelText: 'I4'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgI5,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(labelText: 'I5'),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: Space.sm),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    flex: 2,
+                                    child: TextField(
+                                      controller: awgHpk,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'HeaderProtectionKey (AWG 3.0)',
+                                        hintText: 'base64 (32 байта)',
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgCpa,
+                                      keyboardType: TextInputType.number,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Padding (AWG 3.0)',
+                                        hintText: '0..1024',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: Space.sm),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgIp,
+                                      decoration: const InputDecoration(
+                                        labelText: 'IP (AWG 3.0)',
+                                        hintText: 'dns / stun / sip',
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    child: TextField(
+                                      controller: awgId,
+                                      decoration: const InputDecoration(
+                                        labelText: 'ID (DNS ID)',
+                                        hintText: 'число / 0x...',
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: Space.sm),
+                                  Expanded(
+                                    flex: 2,
+                                    child: TextField(
+                                      controller: awgIb,
+                                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                                      decoration: const InputDecoration(
+                                        labelText: 'IB (Payload)',
+                                        hintText: 'base64 / hex',
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: Space.xs),
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                title: const Text(
+                                  'RandomTrailers (AWG 3.1)',
+                                  style: TextStyle(fontSize: 12.5),
+                                ),
+                                subtitle: const Text(
+                                  'Случайный хвост данных в пакетах рукопожатия',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                                value: awgRandomTrailers,
+                                onChanged: (v) => setState(() => awgRandomTrailers = v),
+                              ),
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                title: const Text(
+                                  'DisableCookies (AWG 3.1)',
+                                  style: TextStyle(fontSize: 12.5),
+                                ),
+                                subtitle: const Text(
+                                  'Отключить обработку Cookie Reply',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                                value: awgDisableCookies,
+                                onChanged: (v) => setState(() => awgDisableCookies = v),
                               ),
                             ],
                           ),
@@ -1161,10 +1519,43 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         setAwgInt('jmax', awgJmax.text);
                         setAwgInt('s1', awgS1.text);
                         setAwgInt('s2', awgS2.text);
+                        setAwgInt('s3', awgS3.text);
+                        setAwgInt('s4', awgS4.text);
                         setAwgHeader('h1', awgH1.text);
                         setAwgHeader('h2', awgH2.text);
                         setAwgHeader('h3', awgH3.text);
                         setAwgHeader('h4', awgH4.text);
+                        setAwgHeader('persistent_keepalive_interval', wgKeepalive.text);
+
+                        void setAwgStr(String k, String raw) {
+                          final s = raw.trim();
+                          if (s.isEmpty) {
+                            nextExtra.remove(k);
+                          } else {
+                            nextExtra[k] = s;
+                          }
+                        }
+
+                        setAwgStr('i1', awgI1.text);
+                        setAwgStr('i2', awgI2.text);
+                        setAwgStr('i3', awgI3.text);
+                        setAwgStr('i4', awgI4.text);
+                        setAwgStr('i5', awgI5.text);
+                        setAwgStr('header_protection_key', awgHpk.text);
+                        setAwgInt('content_padding_addition', awgCpa.text);
+                        setAwgHeader('id', awgId.text);
+                        setAwgStr('ip', awgIp.text);
+                        setAwgStr('ib', awgIb.text);
+                        if (awgRandomTrailers) {
+                          nextExtra['random_trailers'] = true;
+                        } else {
+                          nextExtra.remove('random_trailers');
+                        }
+                        if (awgDisableCookies) {
+                          nextExtra['disable_cookies'] = true;
+                        } else {
+                          nextExtra.remove('disable_cookies');
+                        }
                       }
                     }
 
@@ -1221,15 +1612,28 @@ class _ProfilesTabState extends State<ProfilesTab> {
       tuicCc,
       wgLocalIp,
       wgMtu,
+      wgKeepalive,
       awgJc,
       awgJmin,
       awgJmax,
       awgS1,
       awgS2,
+      awgS3,
+      awgS4,
       awgH1,
       awgH2,
       awgH3,
       awgH4,
+      awgI1,
+      awgI2,
+      awgI3,
+      awgI4,
+      awgI5,
+      awgHpk,
+      awgCpa,
+      awgId,
+      awgIp,
+      awgIb,
     ]) {
       c.dispose();
     }
@@ -1246,6 +1650,7 @@ class _ProfileTile extends StatelessWidget {
     required this.onEdit,
     required this.onShare,
     this.onPing,
+    this.onChangeNetworkScope,
     this.ping,
     this.isPinging = false,
     this.telemetry,
@@ -1259,6 +1664,7 @@ class _ProfileTile extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onShare;
   final VoidCallback? onPing;
+  final void Function(String scope)? onChangeNetworkScope;
   final int? ping;
   final bool isPinging;
   final BalancerNodeTelemetry? telemetry;
@@ -1268,6 +1674,7 @@ class _ProfileTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final tel = telemetry;
+    final scope = profile.networkScope;
     final telSuffix = tel == null
         ? ''
         : tel.quarantined
@@ -1317,6 +1724,26 @@ class _ProfileTile extends StatelessWidget {
                             ),
                       ),
                     ),
+                    if (scope != 'all') ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: tokens.accent.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(3),
+                          border: Border.all(color: tokens.accent.withValues(alpha: 0.35)),
+                        ),
+                        child: Text(
+                          scope == 'wifi' ? 'Wi-Fi' : 'LTE',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            fontFamily: 'monospace',
+                            color: tokens.accent,
+                          ),
+                        ),
+                      ),
+                    ],
                     if (isBalancerWinner && !selected) ...[
                       const SizedBox(width: 6),
                       Container(
@@ -1395,7 +1822,7 @@ class _ProfileTile extends StatelessWidget {
           PopupMenuButton<String>(
             tooltip: 'Действия с сервером',
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 168),
+            constraints: const BoxConstraints(minWidth: 196),
             icon: SizedBox(
               width: 28,
               height: 28,
@@ -1409,6 +1836,12 @@ class _ProfileTile extends StatelessWidget {
                   onShare();
                 case 'edit':
                   onEdit();
+                case 'scope:all':
+                  onChangeNetworkScope?.call('all');
+                case 'scope:wifi':
+                  onChangeNetworkScope?.call('wifi');
+                case 'scope:cellular':
+                  onChangeNetworkScope?.call('cellular');
                 case 'delete':
                   onDelete();
               }
@@ -1445,6 +1878,58 @@ class _ProfileTile extends StatelessWidget {
                   ],
                 ),
               ),
+              if (onChangeNetworkScope != null) ...[
+                const PopupMenuDivider(),
+                PopupMenuItem<String>(
+                  value: 'scope:all',
+                  child: Row(
+                    children: [
+                      Icon(
+                        scope == 'all'
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 16,
+                        color: scope == 'all' ? tokens.accent : tokens.muted,
+                      ),
+                      const SizedBox(width: 10),
+                      const Text('Сеть: Все сети'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'scope:wifi',
+                  child: Row(
+                    children: [
+                      Icon(
+                        scope == 'wifi'
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 16,
+                        color: scope == 'wifi' ? tokens.accent : tokens.muted,
+                      ),
+                      const SizedBox(width: 10),
+                      const Text('Сеть: Только Wi-Fi'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'scope:cellular',
+                  child: Row(
+                    children: [
+                      Icon(
+                        scope == 'cellular'
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 16,
+                        color: scope == 'cellular' ? tokens.accent : tokens.muted,
+                      ),
+                      const SizedBox(width: 10),
+                      const Text('Сеть: Мобильная (LTE)'),
+                    ],
+                  ),
+                ),
+                const PopupMenuDivider(),
+              ],
               PopupMenuItem<String>(
                 value: 'delete',
                 child: Row(
@@ -1625,14 +2110,28 @@ class _SubscriptionGroupList extends StatelessWidget {
             onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
             onToggleSub: () => controller.toggleSubscription(sub.id),
             onRemoveSub: () => controller.removeSubscription(sub.id),
-            onRefreshSub: () => controller.refreshSubscription(sub.id),
+            onRefreshSub: () => sub.isFptnToken
+                ? showFptnTokenDialog(
+                    context,
+                    controller,
+                    sub.url,
+                    existingSub: sub,
+                  )
+                : controller.refreshSubscription(sub.id),
             onPingAllSub: () => controller.pingAllProfiles(subscriptionId: sub.id),
             onSelectProfile: (id) => controller.selectProfile(id),
             onDeleteProfile: (id) => controller.removeProfile(id),
             onEditProfile: onEditProfile,
             onShareProfile: onShareProfile,
             onPingProfile: (id) => controller.pingProfile(id),
-            onEditSub: () => _showEditSubDialog(context, controller, sub),
+            onEditSub: () => sub.isFptnToken
+                ? showFptnTokenDialog(
+                    context,
+                    controller,
+                    sub.url,
+                    existingSub: sub,
+                  )
+                : _showEditSubDialog(context, controller, sub),
           ),
           const SizedBox(height: Space.md),
         ],
@@ -1647,57 +2146,156 @@ class _SubscriptionGroupList extends StatelessWidget {
   ) async {
     final nameCtrl = TextEditingController(text: sub.name);
     final urlCtrl = TextEditingController(text: sub.url);
+    final hwidCtrl = TextEditingController(text: sub.customHwid);
+    final globalHwid = controller.effectiveHwid;
+    var selectedScope = sub.networkScope;
 
     await showDialog<void>(
       context: context,
-      builder: (dialogCtx) => AlertDialog(
-        title: const Text('Редактировать подписку'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration:
-                    const InputDecoration(labelText: 'Название (опционально)'),
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) {
+          final tokens = ctx.tokens;
+          final shortGlobalHwid = globalHwid.length > 12
+              ? '${globalHwid.substring(0, 12)}…'
+              : globalHwid;
+
+          return AlertDialog(
+            title: const Text('Редактировать подписку'),
+            content: SizedBox(
+              width: 440,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Название (опционально)',
+                      ),
+                    ),
+                    const SizedBox(height: Space.md),
+                    TextField(
+                      controller: urlCtrl,
+                      maxLines: 3,
+                      minLines: 1,
+                      decoration: const InputDecoration(
+                        labelText: 'Ссылка на подписку',
+                      ),
+                    ),
+                    const SizedBox(height: Space.md),
+                    TextField(
+                      controller: hwidCtrl,
+                      style: const TextStyle(fontSize: 12.5, fontFamily: 'monospace'),
+                      onChanged: (_) => setStateDialog(() {}),
+                      decoration: InputDecoration(
+                        labelText: 'HWID подписки (X-HWID)',
+                        hintText: globalHwid,
+                        helperText: hwidCtrl.text.trim().isEmpty
+                            ? 'По умолчанию: общий HWID ($shortGlobalHwid)'
+                            : 'Индивидуальный HWID для этой подписки',
+                        helperMaxLines: 2,
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Сгенерировать новый случайный HWID',
+                              icon: const Icon(Icons.casino_outlined, size: 19),
+                              onPressed: () {
+                                setStateDialog(() {
+                                  hwidCtrl.text = AppController.generateRandomHwid();
+                                });
+                              },
+                            ),
+                            if (hwidCtrl.text.isNotEmpty)
+                              IconButton(
+                                tooltip: 'Сбросить на общий HWID устройства',
+                                icon: const Icon(Icons.restore_rounded, size: 19),
+                                onPressed: () {
+                                  setStateDialog(() {
+                                    hwidCtrl.clear();
+                                  });
+                                },
+                              )
+                            else
+                              IconButton(
+                                tooltip: 'Скопировать текущий HWID',
+                                icon: const Icon(Icons.copy_rounded, size: 17),
+                                onPressed: () {
+                                  Clipboard.setData(ClipboardData(text: globalHwid));
+                                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                                    const SnackBar(content: Text('HWID скопирован в буфер')),
+                                  );
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: Space.md),
+                    Text(
+                      'Сеть для серверов подписки',
+                      style: Theme.of(ctx).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Позволяет использовать разные подписки для Wi-Fi и мобильной сети при автовыборе.',
+                      style: TextStyle(fontSize: 11, color: tokens.faint),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final item in const [
+                          ('all', 'Все сети', Icons.public_rounded),
+                          ('wifi', 'Только Wi-Fi', Icons.wifi_rounded),
+                          ('cellular', 'Мобильная сеть', Icons.signal_cellular_alt_rounded),
+                        ])
+                          ChoiceChip(
+                            avatar: Icon(item.$3, size: 15),
+                            label: Text(item.$2),
+                            selected: selectedScope == item.$1,
+                            onSelected: (_) =>
+                                setStateDialog(() => selectedScope = item.$1),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: Space.md),
-              TextField(
-                controller: urlCtrl,
-                maxLines: 3,
-                minLines: 1,
-                decoration:
-                    const InputDecoration(labelText: 'Ссылка на подписку'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  final newUrl = urlCtrl.text.trim();
+                  final newName = nameCtrl.text.trim();
+                  final newHwid = hwidCtrl.text.trim();
+                  Navigator.of(dialogCtx).pop();
+                  if (newUrl.isNotEmpty) {
+                    await controller.editSubscription(
+                      sub.id,
+                      url: newUrl,
+                      name: newName,
+                      customHwid: newHwid,
+                      networkScope: selectedScope,
+                    );
+                  }
+                },
+                child: const Text('Сохранить и обновить'),
               ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogCtx).pop(),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final newUrl = urlCtrl.text.trim();
-              final newName = nameCtrl.text.trim();
-              Navigator.of(dialogCtx).pop();
-              if (newUrl.isNotEmpty) {
-                await controller.editSubscription(
-                  sub.id,
-                  url: newUrl,
-                  name: newName,
-                );
-              }
-            },
-            child: const Text('Сохранить и обновить'),
-          ),
-        ],
+          );
+        },
       ),
     );
     nameCtrl.dispose();
     urlCtrl.dispose();
+    hwidCtrl.dispose();
   }
 }
 
@@ -1759,6 +2357,23 @@ class _CollapsibleSubCard extends StatelessWidget {
     return 'до $d.$m.$y ($days дн.)';
   }
 
+  static String _fmtUpdatedAt(int updatedAtMs) {
+    if (updatedAtMs <= 0) return 'не обновлялась';
+    final dt = DateTime.fromMillisecondsSinceEpoch(updatedAtMs);
+    final now = DateTime.now();
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final today = DateTime(now.year, now.month, now.day);
+    final targetDay = DateTime(dt.year, dt.month, dt.day);
+    final diffDays = today.difference(targetDay).inDays;
+    if (diffDays == 0) return 'обн. сегодня в $hh:$mm';
+    if (diffDays == 1) return 'обн. вчера в $hh:$mm';
+    final d = dt.day.toString().padLeft(2, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    if (dt.year == now.year) return 'обн. $d.$m в $hh:$mm';
+    return 'обн. $d.$m.${dt.year} в $hh:$mm';
+  }
+
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
@@ -1767,6 +2382,7 @@ class _CollapsibleSubCard extends StatelessWidget {
     final deadCount = profiles
         .where((p) => (controller.pingOf(p.id) ?? 0) < 0)
         .length;
+    final updatedLabel = _fmtUpdatedAt(sub.updatedAt);
 
     return HairlineCard(
       padding: const EdgeInsets.all(Space.sm),
@@ -1795,18 +2411,97 @@ class _CollapsibleSubCard extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w600,
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                        ),
                                   ),
+                                ),
+                                if (sub.isFptnToken) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: tokens.accent.withValues(alpha: 0.14),
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(
+                                        color: tokens.accent.withValues(alpha: 0.4),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      'FPTN',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        fontFamily: 'monospace',
+                                        color: tokens.accent,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                if (sub.networkScope != 'all') ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: tokens.accent.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(
+                                        color: tokens.accent.withValues(alpha: 0.35),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      sub.networkScope == 'wifi' ? 'Wi-Fi' : 'Мобильная',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        fontFamily: 'monospace',
+                                        color: tokens.accent,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                if (sub.customHwid.isNotEmpty) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: tokens.raised,
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(color: tokens.line),
+                                    ),
+                                    child: Text(
+                                      'HWID',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        fontFamily: 'monospace',
+                                        color: tokens.muted,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                             Text(
                               profiles.isEmpty
-                                  ? 'нет серверов'
-                                  : '${profiles.length} серверов · ${isCollapsed ? "развернуть" : "свернуть"}',
+                                  ? 'нет серверов · $updatedLabel'
+                                  : '${profiles.length} серверов · $updatedLabel · ${isCollapsed ? "развернуть" : "свернуть"}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -1906,12 +2601,15 @@ class _CollapsibleSubCard extends StatelessWidget {
                             ),
                           ),
                           onPressed: onRefreshSub,
-                          icon: const Icon(Icons.sync, size: 13),
-                          label: const Text(
-                            'Обновить',
+                          icon: Icon(
+                            sub.isFptnToken ? Icons.checklist_rounded : Icons.sync,
+                            size: 13,
+                          ),
+                          label: Text(
+                            sub.isFptnToken ? 'Токен / Серверы' : 'Обновить',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 11),
+                            style: const TextStyle(fontSize: 11),
                           ),
                         ),
                       ),
@@ -1974,7 +2672,9 @@ class _CollapsibleSubCard extends StatelessWidget {
             if (profiles.isNotEmpty) ...[
               const Divider(height: Space.sm),
               _AutoBalancerTile(
-                title: 'Автовыбор (балансировщик)',
+                title: sub.isFptnToken
+                    ? 'Балансировщик FPTN (автовыбор)'
+                    : 'Автовыбор (балансировщик)',
                 selected: selectedId == 'auto:${sub.id}',
                 controller: controller,
                 onSelect: () => onSelectProfile('auto:${sub.id}'),
@@ -1994,6 +2694,8 @@ class _CollapsibleSubCard extends StatelessWidget {
                   onEdit: () => onEditProfile(p),
                   onShare: () => onShareProfile(p),
                   onPing: () => onPingProfile(p.id),
+                  onChangeNetworkScope: (scope) =>
+                      controller.setProfileNetworkScope(p.id, scope),
                 ),
                 const SizedBox(height: 4),
               ],
@@ -2036,6 +2738,338 @@ class _CollapsibleSubCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Диалог управления токеном FPTN: обновление токена, выбор отдельных серверов и объединение в балансировщик.
+Future<void> showFptnTokenDialog(
+  BuildContext context,
+  AppController controller,
+  String initialToken, {
+  SubscriptionEntry? existingSub,
+  String? initialName,
+}) async {
+  final parser = LinkParser();
+  final extractedName = parser.extractFptnServiceName(initialToken);
+  final nameCtrl = TextEditingController(
+    text: (existingSub != null && existingSub.name.isNotEmpty)
+        ? existingSub.name
+        : ((initialName != null && initialName.isNotEmpty) ? initialName : extractedName),
+  );
+  final tokenCtrl = TextEditingController(text: initialToken.trim());
+  var selectedScope = existingSub?.networkScope ?? 'all';
+  var selectBalancer = true;
+
+  var candidates = await controller.parseFptnCandidates(
+    initialToken,
+    subscriptionId: existingSub?.id ?? '',
+  );
+  final selectedKeys = <String>{};
+  if (existingSub != null && existingSub.selectedServerKeys.isNotEmpty) {
+    for (final p in candidates) {
+      final k = AppController.fptnServerKey(p);
+      if (existingSub.selectedServerKeys.contains(k) ||
+          existingSub.selectedServerKeys.contains(p.name)) {
+        selectedKeys.add(k);
+      }
+    }
+  }
+  if (selectedKeys.isEmpty) {
+    for (final p in candidates) {
+      selectedKeys.add(AppController.fptnServerKey(p));
+    }
+  }
+
+  if (!context.mounted) {
+    nameCtrl.dispose();
+    tokenCtrl.dispose();
+    return;
+  }
+
+  await showDialog<void>(
+    context: context,
+    builder: (dialogCtx) {
+      return StatefulBuilder(
+        builder: (ctx, setStateDialog) {
+          final tokens = ctx.tokens;
+
+          Future<void> reloadToken(String nextRaw, {String? fileTitle}) async {
+            final trimmed = nextRaw.trim();
+            tokenCtrl.text = trimmed;
+            final nextCandidates = await controller.parseFptnCandidates(
+              trimmed,
+              subscriptionId: existingSub?.id ?? '',
+            );
+            final nextServiceName = parser.extractFptnServiceName(trimmed);
+            if (!ctx.mounted) return;
+            setStateDialog(() {
+              candidates = nextCandidates;
+              if (fileTitle != null && fileTitle.isNotEmpty && nameCtrl.text.trim().isEmpty) {
+                nameCtrl.text = fileTitle;
+              } else if (nextServiceName.isNotEmpty &&
+                  (nameCtrl.text.trim().isEmpty || nameCtrl.text.trim() == 'FPTN')) {
+                nameCtrl.text = nextServiceName;
+              }
+              selectedKeys
+                ..clear()
+                ..addAll(nextCandidates.map(AppController.fptnServerKey));
+            });
+          }
+
+          return AlertDialog(
+            title: Text(
+              existingSub != null ? 'Группа FPTN и выбор серверов' : 'Импорт токена FPTN',
+            ),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Серверы из токена группируются в отдельную подписку FPTN с собственным балансировщиком. '
+                      'При вставке нового токена старые серверы заменяются автоматически.',
+                      style: TextStyle(fontSize: 12, color: tokens.muted),
+                    ),
+                    const SizedBox(height: Space.md),
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Название группы FPTN',
+                        hintText: 'FPTN',
+                      ),
+                    ),
+                    const SizedBox(height: Space.sm),
+                    TextField(
+                      controller: tokenCtrl,
+                      maxLines: 3,
+                      minLines: 2,
+                      style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                      onChanged: (v) => reloadToken(v),
+                      decoration: InputDecoration(
+                        labelText: 'Токен FPTN (fptn:... / fptnb:... / JSON)',
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Вставить новый токен из буфера',
+                              icon: const Icon(Icons.content_paste_rounded, size: 18),
+                              onPressed: () async {
+                                final d = await Clipboard.getData(Clipboard.kTextPlain);
+                                final txt = d?.text?.trim() ?? '';
+                                if (txt.isNotEmpty) {
+                                  await reloadToken(txt);
+                                }
+                              },
+                            ),
+                            IconButton(
+                              tooltip: 'Загрузить из файла (.fptn / .json)',
+                              icon: const Icon(Icons.folder_open_rounded, size: 18),
+                              onPressed: () async {
+                                final picked = await CoreBridge.instance.pickConfigFile();
+                                if (picked == null) return;
+                                final fn = (picked['name'] ?? '')
+                                    .replaceAll(
+                                      RegExp(r'\.(fptn|json|txt)$', caseSensitive: false),
+                                      '',
+                                    )
+                                    .trim();
+                                await reloadToken(picked['content'] ?? '', fileTitle: fn);
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: Space.md),
+                    Text(
+                      'Сеть для группы FPTN',
+                      style: Theme.of(ctx).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: Space.xs),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final item in const [
+                          ('all', 'Все сети', Icons.public_rounded),
+                          ('wifi', 'Только Wi-Fi', Icons.wifi_rounded),
+                          ('cellular', 'Мобильная сеть', Icons.signal_cellular_alt_rounded),
+                        ])
+                          ChoiceChip(
+                            avatar: Icon(item.$3, size: 15),
+                            label: Text(item.$2),
+                            selected: selectedScope == item.$1,
+                            onSelected: (_) =>
+                                setStateDialog(() => selectedScope = item.$1),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: Space.md),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Серверы в токене (${selectedKeys.length} из ${candidates.length})',
+                            style: Theme.of(ctx).textTheme.titleSmall,
+                          ),
+                        ),
+                        if (candidates.isNotEmpty) ...[
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            onPressed: () => setStateDialog(() {
+                              selectedKeys
+                                ..clear()
+                                ..addAll(candidates.map(AppController.fptnServerKey));
+                            }),
+                            child: const Text('Все', style: TextStyle(fontSize: 12)),
+                          ),
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            onPressed: () => setStateDialog(selectedKeys.clear),
+                            child: const Text('Сбросить', style: TextStyle(fontSize: 12)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    if (candidates.isEmpty)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(Space.md),
+                        decoration: BoxDecoration(
+                          color: tokens.raised,
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          border: Border.all(color: tokens.line),
+                        ),
+                        child: Text(
+                          'Вставьте корректный токен FPTN (fptn:... или fptnb:...), чтобы увидеть список серверов.',
+                          style: TextStyle(fontSize: 12, color: tokens.faint),
+                        ),
+                      )
+                    else
+                      Container(
+                        constraints: const BoxConstraints(maxHeight: 240),
+                        decoration: BoxDecoration(
+                          color: tokens.raised,
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          border: Border.all(color: tokens.line),
+                        ),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: candidates.length,
+                          separatorBuilder: (_, _) => Divider(height: 1, color: tokens.line),
+                          itemBuilder: (_, idx) {
+                            final p = candidates[idx];
+                            final key = AppController.fptnServerKey(p);
+                            final checked = selectedKeys.contains(key);
+                            return CheckboxListTile(
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              value: checked,
+                              onChanged: (v) {
+                                setStateDialog(() {
+                                  if (v == true) {
+                                    selectedKeys.add(key);
+                                  } else {
+                                    selectedKeys.remove(key);
+                                  }
+                                });
+                              },
+                              title: Text(
+                                p.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              subtitle: Text(
+                                '${p.server}:${p.port}${p.sni.isNotEmpty ? " · SNI: ${p.sni}" : ""}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: tokens.faint,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    if (candidates.length >= 2) ...[
+                      const SizedBox(height: Space.xs),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: const Text(
+                          'Активировать балансировщик FPTN после сохранения',
+                          style: TextStyle(fontSize: 12.5),
+                        ),
+                        value: selectBalancer,
+                        onChanged: (v) => setStateDialog(() => selectBalancer = v),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(),
+                child: const Text('Отмена'),
+              ),
+              FilledButton(
+                onPressed: candidates.isEmpty || selectedKeys.isEmpty
+                    ? null
+                    : () async {
+                        final raw = tokenCtrl.text.trim();
+                        final customTitle = nameCtrl.text.trim();
+                        final keys = Set<String>.from(selectedKeys);
+                        Navigator.of(dialogCtx).pop();
+                        final added = await controller.importFptnToken(
+                          raw,
+                          customName: customTitle.isNotEmpty ? customTitle : null,
+                          selectedServerKeys: keys,
+                          targetSubId: existingSub?.id,
+                          networkScope: selectedScope,
+                          selectBalancer: selectBalancer,
+                        );
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              added > 0
+                                  ? 'Группа FPTN обновлена: серверов в балансировщике — $added'
+                                  : (controller.lastError.isNotEmpty
+                                      ? controller.lastError
+                                      : 'Не удалось обновить токен FPTN'),
+                            ),
+                          ),
+                        );
+                      },
+                child: Text(
+                  existingSub != null
+                      ? 'Обновить (${selectedKeys.length})'
+                      : 'Добавить в группу (${selectedKeys.length})',
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+  nameCtrl.dispose();
+  tokenCtrl.dispose();
 }
 
 /// Панель настройки нативного балансировщика tachyon-core 0.3.9.
@@ -2385,6 +3419,371 @@ Future<void> showBalancerSettingsSheet(
                               ],
                             ),
                           ),
+                          const SizedBox(height: Space.md),
+                          _NetworkListsSummaryTile(
+                            controller: controller,
+                            onTap: () {
+                              Navigator.of(sheetCtx).pop();
+                              showNetworkListsSheet(context, controller);
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      );
+    },
+  );
+}
+
+String _resolveProfileTargetLabel(AppController controller, String id) {
+  if (id.isEmpty) return 'Не менять';
+  if (id == 'auto:all') return 'Автовыбор (все серверы)';
+  if (id.startsWith('auto:')) {
+    final subId = id.substring(5);
+    for (final s in controller.settings.visibleSubscriptions) {
+      if (s.id == subId) {
+        final name = s.name.isNotEmpty
+            ? s.name
+            : (Uri.tryParse(s.url)?.host ?? 'подписка');
+        return 'Автовыбор ($name)';
+      }
+    }
+    return 'Автовыбор (подписка)';
+  }
+  for (final p in controller.settings.visibleProfiles) {
+    if (p.id == id) return p.name;
+  }
+  return 'Не менять';
+}
+
+/// Компактная плитка состояния списков серверов для Wi-Fi и мобильной сети.
+class _NetworkListsSummaryTile extends StatelessWidget {
+  const _NetworkListsSummaryTile({
+    required this.controller,
+    required this.onTap,
+  });
+
+  final AppController controller;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final wifiId = controller.settings.wifiProfileId;
+    final cellId = controller.settings.cellularProfileId;
+    final scopedSubs = controller.settings.visibleSubscriptions
+        .where((s) => s.networkScope != 'all')
+        .length;
+    final scopedProfs = controller.settings.visibleProfiles
+        .where((p) => p.networkScope != 'all')
+        .length;
+    final isConfigured =
+        wifiId.isNotEmpty || cellId.isNotEmpty || scopedSubs > 0 || scopedProfs > 0;
+
+    final String subtitle;
+    if (wifiId.isNotEmpty || cellId.isNotEmpty) {
+      subtitle =
+          'Wi-Fi: ${_resolveProfileTargetLabel(controller, wifiId)} · Мобильная: ${_resolveProfileTargetLabel(controller, cellId)}';
+    } else if (scopedSubs > 0 || scopedProfs > 0) {
+      subtitle =
+          'Размечено по сети: подписок — $scopedSubs, отдельных серверов — $scopedProfs';
+    } else {
+      subtitle = 'Настроить отдельные подписки или серверы для мобильной сети и Wi-Fi';
+    }
+
+    return HairlineCard(
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.md,
+        vertical: Space.sm,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.swap_calls_rounded,
+            size: 18,
+            color: isConfigured ? tokens.accent : tokens.muted,
+          ),
+          const SizedBox(width: Space.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Списки серверов для Wi-Fi и Мобильной сети',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: isConfigured ? tokens.accent : tokens.ink,
+                      ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: 11,
+                        color: tokens.faint,
+                      ),
+                ),
+              ],
+            ),
+          ),
+          Icon(Icons.chevron_right_rounded, size: 18, color: tokens.muted),
+        ],
+      ),
+    );
+  }
+}
+
+/// Панель настройки отдельных списков серверов и автопереключения для Wi-Fi и Мобильной сети.
+Future<void> showNetworkListsSheet(
+  BuildContext context,
+  AppController controller,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (sheetCtx) {
+      return StatefulBuilder(
+        builder: (ctx, setStateModal) {
+          final tokens = ctx.tokens;
+          final settings = controller.settings;
+          final subs = settings.visibleSubscriptions;
+          final profiles = settings.visibleProfiles;
+
+          final options = <(String, String)>[
+            ('', 'Не менять автоматически'),
+            if (profiles.length >= 2)
+              ('auto:all', 'Глобальный балансировщик (все серверы)'),
+            for (final s in subs)
+              (
+                'auto:${s.id}',
+                'Автовыбор: ${s.name.isNotEmpty ? s.name : (Uri.tryParse(s.url)?.host ?? s.url)}',
+              ),
+            for (final p in profiles) (p.id, 'Сервер: ${p.name}'),
+          ];
+
+          String safeValue(String raw) =>
+              options.any((o) => o.$1 == raw) ? raw : '';
+
+          return DraggableScrollableSheet(
+            initialChildSize: 0.72,
+            minChildSize: 0.45,
+            maxChildSize: 0.92,
+            expand: false,
+            builder: (ctx, scrollCtrl) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: tokens.surface,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                  border: Border.all(color: tokens.line),
+                ),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: tokens.line,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Space.lg,
+                        Space.md,
+                        Space.md,
+                        Space.sm,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.swap_calls_rounded, color: tokens.accent, size: 22),
+                          const SizedBox(width: Space.sm),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Списки серверов по типу сети',
+                                  style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                ),
+                                Text(
+                                  'Отдельные подписки и автовыбор для Мобильной сети и Wi-Fi',
+                                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                                        fontSize: 11,
+                                        color: tokens.faint,
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(sheetCtx).pop(),
+                            icon: const Icon(Icons.close, size: 20),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.fromLTRB(
+                          Space.lg,
+                          Space.md,
+                          Space.lg,
+                          Space.xxl,
+                        ),
+                        children: [
+                          const SectionLabel('Автовыбор списка при смене сети'),
+                          HairlineCard(
+                            padding: const EdgeInsets.all(Space.md),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(Icons.wifi_rounded, size: 17, color: tokens.accent),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Сеть Wi-Fi',
+                                      style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: Space.xs),
+                                DropdownButtonFormField<String>(
+                                  initialValue: safeValue(settings.wifiProfileId),
+                                  isExpanded: true,
+                                  items: [
+                                    for (final opt in options)
+                                      DropdownMenuItem<String>(
+                                        value: opt.$1,
+                                        child: Text(
+                                          opt.$2,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 13),
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (val) async {
+                                    if (val == null) return;
+                                    await controller.setNetworkProfiles(wifiProfileId: val);
+                                    if (ctx.mounted) setStateModal(() {});
+                                  },
+                                ),
+                                const Divider(height: Space.lg),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.signal_cellular_alt_rounded,
+                                      size: 17,
+                                      color: tokens.accent,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Мобильная сеть (LTE / 5G)',
+                                      style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: Space.xs),
+                                DropdownButtonFormField<String>(
+                                  initialValue: safeValue(settings.cellularProfileId),
+                                  isExpanded: true,
+                                  items: [
+                                    for (final opt in options)
+                                      DropdownMenuItem<String>(
+                                        value: opt.$1,
+                                        child: Text(
+                                          opt.$2,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 13),
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (val) async {
+                                    if (val == null) return;
+                                    await controller.setNetworkProfiles(cellularProfileId: val);
+                                    if (ctx.mounted) setStateModal(() {});
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (subs.isNotEmpty) ...[
+                            const SizedBox(height: Space.md),
+                            const SectionLabel('Фильтр подписок внутри балансировщика'),
+                            Text(
+                              'Если выбран «Глобальный балансировщик», подписки с пометкой «Только Wi-Fi» '
+                              'или «Мобильная» будут автоматически включаться только в соответствующей сети.',
+                              style: TextStyle(fontSize: 11, color: tokens.faint),
+                            ),
+                            const SizedBox(height: Space.sm),
+                            for (final sub in subs) ...[
+                              HairlineCard(
+                                padding: const EdgeInsets.all(Space.md),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      sub.name.isNotEmpty
+                                          ? sub.name
+                                          : (Uri.tryParse(sub.url)?.host ?? sub.url),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                    ),
+                                    const SizedBox(height: Space.xs),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 6,
+                                      children: [
+                                        for (final item in const [
+                                          ('all', 'Все сети'),
+                                          ('wifi', 'Только Wi-Fi'),
+                                          ('cellular', 'Мобильная'),
+                                        ])
+                                          ChoiceChip(
+                                            label: Text(item.$2),
+                                            selected: sub.networkScope == item.$1,
+                                            onSelected: (_) async {
+                                              await controller.editSubscription(
+                                                sub.id,
+                                                networkScope: item.$1,
+                                              );
+                                              if (ctx.mounted) setStateModal(() {});
+                                            },
+                                          ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                            ],
+                          ],
                         ],
                       ),
                     ),

@@ -11,7 +11,6 @@ import 'models/runtime_config.dart';
 import 'models/tunnel_state.dart';
 import 'services/core_bridge.dart';
 import 'services/dns_benchmark.dart';
-import 'services/free_nodes_service.dart';
 import 'services/link_parser.dart';
 import 'services/lists_repository.dart';
 import 'services/settings_store.dart';
@@ -90,12 +89,6 @@ class AppController extends ChangeNotifier {
   bool _scanningMtu = false;
   String _mtuScanStatus = '';
 
-  /// Автоподбор бесплатных туннелей (Cloudflare WARP AmneziaWG + SHARD пул).
-  bool _provisioningFreeNodes = false;
-  String _freeNodesStatus = '';
-  bool get provisioningFreeNodes => _provisioningFreeNodes;
-  String get freeNodesStatus => _freeNodesStatus;
-
   /// Автоподбор рецепта DPI (Desync).
   bool _testingDesync = false;
   String _desyncTestStatus = '';
@@ -114,7 +107,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.14';
+  static const String appVersion = '0.0.15';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -296,8 +289,16 @@ class AppController extends ChangeNotifier {
       unawaited(store.save(_settings));
     }
 
-    // Синхронизируем кэш подписок для ядра в формате чистого sing-box JSON
+    // Очистка устаревших кэш-файлов и синхронизация кэша подписок для ядра
     if (filesDirPath.isNotEmpty) {
+      for (final freeId in const ['free-warp', 'free-shard']) {
+        final f = File('$filesDirPath/subs/$freeId.txt');
+        if (f.existsSync()) {
+          try {
+            f.deleteSync();
+          } catch (_) {}
+        }
+      }
       for (final sub in _settings.subscriptions) {
         final subProfiles = _settings.profiles.where((p) => p.subscriptionId == sub.id).toList();
         if (subProfiles.isNotEmpty) {
@@ -331,6 +332,7 @@ class AppController extends ChangeNotifier {
     // Фоновое обновление: подписки без серверов, список устарел или резолверы ещё не проверены.
     unawaited(_refreshStale());
     unawaited(refreshWifiInfo());
+    unawaited(_checkNetworkDesyncProfile(forceCheck: true));
   }
 
   Future<void> _handleIncomingDeepLink(String raw) async {
@@ -460,7 +462,91 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Заменяет настройки и сохраняет их.
+  /// Генерирует новый случайный 32-символьный hex HWID.
+  static String generateRandomHwid() {
+    final rng = Random.secure();
+    return List.generate(
+      16,
+      (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+  }
+
+  /// Возвращает глобальный HWID устройства (генерируя и сохраняя его при первом обращении).
+  String get effectiveHwid {
+    var hwid = _settings.hwid.trim();
+    if (hwid.isEmpty) {
+      hwid = generateRandomHwid();
+      _settings = _settings.copyWith(hwid: hwid);
+      unawaited(_persist());
+    }
+    return hwid;
+  }
+
+  /// Задаёт общий HWID устройства.
+  Future<void> setGlobalHwid(String hwid) async {
+    final clean = hwid.trim();
+    await _update(_settings.copyWith(hwid: clean.isEmpty ? generateRandomHwid() : clean));
+  }
+
+  /// Задаёт сетевую область действия для конкретного сервера (`'all'`, `'wifi'`, `'cellular'`).
+  Future<void> setProfileNetworkScope(String profileId, String scope) async {
+    final cleanScope = (scope == 'wifi' || scope == 'cellular') ? scope : 'all';
+    final nextProfiles = [
+      for (final p in _settings.profiles)
+        if (p.id == profileId)
+          Profile(
+            id: p.id,
+            name: p.name,
+            type: p.type,
+            server: p.server,
+            port: p.port,
+            uuid: p.uuid,
+            password: p.password,
+            method: p.method,
+            transport: p.transport,
+            sni: p.sni,
+            alpn: p.alpn,
+            allowInsecure: p.allowInsecure,
+            flow: p.flow,
+            publicKey: p.publicKey,
+            shortId: p.shortId,
+            subscriptionId: p.subscriptionId,
+            extra: {
+              ...p.extra,
+              if (cleanScope == 'all')
+                ...(<String, dynamic>{})
+              else
+                'network_scope': cleanScope,
+            }..removeWhere((k, _) => cleanScope == 'all' && k == 'network_scope'),
+          )
+        else
+          p,
+    ];
+    await _update(_settings.copyWith(profiles: nextProfiles));
+    if (_tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        _settings.selectedProfileId.startsWith('auto:')) {
+      await _restartActiveTunnel();
+    }
+  }
+
+  /// Настраивает автоматический выбор профиля / списка серверов отдельно для Wi-Fi и мобильной сети.
+  Future<void> setNetworkProfiles({
+    String? wifiProfileId,
+    String? cellularProfileId,
+  }) async {
+    await _update(
+      _settings.copyWith(
+        wifiProfileId: wifiProfileId ?? _settings.wifiProfileId,
+        cellularProfileId: cellularProfileId ?? _settings.cellularProfileId,
+      ),
+    );
+    await _checkNetworkDesyncProfile(forceCheck: true);
+  }
+
+  bool get _hasNetworkScopedNodes =>
+      _settings.subscriptions.any((s) => s.networkScope != 'all') ||
+      _settings.profiles.any((p) => p.networkScope != 'all');
   Future<void> _update(AppSettings next) async {
     _settings = next;
     await _persist();
@@ -542,9 +628,52 @@ class AppController extends ChangeNotifier {
   }
 
   /// Импортирует подписку или серверы: принимает ссылку, deep-link, QR-пейлоад или готовое содержимое.
-  Future<int> importProfiles(String content) async {
+  Future<int> importProfiles(String content, {String? fileName}) async {
     var payload = content.trim();
     if (payload.isEmpty) return 0;
+
+    final cleanFileName = fileName
+        ?.trim()
+        .replaceAll(RegExp(r'\.(conf|fptn|json|txt|yaml|yml)$', caseSensitive: false), '')
+        .trim();
+
+    final parser = LinkParser();
+
+    // 1. Токен или конфигурация FPTN (fptn:, fptnb:, JSON с service_name + servers) ->
+    //    группируем в отдельную подписку FPTN с собственным балансировщиком и заменой старых серверов.
+    if (parser.isFptnPayload(payload)) {
+      return importFptnToken(
+        payload,
+        customName: (cleanFileName != null && cleanFileName.isNotEmpty) ? cleanFileName : null,
+      );
+    }
+
+    // 2. Конфигурационный файл WireGuard / AmneziaWG (.conf 1.5 / 2.0 / 3.0 / 3.1)
+    if (parser.looksLikeWireGuardConf(payload)) {
+      final wgProfiles = parser.parseWireGuardConfAll(
+        payload,
+        nameOverride: (cleanFileName != null && cleanFileName.isNotEmpty) ? cleanFileName : null,
+      );
+      if (wgProfiles.isNotEmpty) {
+        _lastError = '';
+        final byId = {for (final p in _settings.profiles) p.id: p};
+        for (final p in wgProfiles) {
+          byId[p.id] = p;
+        }
+        final merged = byId.values.toList();
+        await _update(
+          _settings.copyWith(
+            profiles: merged,
+            selectedProfileId: wgProfiles.length == 1
+                ? wgProfiles.first.id
+                : (_settings.selectedProfileId.isEmpty
+                    ? wgProfiles.first.id
+                    : _settings.selectedProfileId),
+          ),
+        );
+        return wgProfiles.length;
+      }
+    }
 
     // Распаковка клиентских deep-link обёрток (v2raytun://, happ://, v2rayng://, clash://, sing-box://, hiddify://, sub://, tachyon://)
     final unwrappedUrl = _unwrapSubscriptionDeepLink(payload);
@@ -598,7 +727,6 @@ class AppController extends ChangeNotifier {
       }
     }
 
-    final parser = LinkParser();
     List<Profile> profiles = const [];
     final nativeParsed = await bridge.parseSubscription(payload);
     if (nativeParsed != null &&
@@ -617,6 +745,17 @@ class AppController extends ChangeNotifier {
       notifyListeners();
       return 0;
     }
+    if (cleanFileName != null && cleanFileName.isNotEmpty && profiles.length == 1) {
+      final single = profiles.first;
+      if (single.name.isEmpty || single.name == single.server || single.name == 'WireGuard') {
+        profiles = [
+          Profile.fromJson({
+            ...single.toJson(),
+            'name': cleanFileName,
+          }),
+        ];
+      }
+    }
     _lastError = '';
     final byId = {for (final p in _settings.profiles) p.id: p};
     for (final p in profiles) {
@@ -632,6 +771,199 @@ class AppController extends ChangeNotifier {
       ),
     );
     return profiles.length;
+  }
+
+  /// Ключ идентификации сервера внутри FPTN-токена (`host:port`).
+  static String fptnServerKey(Profile p) => '${p.server}:${p.port}';
+
+  /// Разбирает токен FPTN (`fptn:`, `fptnb:`, JSON) и возвращает полный список серверов из него.
+  Future<List<Profile>> parseFptnCandidates(
+    String rawToken, {
+    String subscriptionId = '',
+  }) async {
+    final trimmed = rawToken.trim();
+    if (trimmed.isEmpty) return const [];
+    final parser = LinkParser();
+    List<Profile> candidates = const [];
+    final nativeParsed = await bridge.parseSubscription(trimmed);
+    if (nativeParsed != null &&
+        nativeParsed['ok'] == true &&
+        nativeParsed['nodes'] is List) {
+      candidates = parser.parseEngineNodes(
+        nativeParsed['nodes'] as List,
+        (nativeParsed['primary_tags'] as List?) ?? const [],
+        subscriptionId: subscriptionId,
+      );
+    }
+    if (candidates.isEmpty) {
+      candidates = parser.parseSubscription(trimmed, subscriptionId: subscriptionId);
+    }
+    return candidates.where((p) => p.type == 'fptn').toList(growable: false);
+  }
+
+  /// Импортирует или обновляет токен FPTN как группу подписки с собственным балансировщиком
+  /// (`auto:<subId>`), возможностью выбора конкретных серверов и автоматической очисткой старых серверов.
+  Future<int> importFptnToken(
+    String rawToken, {
+    String? customName,
+    Set<String>? selectedServerKeys,
+    String? targetSubId,
+    String? networkScope,
+    bool selectBalancer = true,
+  }) async {
+    final cleanToken = rawToken.trim();
+    if (cleanToken.isEmpty) return 0;
+
+    final parser = LinkParser();
+    final extractedName = parser.extractFptnServiceName(cleanToken);
+    final desiredName = (customName != null && customName.trim().isNotEmpty)
+        ? customName.trim()
+        : extractedName;
+
+    // Ищем существующую группу FPTN для обновления (чтобы старые серверы заменялись автоматически)
+    SubscriptionEntry? existing;
+    if (targetSubId != null && targetSubId.isNotEmpty) {
+      existing = _settings.subscriptions.where((s) => s.id == targetSubId).firstOrNull;
+    }
+    existing ??= _settings.subscriptions
+        .where(
+          (s) =>
+              s.isFptnToken &&
+              (s.name.toLowerCase() == desiredName.toLowerCase() || s.url.trim() == cleanToken),
+        )
+        .firstOrNull;
+    existing ??= _settings.subscriptions.where((s) => s.isFptnToken).firstOrNull;
+
+    final subId =
+        existing?.id ?? 's${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+
+    final allCandidates = await parseFptnCandidates(cleanToken, subscriptionId: subId);
+    if (allCandidates.isEmpty) {
+      _lastError = 'Не удалось разобрать токен FPTN или в нём нет серверов';
+      notifyListeners();
+      return 0;
+    }
+
+    final effectiveFilter = selectedServerKeys ??
+        (existing != null && existing.selectedServerKeys.isNotEmpty
+            ? existing.selectedServerKeys.toSet()
+            : null);
+
+    var filtered = effectiveFilter == null || effectiveFilter.isEmpty
+        ? allCandidates
+        : allCandidates
+            .where(
+              (p) =>
+                  effectiveFilter.contains(fptnServerKey(p)) ||
+                  effectiveFilter.contains(p.name),
+            )
+            .toList(growable: false);
+
+    // Если после обновления токена ни один из прежних выбранных серверов не совпал, берём все серверы
+    if (filtered.isEmpty) {
+      filtered = allCandidates;
+    }
+
+    // Сохраняем пользовательские привязки к сети (Wi-Fi / Мобильная) со старых серверов FPTN
+    final prevScopes = <String, String>{
+      for (final p in _settings.profiles)
+        if ((p.subscriptionId == subId || (p.type == 'fptn' && p.subscriptionId.isEmpty)) &&
+            p.networkScope != 'all')
+          fptnServerKey(p): p.networkScope,
+    };
+
+    final scopedFresh = [
+      for (final p in filtered)
+        if (prevScopes.containsKey(fptnServerKey(p)))
+          Profile.fromJson({
+            ...p.toJson(),
+            'subscription_id': subId,
+            'extra': {
+              ...p.extra,
+              'network_scope': prevScopes[fptnServerKey(p)],
+            },
+          })
+        else
+          Profile.fromJson({
+            ...p.toJson(),
+            'subscription_id': subId,
+          }),
+    ];
+
+    try {
+      if (filesDirPath.isNotEmpty) {
+        final cacheFile = File('$filesDirPath/subs/$subId.txt');
+        await cacheFile.parent.create(recursive: true);
+        final outboundsList = scopedFresh.map((p) => p.toOutbound(tag: p.name)).toList();
+        await cacheFile.writeAsString(jsonEncode(outboundsList));
+      }
+    } catch (_) {}
+
+    // Удаляем старые серверы этой FPTN-группы И старые разрозненные серверы FPTN без группы
+    final otherProfiles = _settings.profiles
+        .where((p) => p.subscriptionId != subId && !(p.type == 'fptn' && p.subscriptionId.isEmpty))
+        .toList(growable: false);
+    final updatedProfiles = [...otherProfiles, ...scopedFresh];
+
+    final savedKeys = (selectedServerKeys != null &&
+            selectedServerKeys.isNotEmpty &&
+            selectedServerKeys.length < allCandidates.length)
+        ? selectedServerKeys.toList(growable: false)
+        : (selectedServerKeys != null
+            ? const <String>[]
+            : (existing?.selectedServerKeys ?? const <String>[]));
+
+    final updatedEntry = (existing ?? SubscriptionEntry(id: subId, url: cleanToken)).copyWith(
+      url: cleanToken,
+      name: (customName != null && customName.trim().isNotEmpty)
+          ? customName.trim()
+          : (existing != null && existing.name.isNotEmpty ? existing.name : desiredName),
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+      networkScope: networkScope ?? existing?.networkScope ?? 'all',
+      selectedServerKeys: savedKeys,
+    );
+
+    final List<SubscriptionEntry> updatedSubs;
+    if (existing != null) {
+      updatedSubs = [
+        for (final s in _settings.subscriptions)
+          if (s.id == subId) updatedEntry else s,
+      ];
+    } else {
+      updatedSubs = [..._settings.subscriptions, updatedEntry];
+    }
+
+    var nextSelected = _settings.selectedProfileId;
+    final prevSelectedRemoved = nextSelected.isNotEmpty &&
+        !nextSelected.startsWith('auto:') &&
+        !updatedProfiles.any((p) => p.id == nextSelected);
+    if (selectBalancer && scopedFresh.length >= 2) {
+      if (nextSelected.isEmpty ||
+          prevSelectedRemoved ||
+          nextSelected == 'auto:$subId') {
+        nextSelected = 'auto:$subId';
+      }
+    } else if (scopedFresh.length == 1 && (nextSelected.isEmpty || prevSelectedRemoved)) {
+      nextSelected = scopedFresh.first.id;
+    } else if (prevSelectedRemoved) {
+      nextSelected = scopedFresh.length >= 2 ? 'auto:$subId' : scopedFresh.first.id;
+    }
+
+    _lastError = '';
+    await _update(
+      _settings.copyWith(
+        profiles: updatedProfiles,
+        subscriptions: updatedSubs,
+        selectedProfileId: nextSelected,
+      ),
+    );
+
+    if (_tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        (nextSelected == 'auto:$subId' || scopedFresh.any((p) => p.id == nextSelected))) {
+      await _restartActiveTunnel();
+    }
+    return scopedFresh.length;
   }
 
   String? _unwrapSubscriptionDeepLink(String raw) {
@@ -779,6 +1111,25 @@ class AppController extends ChangeNotifier {
   Future<int> fetchSubscription(String subId) async {
     final sub = _settings.subscriptions.where((s) => s.id == subId).firstOrNull;
     if (sub == null || sub.url.isEmpty) return 0;
+    if (sub.isFptnToken) {
+      _loadingSubscription = true;
+      _lastError = '';
+      notifyListeners();
+      try {
+        return await importFptnToken(
+          sub.url,
+          customName: sub.name,
+          selectedServerKeys: sub.selectedServerKeys.isEmpty
+              ? null
+              : sub.selectedServerKeys.toSet(),
+          targetSubId: sub.id,
+          selectBalancer: false,
+        );
+      } finally {
+        _loadingSubscription = false;
+        notifyListeners();
+      }
+    }
     _loadingSubscription = true;
     _lastError = '';
     notifyListeners();
@@ -788,13 +1139,10 @@ class AppController extends ChangeNotifier {
         ..connectionTimeout = const Duration(seconds: 15)
         ..badCertificateCallback = ((cert, host, port) => true);
 
-      var hwid = _settings.hwid;
-      if (hwid.isEmpty) {
-        final rng = Random.secure();
-        hwid = List.generate(16, (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
-        _settings = _settings.copyWith(hwid: hwid);
-        unawaited(_persist());
-      }
+      final globalHwid = effectiveHwid;
+      final hwid = sub.customHwid.trim().isNotEmpty
+          ? sub.customHwid.trim()
+          : globalHwid;
 
       const userAgents = [
         'v2rayNG/1.8.5 (Linux; Android)',
@@ -990,9 +1338,29 @@ class AppController extends ChangeNotifier {
         await cacheFile.writeAsString(jsonEncode(outboundsList));
       } catch (_) {}
 
-      // Заменяем старые профили этой подписки свежими
+      // Заменяем старые профили этой подписки свежими (сохраняя пользовательские network_scope)
+      final prevScopes = <String, String>{
+        for (final p in _settings.profiles)
+          if (p.subscriptionId == subId && p.networkScope != 'all')
+            '${p.name}|${p.server}|${p.port}': p.networkScope,
+      };
+      final scopedFresh = prevScopes.isEmpty
+          ? fresh
+          : [
+              for (final p in fresh)
+                if (prevScopes.containsKey('${p.name}|${p.server}|${p.port}'))
+                  Profile.fromJson({
+                    ...p.toJson(),
+                    'extra': {
+                      ...p.extra,
+                      'network_scope': prevScopes['${p.name}|${p.server}|${p.port}'],
+                    },
+                  })
+                else
+                  p,
+            ];
       final otherProfiles = _settings.profiles.where((p) => p.subscriptionId != subId).toList();
-      final updatedProfiles = [...otherProfiles, ...fresh];
+      final updatedProfiles = [...otherProfiles, ...scopedFresh];
       final keepSelected = _settings.selectedProfileId.startsWith('auto:') ||
           updatedProfiles.any((p) => p.id == _settings.selectedProfileId);
       final newSelected = keepSelected
@@ -1020,7 +1388,7 @@ class AppController extends ChangeNotifier {
         subscriptions: updatedSubs,
       ));
       _lastError = '';
-      return fresh.length;
+      return scopedFresh.length;
     } catch (e) {
       _lastError = 'Сбой сети: $e';
       notifyListeners();
@@ -1031,22 +1399,48 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Редактирует подписку (URL или название) и обновляет её.
-  Future<void> editSubscription(String id, {String? url, String? name}) async {
+  /// Редактирует подписку (URL, название, HWID или привязку к сети) и обновляет её.
+  Future<void> editSubscription(
+    String id, {
+    String? url,
+    String? name,
+    String? customHwid,
+    String? networkScope,
+  }) async {
+    final prev = _settings.subscriptions.where((s) => s.id == id).firstOrNull;
+    final nextUrl = url?.trim() ?? prev?.url ?? '';
+    final nextHwid = customHwid != null ? customHwid.trim() : (prev?.customHwid ?? '');
+    final nextScope = networkScope != null
+        ? ((networkScope == 'wifi' || networkScope == 'cellular') ? networkScope : 'all')
+        : (prev?.networkScope ?? 'all');
+    final shouldRefetch = prev == null ||
+        prev.updatedAt == 0 ||
+        (url != null && nextUrl != prev.url) ||
+        (customHwid != null && nextHwid != prev.customHwid);
+    final scopeChanged = prev != null && nextScope != prev.networkScope;
+
     await _update(_settings.copyWith(
       subscriptions: [
         for (final s in _settings.subscriptions)
           if (s.id == id)
             s.copyWith(
-              url: url?.trim() ?? s.url,
+              url: nextUrl,
               name: name?.trim() ?? s.name,
+              customHwid: nextHwid,
+              networkScope: nextScope,
             )
           else
             s,
       ],
     ));
-    if (url != null && url.isNotEmpty) {
+    if (nextUrl.isNotEmpty && shouldRefetch) {
       await fetchSubscription(id);
+    }
+    if (scopeChanged &&
+        _tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        _settings.selectedProfileId.startsWith('auto:')) {
+      await _restartActiveTunnel();
     }
   }
 
@@ -1270,6 +1664,7 @@ class AppController extends ChangeNotifier {
       mtu: _settings.mtu,
       desync: _settings.desync,
       subscriptions: hasProfile ? const [] : activeSubs,
+      allSubscriptions: activeSubs,
       filesDir: filesDirPath,
       appRoutes: _settings.appRoutes,
       serviceRoutes: _settings.serviceRoutes,
@@ -1280,7 +1675,18 @@ class AppController extends ChangeNotifier {
       extraProfiles: _settings.visibleProfiles,
       proxyTlsFragment: _settings.proxyTlsFragment,
       balancer: _settings.balancer,
+      activeNetworkType: _lastNetType,
     );
+  }
+
+  bool _isValidSelectableProfileId(String id) {
+    if (id.isEmpty) return false;
+    if (id == 'auto:all') return _settings.visibleProfiles.isNotEmpty;
+    if (id.startsWith('auto:')) {
+      final subId = id.substring(5);
+      return _settings.visibleSubscriptions.any((s) => s.id == subId);
+    }
+    return _settings.visibleProfiles.any((p) => p.id == id);
   }
 
   /// Поднимает или опускает туннель.
@@ -1315,6 +1721,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    await _checkNetworkDesyncProfile(forceCheck: true);
     await ensureRequiredListsDownloaded();
     final config = buildConfig();
     if (config == null) {
@@ -1506,8 +1913,12 @@ class AppController extends ChangeNotifier {
     _syncBalancerTelemetry(next?.balancer);
     _pollTickCount++;
 
-    // Автоматическое переключение рецепта Desync при смене Wi-Fi <-> Мобильная сеть
-    if (_settings.perNetworkDesync && _pollTickCount % 5 == 0) {
+    // Автоматическое переключение профиля/списка серверов и рецепта Desync при смене Wi-Fi <-> Мобильная сеть
+    if ((_settings.perNetworkDesync ||
+            _settings.wifiProfileId.isNotEmpty ||
+            _settings.cellularProfileId.isNotEmpty ||
+            _hasNetworkScopedNodes) &&
+        _pollTickCount % 3 == 0) {
       unawaited(_checkNetworkDesyncProfile());
     }
 
@@ -1537,7 +1948,12 @@ class AppController extends ChangeNotifier {
       _nodeTelemetry.clear();
       return;
     }
-    final candidates = RuntimeConfig.resolveAutoCandidates(sel, _settings.visibleProfiles);
+    final candidates = RuntimeConfig.resolveAutoCandidates(
+      sel,
+      _settings.visibleProfiles,
+      activeNetworkType: _lastNetType,
+      subscriptions: _settings.visibleSubscriptions,
+    );
     _activeBalancerWinner = null;
     _nodeTelemetry.clear();
     var anyProbedAlive = false;
@@ -1569,18 +1985,40 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _checkNetworkDesyncProfile() async {
+  Future<void> _checkNetworkDesyncProfile({bool forceCheck = false}) async {
     final net = await bridge.networkType();
-    if (net == _lastNetType || (net != 'wifi' && net != 'cellular')) return;
+    if (net != 'wifi' && net != 'cellular') return;
+    final netChanged = net != _lastNetType;
+    if (!forceCheck && !netChanged) return;
     _lastNetType = net;
-    final targetPreset = net == 'wifi'
-        ? _settings.desync.wifiPreset
-        : _settings.desync.cellularPreset;
-    if (targetPreset.isNotEmpty && targetPreset != _settings.desync.preset) {
-      await setDesync(_settings.desync.copyWith(preset: targetPreset));
-    } else {
-      notifyListeners();
+
+    if (_settings.perNetworkDesync) {
+      final targetPreset = net == 'wifi'
+          ? _settings.desync.wifiPreset
+          : _settings.desync.cellularPreset;
+      if (targetPreset.isNotEmpty && targetPreset != _settings.desync.preset) {
+        await setDesync(_settings.desync.copyWith(preset: targetPreset));
+      }
     }
+
+    final targetProfileId =
+        net == 'wifi' ? _settings.wifiProfileId : _settings.cellularProfileId;
+    if (_isValidSelectableProfileId(targetProfileId) &&
+        targetProfileId != _settings.selectedProfileId) {
+      await selectProfile(targetProfileId);
+      return;
+    }
+
+    if (netChanged &&
+        _tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        _settings.selectedProfileId.startsWith('auto:') &&
+        _hasNetworkScopedNodes) {
+      await _restartActiveTunnel();
+      return;
+    }
+
+    notifyListeners();
   }
 
   Future<void> _runFailoverCheck() async {
@@ -1861,141 +2299,6 @@ class AppController extends ChangeNotifier {
       return originalMtu;
     } finally {
       _scanningMtu = false;
-      notifyListeners();
-    }
-  }
-
-  /// Генерирует бесплатный Cloudflare WARP с обфускацией AmneziaWG (Anti-DPI),
-  /// сканирует живые эндпоинты Cloudflare и выбирает самый быстрый узел.
-  Future<int> provisionFreeWarp() async {
-    if (_provisioningFreeNodes) return 0;
-    _provisioningFreeNodes = true;
-    _freeNodesStatus = 'Генерация бесплатного WARP (AmneziaWG)...';
-    notifyListeners();
-
-    try {
-      final service = FreeNodesService();
-      final generated = await service.generateWarpProfiles(
-        useLocalProxy: _tunnel.status.isActive,
-        onStatus: (msg) {
-          _freeNodesStatus = msg;
-          notifyListeners();
-        },
-      );
-      if (generated.isEmpty) {
-        _freeNodesStatus = 'Не удалось создать профили WARP';
-        return 0;
-      }
-
-      const subId = 'free-warp';
-      final otherSubs = _settings.subscriptions
-          .where((s) => s.id != subId)
-          .toList();
-      final warpSub = SubscriptionEntry(
-        id: subId,
-        url: 'https://api.cloudflareclient.com/warp',
-        name: 'Cloudflare WARP (AmneziaWG)',
-        updatedAt: DateTime.now().millisecondsSinceEpoch,
-      );
-      final previousSelectedId = _settings.selectedProfileId;
-      final otherProfiles = _settings.profiles
-          .where((p) => p.subscriptionId != subId)
-          .toList();
-      final mergedProfiles = [...otherProfiles, ...generated];
-
-      await _update(
-        _settings.copyWith(
-          subscriptions: [...otherSubs, warpSub],
-          profiles: mergedProfiles,
-          selectedProfileId: generated.first.id,
-        ),
-      );
-      if (_tunnel.status.isActive) {
-        await _restartActiveTunnel();
-        await _waitForLocalProxyReady();
-        final probeMs = await _probeHttpsViaCore(
-          'http://cp.cloudflare.com/generate_204',
-          timeout: const Duration(milliseconds: 3500),
-        );
-        if (probeMs < 0 &&
-            previousSelectedId.isNotEmpty &&
-            otherProfiles.isNotEmpty) {
-          await _update(
-            _settings.copyWith(selectedProfileId: previousSelectedId),
-          );
-          await _restartActiveTunnel();
-          _freeNodesStatus =
-              'Узлы WARP созданы (${generated.length} шт.), но ваш провайдер блокирует UDP WARP — возвращён рабочий профиль';
-          return generated.length;
-        }
-      }
-      _freeNodesStatus =
-          'Готово: создано ${generated.length} узлов WARP AmneziaWG, выбран ${generated.first.name}';
-      return generated.length;
-    } catch (e) {
-      _freeNodesStatus = 'Ошибка генерации WARP: $e';
-      return 0;
-    } finally {
-      _provisioningFreeNodes = false;
-      notifyListeners();
-    }
-  }
-
-  /// Скачивает пул бесплатных узлов SHARD (как в MSN-GUARD), размножает по живым
-  /// Cloudflare Edge IP, проводит параллельную гонку (Race) и выбирает лучший узел.
-  Future<int> provisionFreeShardNodes() async {
-    if (_provisioningFreeNodes) return 0;
-    _provisioningFreeNodes = true;
-    _freeNodesStatus = 'Подключение к пулу бесплатных узлов SHARD...';
-    notifyListeners();
-
-    try {
-      final service = FreeNodesService();
-      final winners = await service.fetchAndRaceShardNodes(
-        useLocalProxy: _tunnel.status.isActive,
-        onStatus: (msg) {
-          _freeNodesStatus = msg;
-          notifyListeners();
-        },
-      );
-      if (winners.isEmpty) {
-        _freeNodesStatus = 'Не удалось загрузить пул бесплатных узлов';
-        return 0;
-      }
-
-      const subId = 'free-shard';
-      final otherSubs = _settings.subscriptions
-          .where((s) => s.id != subId)
-          .toList();
-      final shardSub = SubscriptionEntry(
-        id: subId,
-        url: FreeNodesService.shardSources.first,
-        name: 'Бесплатный пул (SHARD · CF Edge)',
-        updatedAt: DateTime.now().millisecondsSinceEpoch,
-      );
-      final otherProfiles = _settings.profiles
-          .where((p) => p.subscriptionId != subId)
-          .toList();
-      final mergedProfiles = [...winners, ...otherProfiles];
-
-      await _update(
-        _settings.copyWith(
-          subscriptions: [shardSub, ...otherSubs],
-          profiles: mergedProfiles,
-          selectedProfileId: winners.first.id,
-        ),
-      );
-      if (_tunnel.status.isActive) {
-        await _restartActiveTunnel();
-      }
-      _freeNodesStatus =
-          'Подобран лучший узел: ${winners.first.name} (всего ${winners.length})';
-      return winners.length;
-    } catch (e) {
-      _freeNodesStatus = 'Ошибка автоподбора SHARD: $e';
-      return 0;
-    } finally {
-      _provisioningFreeNodes = false;
       notifyListeners();
     }
   }
@@ -2316,46 +2619,6 @@ class AppController extends ChangeNotifier {
   Future<void> setSmartFailover(bool value) =>
       _update(_settings.copyWith(smartFailover: value));
 
-  /// Включает или полностью скрывает бесплатные резервные узлы (WARP AmneziaWG и SHARD).
-  /// При отключении также удаляет ранее сгенерированные бесплатные подписки и их серверы,
-  /// чтобы они не занимали главный экран.
-  Future<void> setShowFreeNodes(bool value) async {
-    if (!value) {
-      for (final freeId in const ['free-warp', 'free-shard']) {
-        final cacheFile = File('$filesDirPath/subs/$freeId.txt');
-        if (cacheFile.existsSync()) {
-          try {
-            cacheFile.deleteSync();
-          } catch (_) {}
-        }
-      }
-      final cleanProfiles = _settings.profiles
-          .where((p) => !AppSettings.isFreeSubId(p.subscriptionId))
-          .toList(growable: false);
-      final cleanSubs = _settings.subscriptions
-          .where((s) => !AppSettings.isFreeSubId(s.id))
-          .toList(growable: false);
-      final selectedOk = cleanProfiles.any((p) => p.id == _settings.selectedProfileId);
-      final nextSelected = selectedOk
-          ? _settings.selectedProfileId
-          : (cleanProfiles.isNotEmpty ? cleanProfiles.first.id : '');
-      _freeNodesStatus = '';
-      await _update(
-        _settings.copyWith(
-          showFreeNodes: false,
-          profiles: cleanProfiles,
-          subscriptions: cleanSubs,
-          selectedProfileId: nextSelected,
-        ),
-      );
-      if (_tunnel.status.isActive && !selectedOk) {
-        await _restartActiveTunnel();
-      }
-      return;
-    }
-    await _update(_settings.copyWith(showFreeNodes: true));
-  }
-
   Future<void> setDetourProfile(String profileId) async {
     await _update(_settings.copyWith(detourProfileId: profileId));
     if (_tunnel.status.isActive) {
@@ -2411,6 +2674,13 @@ class AppController extends ChangeNotifier {
     }
     if (ssidOrNetChanged && _settings.homeWifiMode) {
       unawaited(bridge.recheckHomeWifi());
+    }
+    if (ssidOrNetChanged &&
+        (_settings.wifiProfileId.isNotEmpty ||
+            _settings.cellularProfileId.isNotEmpty ||
+            _hasNetworkScopedNodes ||
+            _settings.perNetworkDesync)) {
+      unawaited(_checkNetworkDesyncProfile());
     }
     if (changed || requestPermission) {
       notifyListeners();

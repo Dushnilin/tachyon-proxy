@@ -1167,6 +1167,21 @@ PersistentKeepalive = 15-30
         subscriptions: subs,
       );
       expect(groupCandidates.map((p) => p.id).toList(), ['p1', 'p3', 'p4']);
+
+      // Проверка фильтрации по регулярному выражению (includeRegex / excludeRegex)
+      final regexCandidates = RuntimeConfig.resolveAutoCandidates(
+        autoGroup,
+        settings.profiles,
+        activeNetworkType: 'cellular',
+        subscriptions: [
+          subs.first.copyWith(
+            includeRegex: 'Sub2|Standalone',
+            excludeRegex: 'FI',
+          ),
+          ...subs.skip(1),
+        ],
+      );
+      expect(regexCandidates.map((p) => p.id).toList(), ['p4']);
     });
   });
 }

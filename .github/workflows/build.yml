@@ -41,7 +41,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null | tr -d '\r' || true)
+          latest_tag=$(gh api 'repos/Dushnilin/tachyon-core/releases?per_page=10' --jq '
+            [ .[] | select(
+              ([.assets[].name] | index("libtachyon-arm64-v8a.so")) != null and
+              ([.assets[].name] | index("libtachyon-armeabi-v7a.so")) != null and
+              ([.assets[].name] | index("libtachyon-x86_64.so")) != null and
+              ([.assets[].name[] | select(test("tachyon-core-ios-xcframework"))] | length > 0)
+            ) ][0].tag_name // empty
+          ' 2>/dev/null | tr -d '\r' || true)
+          if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+            latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null | tr -d '\r' || true)
+          fi
           if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
             echo "::error::Не удалось получить последний релиз из Dushnilin/tachyon-core"
             exit 1
@@ -49,12 +59,13 @@ jobs:
           latest_core="${latest_tag#v}"
           app_ver=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f1 | tr -d '\r')
           prev_core=$(curl -fsSL "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json" 2>/dev/null | jq -r '.core_version // empty' || true)
+          prev_app=$(curl -fsSL "https://github.com/Dushnilin/tachyon-proxy/releases/download/latest/version.json" 2>/dev/null | jq -r '.app_version // empty' || true)
 
           echo "latest_core=${latest_core}" >> "$GITHUB_OUTPUT"
           echo "latest_tag=${latest_tag}" >> "$GITHUB_OUTPUT"
           echo "app_ver=${app_ver}" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$prev_core" = "$latest_core" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$prev_core" = "$latest_core" ] && [ "$prev_app" = "$app_ver" ]; then
             echo "Ядро в релизе уже актуально (${latest_core}), пропускаем плановую сборку."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else

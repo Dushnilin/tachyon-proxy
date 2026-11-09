@@ -1675,6 +1675,8 @@ class BalancerSettings {
     this.tolerance = 50,
     this.excludedCountries = const [],
     this.excludedProtocols = const [],
+    this.includeRegex = '',
+    this.excludeRegex = '',
   });
 
   /// Алгоритм выбора узла:
@@ -1709,6 +1711,12 @@ class BalancerSettings {
 
   /// Глобальный список исключённых протоколов (например, `['vmess', 'shadowsocks']`).
   final List<String> excludedProtocols;
+
+  /// Регулярное выражение (или ключевое слово) для включения серверов по имени/хосту.
+  final String includeRegex;
+
+  /// Регулярное выражение (или ключевое слово) для исключения серверов по имени/хосту.
+  final String excludeRegex;
 
   /// Популярные страны для быстрого выбора в фильтре исключений.
   static const List<(String code, String flag, String label, List<String> aliases)>
@@ -1747,12 +1755,41 @@ class BalancerSettings {
     ('socks', 'SOCKS / HTTP'),
   ];
 
-  /// Проверяет, проходит ли профиль через фильтры исключения стран и протоколов.
+  /// Проверяет, соответствует ли строка профиля регулярному выражению (с безопасным откатом к поиску подстроки).
+  static bool _matchesRegexOrSubstring(String haystack, String rawPattern) {
+    final pattern = rawPattern.trim();
+    if (pattern.isEmpty) return true;
+    try {
+      return RegExp(pattern, caseSensitive: false).hasMatch(haystack);
+    } catch (_) {
+      return haystack.toLowerCase().contains(pattern.toLowerCase());
+    }
+  }
+
+  /// Проверяет, проходит ли профиль через фильтры исключения стран, протоколов и регулярных выражений.
   static bool matchesFilter(
     Profile p, {
     List<String> excludedProtocols = const [],
     List<String> excludedCountries = const [],
+    List<String> includeRegexes = const [],
+    List<String> excludeRegexes = const [],
   }) {
+    final targetText = '${p.name} ${p.server} ${p.sni} ${p.type}';
+    for (final inc in includeRegexes) {
+      final clean = inc.trim();
+      if (clean.isEmpty) continue;
+      if (!_matchesRegexOrSubstring(targetText, clean)) {
+        return false;
+      }
+    }
+    for (final exc in excludeRegexes) {
+      final clean = exc.trim();
+      if (clean.isEmpty) continue;
+      if (_matchesRegexOrSubstring(targetText, clean)) {
+        return false;
+      }
+    }
+
     if (excludedProtocols.isNotEmpty) {
       final pType = p.type.trim().toLowerCase();
       for (final rawProto in excludedProtocols) {
@@ -1981,6 +2018,8 @@ class BalancerSettings {
     int? tolerance,
     List<String>? excludedCountries,
     List<String>? excludedProtocols,
+    String? includeRegex,
+    String? excludeRegex,
   }) {
     return BalancerSettings(
       mode: mode ?? this.mode,
@@ -1993,6 +2032,8 @@ class BalancerSettings {
       tolerance: tolerance ?? this.tolerance,
       excludedCountries: excludedCountries ?? this.excludedCountries,
       excludedProtocols: excludedProtocols ?? this.excludedProtocols,
+      includeRegex: includeRegex ?? this.includeRegex,
+      excludeRegex: excludeRegex ?? this.excludeRegex,
     );
   }
 
@@ -2007,6 +2048,8 @@ class BalancerSettings {
         'tolerance': tolerance,
         if (excludedCountries.isNotEmpty) 'excludedCountries': excludedCountries,
         if (excludedProtocols.isNotEmpty) 'excludedProtocols': excludedProtocols,
+        if (includeRegex.trim().isNotEmpty) 'includeRegex': includeRegex.trim(),
+        if (excludeRegex.trim().isNotEmpty) 'excludeRegex': excludeRegex.trim(),
       };
 
   static BalancerSettings fromJson(Map<String, dynamic> json) {
@@ -2043,6 +2086,8 @@ class BalancerSettings {
       tolerance: ((json['tolerance'] as num?)?.toInt() ?? 50).clamp(1, 5000),
       excludedCountries: rawExCountries,
       excludedProtocols: rawExProtocols,
+      includeRegex: (json['includeRegex'] as String?)?.trim() ?? '',
+      excludeRegex: (json['excludeRegex'] as String?)?.trim() ?? '',
     );
   }
 }
@@ -2072,6 +2117,8 @@ class SubscriptionEntry {
     this.excludedProtocols = const [],
     this.autoUpdateHours = 0,
     this.mergedSubscriptionIds = const [],
+    this.includeRegex = '',
+    this.excludeRegex = '',
   });
 
   /// Идентификатор: стабилен, участвует в тегах аутбаундов и файлах кэша.
@@ -2112,6 +2159,12 @@ class SubscriptionEntry {
   /// Идентификаторы подписок (или `'__standalone__'` для отдельных серверов),
   /// объединённых в единую виртуальную группу.
   final List<String> mergedSubscriptionIds;
+
+  /// Регулярное выражение (или ключевое слово) для включения серверов в подписке/группе.
+  final String includeRegex;
+
+  /// Регулярное выражение (или ключевое слово) для исключения серверов в подписке/группе.
+  final String excludeRegex;
 
   bool get isCombinedGroup =>
       mergedSubscriptionIds.isNotEmpty || url.trim().toLowerCase().startsWith('group://');
@@ -2158,6 +2211,8 @@ class SubscriptionEntry {
     List<String>? excludedProtocols,
     int? autoUpdateHours,
     List<String>? mergedSubscriptionIds,
+    String? includeRegex,
+    String? excludeRegex,
   }) =>
       SubscriptionEntry(
         id: id,
@@ -2178,6 +2233,8 @@ class SubscriptionEntry {
         excludedProtocols: excludedProtocols ?? this.excludedProtocols,
         autoUpdateHours: autoUpdateHours ?? this.autoUpdateHours,
         mergedSubscriptionIds: mergedSubscriptionIds ?? this.mergedSubscriptionIds,
+        includeRegex: includeRegex ?? this.includeRegex,
+        excludeRegex: excludeRegex ?? this.excludeRegex,
       );
 
   Map<String, dynamic> toJson() => {
@@ -2204,6 +2261,8 @@ class SubscriptionEntry {
         if (autoUpdateHours > 0) 'autoUpdateHours': autoUpdateHours,
         if (mergedSubscriptionIds.isNotEmpty)
           'mergedSubscriptionIds': mergedSubscriptionIds,
+        if (includeRegex.trim().isNotEmpty) 'includeRegex': includeRegex.trim(),
+        if (excludeRegex.trim().isNotEmpty) 'excludeRegex': excludeRegex.trim(),
       };
 
   static SubscriptionEntry fromJson(Map<String, dynamic> json) {
@@ -2247,6 +2306,8 @@ class SubscriptionEntry {
       excludedProtocols: rawExProtocols,
       autoUpdateHours: ((json['autoUpdateHours'] as num?)?.toInt() ?? 0).clamp(0, 720),
       mergedSubscriptionIds: rawMerged,
+      includeRegex: (json['includeRegex'] as String?)?.trim() ?? '',
+      excludeRegex: (json['excludeRegex'] as String?)?.trim() ?? '',
     );
   }
 }
@@ -2375,7 +2436,7 @@ class RuntimeConfig {
         .toList(growable: false);
     if (basePool.isEmpty) return const <Profile>[];
 
-    // 1. Применяем фильтры исключения стран и протоколов (подписки + объединённой группы + глобального балансировщика)
+    // 1. Применяем фильтры исключения стран, протоколов и регулярных выражений (подписки + объединённой группы + глобального балансировщика)
     final filterPool = basePool.where((p) {
       final sub = subById[p.subscriptionId];
       final exCountries = <String>[
@@ -2388,11 +2449,34 @@ class RuntimeConfig {
         if (sub != null) ...sub.excludedProtocols,
         if (targetSub != null && targetSub.id != sub?.id) ...targetSub.excludedProtocols,
       ];
-      if (exCountries.isEmpty && exProtocols.isEmpty) return true;
+      final incRegexes = <String>[
+        if (balancer.includeRegex.trim().isNotEmpty) balancer.includeRegex.trim(),
+        if (sub != null && sub.includeRegex.trim().isNotEmpty) sub.includeRegex.trim(),
+        if (targetSub != null &&
+            targetSub.id != sub?.id &&
+            targetSub.includeRegex.trim().isNotEmpty)
+          targetSub.includeRegex.trim(),
+      ];
+      final excRegexes = <String>[
+        if (balancer.excludeRegex.trim().isNotEmpty) balancer.excludeRegex.trim(),
+        if (sub != null && sub.excludeRegex.trim().isNotEmpty) sub.excludeRegex.trim(),
+        if (targetSub != null &&
+            targetSub.id != sub?.id &&
+            targetSub.excludeRegex.trim().isNotEmpty)
+          targetSub.excludeRegex.trim(),
+      ];
+      if (exCountries.isEmpty &&
+          exProtocols.isEmpty &&
+          incRegexes.isEmpty &&
+          excRegexes.isEmpty) {
+        return true;
+      }
       return BalancerSettings.matchesFilter(
         p,
         excludedProtocols: exProtocols,
         excludedCountries: exCountries,
+        includeRegexes: incRegexes,
+        excludeRegexes: excRegexes,
       );
     }).toList(growable: false);
 

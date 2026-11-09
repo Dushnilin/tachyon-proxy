@@ -2374,6 +2374,8 @@ Future<void> _showEditSubDialog(
   final urlCtrl = TextEditingController(text: sub.url);
   final hwidCtrl = TextEditingController(text: sub.customHwid);
   final countriesCtrl = TextEditingController(text: sub.excludedCountries.join(', '));
+  final includeRegexCtrl = TextEditingController(text: sub.includeRegex);
+  final excludeRegexCtrl = TextEditingController(text: sub.excludeRegex);
   final globalHwid = controller.effectiveHwid;
   var selectedScope = sub.networkScope;
   var selectedAutoHours = sub.autoUpdateHours;
@@ -2594,6 +2596,29 @@ Future<void> _showEditSubDialog(
                         ),
                     ],
                   ),
+                  const SizedBox(height: Space.sm),
+                  Text(
+                    'Фильтр по регулярному выражению (RegExp)',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: includeRegexCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Включить по регулярному выражению / слову',
+                      hintText: 'Например: LTE|Whitelist|МТС',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: excludeRegexCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Исключить по регулярному выражению',
+                      hintText: 'Например: резерв|тест|expired',
+                      isDense: true,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2614,6 +2639,8 @@ Future<void> _showEditSubDialog(
                     .where((s) => s.isNotEmpty)
                     .toList(growable: false);
                 final exProtos = selectedExProtos.toList(growable: false);
+                final incRx = includeRegexCtrl.text.trim();
+                final excRx = excludeRegexCtrl.text.trim();
                 Navigator.of(dialogCtx).pop();
                 if (newUrl.isNotEmpty) {
                   await controller.editSubscription(
@@ -2625,6 +2652,8 @@ Future<void> _showEditSubDialog(
                     excludedCountries: exCountries,
                     excludedProtocols: exProtos,
                     autoUpdateHours: selectedAutoHours,
+                    includeRegex: incRx,
+                    excludeRegex: excRx,
                   );
                 }
               },
@@ -2639,6 +2668,8 @@ Future<void> _showEditSubDialog(
   urlCtrl.dispose();
   hwidCtrl.dispose();
   countriesCtrl.dispose();
+  includeRegexCtrl.dispose();
+  excludeRegexCtrl.dispose();
 }
 
 /// Диалог создания или редактирования объединённой группы из нескольких подписок (и/или отдельных серверов).
@@ -2656,6 +2687,12 @@ Future<void> showCombinedGroupDialog(
   );
   final countriesCtrl = TextEditingController(
     text: existingGroup?.excludedCountries.join(', ') ?? '',
+  );
+  final includeRegexCtrl = TextEditingController(
+    text: existingGroup?.includeRegex ?? '',
+  );
+  final excludeRegexCtrl = TextEditingController(
+    text: existingGroup?.excludeRegex ?? '',
   );
   var selectedScope = existingGroup?.networkScope ?? 'all';
   final selectedExProtos = <String>{...?existingGroup?.excludedProtocols};
@@ -2901,6 +2938,29 @@ Future<void> showCombinedGroupDialog(
                         ),
                     ],
                   ),
+                  const SizedBox(height: Space.sm),
+                  Text(
+                    'Фильтр по регулярному выражению (RegExp)',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: includeRegexCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Включить по регулярному выражению / слову',
+                      hintText: 'Например: LTE|Whitelist|МТС',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: excludeRegexCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Исключить по регулярному выражению',
+                      hintText: 'Например: резерв|тест|expired',
+                      isDense: true,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2922,6 +2982,8 @@ Future<void> showCombinedGroupDialog(
                       final exProtos = selectedExProtos.toList(growable: false);
                       final groupName = nameCtrl.text.trim();
                       final members = selectedMembers.toList(growable: false);
+                      final incRx = includeRegexCtrl.text.trim();
+                      final excRx = excludeRegexCtrl.text.trim();
                       Navigator.of(dialogCtx).pop();
                       await controller.saveCombinedSubscriptionGroup(
                         existingId: existingGroup?.id,
@@ -2930,6 +2992,8 @@ Future<void> showCombinedGroupDialog(
                         networkScope: selectedScope,
                         excludedCountries: exCountries,
                         excludedProtocols: exProtos,
+                        includeRegex: incRx,
+                        excludeRegex: excRx,
                       );
                     },
               child: Text(existingGroup == null ? 'Создать группу' : 'Сохранить'),
@@ -2941,6 +3005,8 @@ Future<void> showCombinedGroupDialog(
   );
   nameCtrl.dispose();
   countriesCtrl.dispose();
+  includeRegexCtrl.dispose();
+  excludeRegexCtrl.dispose();
 }
 
 /// Сворачиваемая карточка заголовка подписки с информацией о трафике и сроке действия.
@@ -4309,6 +4375,136 @@ Future<void> showBalancerSettingsSheet(
                                           );
                                         },
                                       ),
+                                  ],
+                                ),
+                                const Divider(height: Space.lg),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Фильтр по регулярному выражению (RegExp)',
+                                        style: Theme.of(ctx).textTheme.titleSmall,
+                                      ),
+                                    ),
+                                    if (current.includeRegex.isNotEmpty ||
+                                        current.excludeRegex.isNotEmpty)
+                                      TextButton(
+                                        onPressed: () => updateBalancer(
+                                          current.copyWith(
+                                            includeRegex: '',
+                                            excludeRegex: '',
+                                          ),
+                                        ),
+                                        child: const Text('Сбросить'),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Позволяет оставить только серверы с нужным словом/шаблоном (например, для мобильной сети) или скрыть лишние.',
+                                  style: TextStyle(fontSize: 11, color: tokens.faint),
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    ActionChip(
+                                      avatar: Icon(
+                                        Icons.check_circle_outline_rounded,
+                                        size: 15,
+                                        color: current.includeRegex.isNotEmpty
+                                            ? tokens.accent
+                                            : tokens.muted,
+                                      ),
+                                      label: Text(
+                                        current.includeRegex.isNotEmpty
+                                            ? 'Включить: ${current.includeRegex}'
+                                            : 'Включить по RegExp...',
+                                      ),
+                                      onPressed: () async {
+                                        final ctrl = TextEditingController(
+                                          text: current.includeRegex,
+                                        );
+                                        final res = await showDialog<String>(
+                                          context: ctx,
+                                          builder: (dCtx) => AlertDialog(
+                                            title: const Text('Включить по регулярному выражению'),
+                                            content: TextField(
+                                              controller: ctrl,
+                                              autofocus: true,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Шаблон RegExp или ключевое слово',
+                                                hintText: 'Например: LTE|Whitelist|МТС',
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(dCtx).pop(),
+                                                child: const Text('Отмена'),
+                                              ),
+                                              FilledButton(
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(ctrl.text.trim()),
+                                                child: const Text('Применить'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        ctrl.dispose();
+                                        if (res != null) {
+                                          updateBalancer(current.copyWith(includeRegex: res));
+                                        }
+                                      },
+                                    ),
+                                    ActionChip(
+                                      avatar: Icon(
+                                        Icons.remove_circle_outline_rounded,
+                                        size: 15,
+                                        color: current.excludeRegex.isNotEmpty
+                                            ? tokens.accent
+                                            : tokens.muted,
+                                      ),
+                                      label: Text(
+                                        current.excludeRegex.isNotEmpty
+                                            ? 'Исключить: ${current.excludeRegex}'
+                                            : 'Исключить по RegExp...',
+                                      ),
+                                      onPressed: () async {
+                                        final ctrl = TextEditingController(
+                                          text: current.excludeRegex,
+                                        );
+                                        final res = await showDialog<String>(
+                                          context: ctx,
+                                          builder: (dCtx) => AlertDialog(
+                                            title: const Text('Исключить по регулярному выражению'),
+                                            content: TextField(
+                                              controller: ctrl,
+                                              autofocus: true,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Шаблон RegExp или ключевое слово',
+                                                hintText: 'Например: резерв|тест|expired',
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(dCtx).pop(),
+                                                child: const Text('Отмена'),
+                                              ),
+                                              FilledButton(
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(ctrl.text.trim()),
+                                                child: const Text('Применить'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        ctrl.dispose();
+                                        if (res != null) {
+                                          updateBalancer(current.copyWith(excludeRegex: res));
+                                        }
+                                      },
+                                    ),
                                   ],
                                 ),
                               ],

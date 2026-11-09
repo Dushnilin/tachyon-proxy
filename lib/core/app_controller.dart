@@ -139,7 +139,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.17';
+  static const String appVersion = '0.0.18';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -384,7 +384,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Проверяет, разрешён ли профиль текущими фильтрами исключения стран и протоколов.
+  /// Проверяет, разрешён ли профиль текущими фильтрами исключения стран, протоколов и регулярных выражений.
   bool isProfileAllowedByFilters(Profile p, {SubscriptionEntry? contextSub}) {
     final sub = p.subscriptionId.isEmpty
         ? null
@@ -401,11 +401,36 @@ class AppController extends ChangeNotifier {
       if (contextSub != null && contextSub.id != sub?.id)
         ...contextSub.excludedProtocols,
     ];
-    if (exCountries.isEmpty && exProtocols.isEmpty) return true;
+    final incRegexes = <String>[
+      if (_settings.balancer.includeRegex.trim().isNotEmpty)
+        _settings.balancer.includeRegex.trim(),
+      if (sub != null && sub.includeRegex.trim().isNotEmpty) sub.includeRegex.trim(),
+      if (contextSub != null &&
+          contextSub.id != sub?.id &&
+          contextSub.includeRegex.trim().isNotEmpty)
+        contextSub.includeRegex.trim(),
+    ];
+    final excRegexes = <String>[
+      if (_settings.balancer.excludeRegex.trim().isNotEmpty)
+        _settings.balancer.excludeRegex.trim(),
+      if (sub != null && sub.excludeRegex.trim().isNotEmpty) sub.excludeRegex.trim(),
+      if (contextSub != null &&
+          contextSub.id != sub?.id &&
+          contextSub.excludeRegex.trim().isNotEmpty)
+        contextSub.excludeRegex.trim(),
+    ];
+    if (exCountries.isEmpty &&
+        exProtocols.isEmpty &&
+        incRegexes.isEmpty &&
+        excRegexes.isEmpty) {
+      return true;
+    }
     return BalancerSettings.matchesFilter(
       p,
       excludedProtocols: exProtocols,
       excludedCountries: exCountries,
+      includeRegexes: incRegexes,
+      excludeRegexes: excRegexes,
     );
   }
 
@@ -1757,6 +1782,8 @@ class AppController extends ChangeNotifier {
     List<String>? excludedCountries,
     List<String>? excludedProtocols,
     int? autoUpdateHours,
+    String? includeRegex,
+    String? excludeRegex,
   }) async {
     final prev = _settings.subscriptions.where((s) => s.id == id).firstOrNull;
     final nextUrl = url?.trim() ?? prev?.url ?? '';
@@ -1767,12 +1794,16 @@ class AppController extends ChangeNotifier {
     final nextExCountries = excludedCountries ?? prev?.excludedCountries ?? const <String>[];
     final nextExProtocols = excludedProtocols ?? prev?.excludedProtocols ?? const <String>[];
     final nextAutoHours = autoUpdateHours ?? prev?.autoUpdateHours ?? 0;
+    final nextIncRegex = includeRegex != null ? includeRegex.trim() : (prev?.includeRegex ?? '');
+    final nextExcRegex = excludeRegex != null ? excludeRegex.trim() : (prev?.excludeRegex ?? '');
     final shouldRefetch = prev == null ||
         prev.updatedAt == 0 ||
         (url != null && nextUrl != prev.url) ||
         (customHwid != null && nextHwid != prev.customHwid);
     final routingFilterChanged = prev != null &&
         (nextScope != prev.networkScope ||
+            nextIncRegex != prev.includeRegex ||
+            nextExcRegex != prev.excludeRegex ||
             jsonEncode(nextExCountries) != jsonEncode(prev.excludedCountries) ||
             jsonEncode(nextExProtocols) != jsonEncode(prev.excludedProtocols));
 
@@ -1788,6 +1819,8 @@ class AppController extends ChangeNotifier {
               excludedCountries: nextExCountries,
               excludedProtocols: nextExProtocols,
               autoUpdateHours: nextAutoHours,
+              includeRegex: nextIncRegex,
+              excludeRegex: nextExcRegex,
             )
           else
             s,
@@ -1815,6 +1848,8 @@ class AppController extends ChangeNotifier {
     String networkScope = 'all',
     List<String> excludedCountries = const [],
     List<String> excludedProtocols = const [],
+    String includeRegex = '',
+    String excludeRegex = '',
   }) async {
     final cleanMembers = memberIds
         .map((e) => e.trim())
@@ -1838,6 +1873,8 @@ class AppController extends ChangeNotifier {
       mergedSubscriptionIds: cleanMembers,
       excludedCountries: excludedCountries,
       excludedProtocols: excludedProtocols,
+      includeRegex: includeRegex.trim(),
+      excludeRegex: excludeRegex.trim(),
     );
     final List<SubscriptionEntry> updatedSubs;
     if (prev != null) {

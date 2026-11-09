@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -62,6 +63,34 @@ class AppController extends ChangeNotifier {
   final Set<String> _pingingIds = {};
   bool _pingingAll = false;
   bool _sortByPing = false;
+  Timer? _pingCoalesceTimer;
+
+  /// Гранулярные нотификаторы для точечной перерисовки без глобального rebuild:
+  /// - [themeModeNotifier] — перестраивает `MaterialApp` только при смене темы;
+  /// - [trafficRevision] — обновляет только виджеты скорости/трафика/узла выхода;
+  /// - [pingRevision] и [_serverRevisions] — обновляют отдельные строки серверов.
+  final ValueNotifier<String> themeModeNotifier = ValueNotifier<String>('dark');
+  final ValueNotifier<int> trafficRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> pingRevision = ValueNotifier<int>(0);
+  final Map<String, ValueNotifier<int>> _serverRevisions = {};
+
+  ValueListenable<int> serverRevisionOf(String id) =>
+      _serverRevisions.putIfAbsent(id, () => ValueNotifier<int>(0));
+
+  void _bumpServerRevision(String id) {
+    final notifier = _serverRevisions[id];
+    if (notifier != null) {
+      notifier.value++;
+    }
+    pingRevision.value++;
+  }
+
+  void _schedulePingCoalescedNotify() {
+    if (_pingCoalesceTimer?.isActive ?? false) return;
+    _pingCoalesceTimer = Timer(const Duration(milliseconds: 160), () {
+      notifyListeners();
+    });
+  }
 
   /// Живая скорость трафика (байт/сек) и история для графика (спарклайна).
   int _upSpeed = 0;
@@ -98,6 +127,8 @@ class AppController extends ChangeNotifier {
   int _pollTickCount = 0;
   int _consecutiveWatchdogFails = 0;
   String _lastNetType = '';
+  bool _pollingTrafficInFlight = false;
+  int _trafficPollGeneration = 0;
 
   /// Состояние подключённого Wi-Fi и режима «Домашний интернет».
   String _currentWifiSsid = '';
@@ -202,7 +233,9 @@ class AppController extends ChangeNotifier {
     } else {
       next.add(subId);
     }
-    await _update(_settings.copyWith(collapsedSubs: next));
+    _settings = _settings.copyWith(collapsedSubs: next);
+    notifyListeners();
+    store.saveDebounced(_settings);
   }
 
   void toggleSortByPing() {
@@ -253,6 +286,7 @@ class AppController extends ChangeNotifier {
   /// Загружает настройки и подписывается на события ядра.
   Future<void> bootstrap() async {
     _settings = await store.load();
+    themeModeNotifier.value = _settings.themeMode;
 
     final native = await bridge.status();
     _tunnel = _withServer(native);
@@ -456,10 +490,13 @@ class AppController extends ChangeNotifier {
     return result;
   }
 
-  /// Сохраняет настройки на диск.
+  /// Сохраняет настройки на диск, мгновенно уведомляя UI до завершения записи.
   Future<void> _persist() async {
-    await store.save(_settings);
+    if (themeModeNotifier.value != _settings.themeMode) {
+      themeModeNotifier.value = _settings.themeMode;
+    }
     notifyListeners();
+    await store.save(_settings);
   }
 
   /// Генерирует новый случайный 32-символьный hex HWID.
@@ -1189,6 +1226,38 @@ class AppController extends ChangeNotifier {
       Map<String, dynamic>? nativeUserInfo;
       Map<String, dynamic>? nativeRes;
 
+      Future<List<Profile>> parseEngineNodesAsync(
+        List<dynamic> nodes,
+        List<dynamic> primaryTags,
+      ) async {
+        if (nodes.length >= 25) {
+          return Isolate.run(
+            () => const LinkParser().parseEngineNodes(
+              nodes,
+              primaryTags,
+              subscriptionId: subId,
+            ),
+          );
+        }
+        return parser.parseEngineNodes(
+          nodes,
+          primaryTags,
+          subscriptionId: subId,
+        );
+      }
+
+      Future<List<Profile>> parseSubTextAsync(String bodyText) async {
+        if (bodyText.length > 24 * 1024) {
+          return Isolate.run(
+            () => const LinkParser().parseSubscription(
+              bodyText,
+              subscriptionId: subId,
+            ),
+          );
+        }
+        return parser.parseSubscription(bodyText, subscriptionId: subId);
+      }
+
       Future<void> tryNativeFetch() async {
         if (fresh.isNotEmpty) return;
         nativeRes = await bridge.fetchSubscription(
@@ -1200,10 +1269,9 @@ class AppController extends ChangeNotifier {
         if (nativeRes != null &&
             nativeRes!['ok'] == true &&
             nativeRes!['nodes'] is List) {
-          fresh = parser.parseEngineNodes(
+          fresh = await parseEngineNodesAsync(
             nativeRes!['nodes'] as List,
             (nativeRes!['primary_tags'] as List?) ?? const [],
-            subscriptionId: subId,
           );
           if (nativeRes!['user_info'] is Map) {
             nativeUserInfo = Map<String, dynamic>.from(nativeRes!['user_info'] as Map);
@@ -1359,14 +1427,13 @@ class AppController extends ChangeNotifier {
               if (nativeBodyParsed != null &&
                   nativeBodyParsed['ok'] == true &&
                   nativeBodyParsed['nodes'] is List) {
-                parsed = parser.parseEngineNodes(
+                parsed = await parseEngineNodesAsync(
                   nativeBodyParsed['nodes'] as List,
                   (nativeBodyParsed['primary_tags'] as List?) ?? const [],
-                  subscriptionId: subId,
                 );
               }
               if (parsed.isEmpty) {
-                parsed = parser.parseSubscription(body, subscriptionId: subId);
+                parsed = await parseSubTextAsync(body);
               }
               if (parsed.isNotEmpty) {
                 fresh = parsed;
@@ -2030,68 +2097,82 @@ class AppController extends ChangeNotifier {
   TrafficStats? get traffic => _traffic;
 
   Future<void> _pollTrafficOnce() async {
-    final next = await bridge.stats();
-    final now = DateTime.now();
-    if (next != null) {
-      final dtMs = _prevTrafficAt == null
-          ? 2000
-          : now.difference(_prevTrafficAt!).inMilliseconds.clamp(250, 10000);
-      final du = next.up - _prevUp;
-      final dd = next.down - _prevDown;
-      _upSpeed = du > 0 ? (du * 1000 ~/ dtMs) : 0;
-      _downSpeed = dd > 0 ? (dd * 1000 ~/ dtMs) : 0;
-      _prevUp = next.up;
-      _prevDown = next.down;
-      _prevTrafficAt = now;
-      if (_downHistory.length >= 24) _downHistory.removeAt(0);
-      _downHistory.add(_downSpeed);
-      if (_upHistory.length >= 24) _upHistory.removeAt(0);
-      _upHistory.add(_upSpeed);
-    } else {
-      _upSpeed = 0;
-      _downSpeed = 0;
-      _prevUp = 0;
-      _prevDown = 0;
-      _prevTrafficAt = null;
-    }
-    _traffic = next;
-    _syncBalancerTelemetry(next?.balancer);
-    _pollTickCount++;
+    if (_pollingTrafficInFlight) return;
+    _pollingTrafficInFlight = true;
+    final pollGen = _trafficPollGeneration;
+    try {
+      final next = await bridge.stats();
+      if (pollGen != _trafficPollGeneration) return;
+      final now = DateTime.now();
+      if (next != null) {
+        final dtMs = _prevTrafficAt == null
+            ? 2000
+            : now.difference(_prevTrafficAt!).inMilliseconds.clamp(250, 10000);
+        final du = next.up - _prevUp;
+        final dd = next.down - _prevDown;
+        _upSpeed = du > 0 ? (du * 1000 ~/ dtMs) : 0;
+        _downSpeed = dd > 0 ? (dd * 1000 ~/ dtMs) : 0;
+        _prevUp = next.up;
+        _prevDown = next.down;
+        _prevTrafficAt = now;
+        if (_downHistory.length >= 24) _downHistory.removeAt(0);
+        _downHistory.add(_downSpeed);
+        if (_upHistory.length >= 24) _upHistory.removeAt(0);
+        _upHistory.add(_upSpeed);
+      } else {
+        _upSpeed = 0;
+        _downSpeed = 0;
+        _prevUp = 0;
+        _prevDown = 0;
+        _prevTrafficAt = null;
+      }
+      _traffic = next;
+      final prevWinnerId = _activeBalancerWinner?.id;
+      final changedWinner = _syncBalancerTelemetry(next?.balancer);
+      _pollTickCount++;
 
-    // Автоматическое переключение профиля/списка серверов и рецепта Desync при смене Wi-Fi <-> Мобильная сеть
-    if ((_settings.perNetworkDesync ||
-            _settings.wifiProfileId.isNotEmpty ||
-            _settings.cellularProfileId.isNotEmpty ||
-            _hasNetworkScopedNodes) &&
-        _pollTickCount % 3 == 0) {
-      unawaited(_checkNetworkDesyncProfile());
-    }
+      // Автоматическое переключение профиля/списка серверов и рецепта Desync при смене Wi-Fi <-> Мобильная сеть
+      if ((_settings.perNetworkDesync ||
+              _settings.wifiProfileId.isNotEmpty ||
+              _settings.cellularProfileId.isNotEmpty ||
+              _hasNetworkScopedNodes) &&
+          _pollTickCount % 3 == 0) {
+        unawaited(_checkNetworkDesyncProfile());
+      }
 
-    // Опрос текущего Wi-Fi и состояния «Домашний интернет»
-    if (_pollTickCount % 2 == 0) {
-      unawaited(refreshWifiInfo());
-    }
+      // Опрос текущего Wi-Fi и состояния «Домашний интернет»
+      if (_pollTickCount % 2 == 0) {
+        unawaited(refreshWifiInfo());
+      }
 
-    // Smart Failover (Watchdog): раз в 30 сек проверяет живой отклик туннеля
-    // (для одиночного профиля; в режиме auto: балансировщик ядра переключает узлы сам)
-    if (_tunnel.status.isActive &&
-        _settings.smartFailover &&
-        !_settings.selectedProfileId.startsWith('auto:') &&
-        _settings.routingMode != RoutingMode.desync &&
-        _settings.profiles.length > 1 &&
-        _pollTickCount % 15 == 0) {
-      unawaited(_runFailoverCheck());
-    }
+      // Smart Failover (Watchdog): раз в 30 сек проверяет живой отклик туннеля
+      // (для одиночного профиля; в режиме auto: балансировщик ядра переключает узлы сам)
+      if (_tunnel.status.isActive &&
+          _settings.smartFailover &&
+          !_settings.selectedProfileId.startsWith('auto:') &&
+          _settings.routingMode != RoutingMode.desync &&
+          _settings.profiles.length > 1 &&
+          _pollTickCount % 15 == 0) {
+        unawaited(_runFailoverCheck());
+      }
 
-    notifyListeners();
+      trafficRevision.value++;
+      if (changedWinner || _activeBalancerWinner?.id != prevWinnerId) {
+        notifyListeners();
+      }
+    } finally {
+      _pollingTrafficInFlight = false;
+    }
   }
 
-  void _syncBalancerTelemetry(BalancerRuntimeStatus? bal) {
+  bool _syncBalancerTelemetry(BalancerRuntimeStatus? bal) {
+    final prevWinnerId = _activeBalancerWinner?.id;
     final sel = selectedProfile;
     if (bal == null || sel == null || (!sel.id.startsWith('auto:') && sel.type != 'urltest')) {
+      final hadWinner = _activeBalancerWinner != null;
       _activeBalancerWinner = null;
       _nodeTelemetry.clear();
-      return;
+      return hadWinner;
     }
     final candidates = RuntimeConfig.resolveAutoCandidates(
       sel,
@@ -2117,6 +2198,8 @@ class AppController extends ChangeNotifier {
       }
       final tel = bal.telemetry[tag];
       if (tel != null) {
+        final prevTel = _nodeTelemetry[cand.id];
+        final prevPing = _pings[cand.id];
         _nodeTelemetry[cand.id] = tel;
         if (tel.rttMs > 0 && !tel.quarantined) {
           _pings[cand.id] = tel.rttMs;
@@ -2126,8 +2209,14 @@ class AppController extends ChangeNotifier {
         } else if (anyProbedAlive && (tel.quarantined || tel.lossPenaltyMs > 0)) {
           _pings[cand.id] = -1;
         }
+        if (prevPing != _pings[cand.id] ||
+            prevTel?.ewmaRttMs != tel.ewmaRttMs ||
+            prevTel?.quarantined != tel.quarantined) {
+          _bumpServerRevision(cand.id);
+        }
       }
     }
+    return _activeBalancerWinner?.id != prevWinnerId;
   }
 
   Future<void> _checkNetworkDesyncProfile({bool forceCheck = false}) async {
@@ -2183,14 +2272,17 @@ class AppController extends ChangeNotifier {
   /// Начинает опрос статистики трафика.
   void startTrafficPolling() {
     stopTrafficPolling();
+    _trafficPollGeneration++;
     unawaited(_pollTrafficOnce());
-    _trafficTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      await _pollTrafficOnce();
+    _trafficTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_pollTrafficOnce());
     });
   }
 
   /// Останавливает опрос статистики.
   void stopTrafficPolling() {
+    _trafficPollGeneration++;
+    _pollingTrafficInFlight = false;
     _trafficTimer?.cancel();
     _trafficTimer = null;
     _upSpeed = 0;
@@ -3024,11 +3116,14 @@ class AppController extends ChangeNotifier {
   /// Для TLS/Reality-профилей после TCP-рукопожатия отправляет TLS ClientHello
   /// с фактическим SNI профиля и проверяет приход ServerHello, чтобы выявлять
   /// фильтрацию и сброс соединения после SYN-ACK на транзитных узлах.
-  Future<int> pingProfile(String id) async {
+  Future<int> pingProfile(String id, {bool coalesce = false}) async {
     final profile = _settings.profiles.where((p) => p.id == id).firstOrNull;
     if (profile == null || profile.server.isEmpty) return -1;
     _pingingIds.add(id);
-    notifyListeners();
+    _bumpServerRevision(id);
+    if (!coalesce && _sortByPing) {
+      notifyListeners();
+    }
     var result = -1;
     Socket? socket;
     try {
@@ -3115,20 +3210,23 @@ class AppController extends ChangeNotifier {
       socket?.destroy();
       _pings[id] = result;
       _pingingIds.remove(id);
-      notifyListeners();
+      _bumpServerRevision(id);
+      if (coalesce) {
+        _schedulePingCoalescedNotify();
+      } else if (_sortByPing) {
+        notifyListeners();
+      }
     }
     return result;
   }
 
-  /// Пингует все серверы (или серверы конкретной подписки) параллельно батчами
-  /// и включает сортировку по пингу.
+  /// Пингует все серверы (или серверы конкретной подписки) пулом из 8 параллельных
+  /// воркеров (освободившийся слот сразу берёт следующий сервер) с коалесценцией UI.
   Future<void> pingAllProfiles({String? subscriptionId}) async {
     if (_pingingAll) return;
     final targets = subscriptionId == null
         ? _settings.visibleProfiles
-        : _settings.visibleProfiles
-            .where((p) => p.subscriptionId == subscriptionId)
-            .toList(growable: false);
+        : _settings.profilesForSubscription(subscriptionId);
     if (targets.isEmpty) return;
 
     _pingingAll = true;
@@ -3136,12 +3234,19 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      const batchSize = 8;
-      for (var i = 0; i < targets.length; i += batchSize) {
-        final end = (i + batchSize < targets.length) ? i + batchSize : targets.length;
-        final batch = targets.sublist(i, end);
-        await Future.wait(batch.map((p) => pingProfile(p.id)));
+      const concurrency = 8;
+      var cursor = 0;
+      Future<void> worker() async {
+        while (true) {
+          final idx = cursor++;
+          if (idx >= targets.length) break;
+          await pingProfile(targets[idx].id, coalesce: true);
+        }
       }
+
+      final workerCount = targets.length < concurrency ? targets.length : concurrency;
+      await Future.wait(List.generate(workerCount, (_) => worker()));
+
       // Если текущий выбранный сервер недоступен или не выбран — автоматически выбираем самый быстрый рабочий
       final sorted = sortProfiles(targets);
       final best = sorted.firstOrNull;
@@ -3152,6 +3257,7 @@ class AppController extends ChangeNotifier {
         await selectProfile(best.id);
       }
     } finally {
+      _pingCoalesceTimer?.cancel();
       _pingingAll = false;
       notifyListeners();
     }
@@ -3430,23 +3536,36 @@ class AppController extends ChangeNotifier {
         }
         final total = resp.contentLength;
         var received = 0;
+        var lastNotifiedPct = -1;
+        var lastNotifiedMs = 0;
+        final progressSw = Stopwatch()..start();
         final partFile = File('${targetFile.path}.part');
         sink = partFile.openWrite();
         await for (final chunk in resp.timeout(const Duration(seconds: 45))) {
           sink.add(chunk);
           received += chunk.length;
-          final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+          final nowMs = progressSw.elapsedMilliseconds;
+          var pct = -1;
           if (total > 0) {
             _updateProgress = (received / total).clamp(0.05, 0.98);
-            final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
-            final pct = (_updateProgress * 100).round();
-            _updateStatusText = '$label: $mb / $totalMb МБ ($pct%)';
+            pct = (_updateProgress * 100).round();
           } else {
             _updateProgress =
                 (received / (25 * 1024 * 1024)).clamp(0.08, 0.95);
-            _updateStatusText = '$label: скачано $mb МБ...';
           }
-          notifyListeners();
+          if ((pct != lastNotifiedPct && nowMs - lastNotifiedMs >= 100) ||
+              nowMs - lastNotifiedMs >= 150) {
+            lastNotifiedPct = pct;
+            lastNotifiedMs = nowMs;
+            final mb = (received / (1024 * 1024)).toStringAsFixed(1);
+            if (total > 0) {
+              final totalMb = (total / (1024 * 1024)).toStringAsFixed(1);
+              _updateStatusText = '$label: $mb / $totalMb МБ ($pct%)';
+            } else {
+              _updateStatusText = '$label: скачано $mb МБ...';
+            }
+            notifyListeners();
+          }
         }
         await sink.flush();
         await sink.close();
@@ -3741,7 +3860,15 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _pingCoalesceTimer?.cancel();
     stopTrafficPolling();
+    themeModeNotifier.dispose();
+    trafficRevision.dispose();
+    pingRevision.dispose();
+    for (final n in _serverRevisions.values) {
+      n.dispose();
+    }
+    _serverRevisions.clear();
     lists.close();
     super.dispose();
   }

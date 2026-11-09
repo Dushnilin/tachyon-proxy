@@ -337,14 +337,37 @@ object WifiSsidHelper {
         return result.take(20)
     }
 
+    @Volatile
+    private var lastWifiFilePath: String = ""
+
+    @Volatile
+    private var lastWifiFileMtime: Long = -1L
+
+    @Volatile
+    private var lastWifiFileSize: Long = -1L
+
+    @Volatile
+    private var cachedHomeWifiConfig: Pair<Boolean, List<String>> = false to emptyList()
+
     /**
-     * Читает настройки режима «Домашний интернет» напрямую из `tachyon-settings.json`.
+     * Читает настройки режима «Домашний интернет» из облегчённого `tachyon-wifi.json`
+     * (с откатом на `tachyon-settings.json`) и кэширует результат по `(mtime, size)`.
+     * При ошибке чтения/парсинга сохраняет последнюю валидную конфигурацию.
      */
     fun readHomeWifiConfig(filesDir: File): Pair<Boolean, List<String>> {
-        val file = File(filesDir, "tachyon-settings.json")
-        if (!file.exists()) return false to emptyList()
+        val wifiFile = File(filesDir, "tachyon-wifi.json")
+        val file = if (wifiFile.exists()) wifiFile else File(filesDir, "tachyon-settings.json")
+        if (!file.exists()) return cachedHomeWifiConfig
+        val path = file.absolutePath
+        val mtime = file.lastModified()
+        val size = file.length()
+        if (path == lastWifiFilePath && mtime == lastWifiFileMtime && size == lastWifiFileSize && mtime > 0L) {
+            return cachedHomeWifiConfig
+        }
         return try {
-            val obj = JSONObject(file.readText())
+            val raw = file.readText()
+            if (raw.isBlank()) return cachedHomeWifiConfig
+            val obj = JSONObject(raw)
             val enabled = obj.optBoolean("homeWifiMode", false)
             val arr = obj.optJSONArray("trustedWifiSsids")
             val list = ArrayList<String>()
@@ -354,9 +377,14 @@ object WifiSsidHelper {
                     if (s.isNotEmpty()) list.add(s)
                 }
             }
-            enabled to list
+            val parsed = enabled to list
+            cachedHomeWifiConfig = parsed
+            lastWifiFilePath = path
+            lastWifiFileMtime = mtime
+            lastWifiFileSize = size
+            parsed
         } catch (_: Throwable) {
-            false to emptyList()
+            cachedHomeWifiConfig
         }
     }
 

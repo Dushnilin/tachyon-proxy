@@ -72,13 +72,18 @@ class TachyonVpnService : VpnService() {
     @Volatile
     private var forceOverrideWifiSsid: String = ""
 
+    /** Последовательный фоновый исполнитель для запуска и остановки ядра без блокировки главного потока Android. */
+    private val lifecycleExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "tachyon-vpn-ctl").apply { isDaemon = true }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         WifiSsidHelper.ensureRegistered(applicationContext)
         WifiSsidHelper.setOnWifiEventListener {
             if (watcherActive || running || pausedByWifi) {
-                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-wifi-evt").start()
+                lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
         }
     }
@@ -89,8 +94,11 @@ class TachyonVpnService : VpnService() {
                 forceOverrideWifiSsid = ""
                 pausedByWifi = false
                 stopWifiWatcher()
-                stopTunnel()
-                stopSelf()
+                TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
+                lifecycleExecutor.execute {
+                    stopTunnel()
+                    stopSelf()
+                }
                 return START_NOT_STICKY
             }
             ACTION_NEXT_SERVER -> {
@@ -99,7 +107,7 @@ class TachyonVpnService : VpnService() {
             }
             ACTION_RECHECK_WIFI -> {
                 if (watcherActive || running || pausedByWifi) {
-                    Thread({ evaluateHomeWifiState() }, "tachyon-wifi-recheck").start()
+                    lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
                     return START_STICKY
                 } else {
                     stopSelf()
@@ -111,7 +119,7 @@ class TachyonVpnService : VpnService() {
                     .ifEmpty { TunnelStateHolder.pausedByWifiSsid }
                 forceOverrideWifiSsid = ssid
                 if (pausedByWifi) {
-                    resumeFromHomeWifi()
+                    lifecycleExecutor.execute { resumeFromHomeWifi() }
                 }
                 return START_STICKY
             }
@@ -152,37 +160,64 @@ class TachyonVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
 
-                currentConfig = config
-                currentServerName = serverName
-                currentAllowedPackages = allowedPackages
-                currentDisallowedPackages = disallowedPackages
-                currentMtu = mtu
-                currentProxyOnly = proxyOnly
-                saveSessionToDisk(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
+                val resolvedConfig = config!!
+                val resolvedAllowed = allowedPackages
+                val resolvedDisallowed = disallowedPackages
+                val resolvedServerName = serverName
+                val resolvedMtu = mtu
+                val resolvedProxyOnly = proxyOnly
 
-                val currentSsid = WifiSsidHelper.getCurrentWifiSsid(this)
-                if (forceStart && currentSsid.isNotEmpty()) {
-                    forceOverrideWifiSsid = currentSsid
-                }
+                currentConfig = resolvedConfig
+                currentServerName = resolvedServerName
+                currentAllowedPackages = resolvedAllowed
+                currentDisallowedPackages = resolvedDisallowed
+                currentMtu = resolvedMtu
+                currentProxyOnly = resolvedProxyOnly
 
-                val (homeWifiMode, trustedSsids) = WifiSsidHelper.readHomeWifiConfig(filesDir)
-                val shouldPauseNow = homeWifiMode &&
-                    currentSsid.isNotEmpty() &&
-                    WifiSsidHelper.matchesTrustedWifi(currentSsid, trustedSsids) &&
-                    !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
+                // Сразу переводим сервис в foreground в главном потоке, чтобы избежать ForegroundServiceDidNotStartInTimeException.
+                startVpnForeground(buildNotification())
 
-                if (running) {
-                    stopCoreAndTunOnly()
-                }
+                lifecycleExecutor.execute {
+                    saveSessionToDisk(
+                        resolvedConfig,
+                        resolvedAllowed,
+                        resolvedDisallowed,
+                        resolvedServerName,
+                        resolvedMtu,
+                        resolvedProxyOnly,
+                    )
 
-                if (shouldPauseNow) {
-                    enterHomeWifiPause(currentSsid)
-                    startWifiWatcher()
-                } else {
-                    pausedByWifi = false
-                    TunnelStateHolder.pausedByWifiSsid = ""
-                    startTunnel(config!!, allowedPackages, disallowedPackages, serverName, mtu, proxyOnly)
-                    startWifiWatcher()
+                    val currentSsid = WifiSsidHelper.getCurrentWifiSsid(this)
+                    if (forceStart && currentSsid.isNotEmpty()) {
+                        forceOverrideWifiSsid = currentSsid
+                    }
+
+                    val (homeWifiMode, trustedSsids) = WifiSsidHelper.readHomeWifiConfig(filesDir)
+                    val shouldPauseNow = homeWifiMode &&
+                        currentSsid.isNotEmpty() &&
+                        WifiSsidHelper.matchesTrustedWifi(currentSsid, trustedSsids) &&
+                        !currentSsid.equals(forceOverrideWifiSsid, ignoreCase = true)
+
+                    if (running) {
+                        stopCoreAndTunOnly()
+                    }
+
+                    if (shouldPauseNow) {
+                        enterHomeWifiPause(currentSsid)
+                        startWifiWatcher()
+                    } else {
+                        pausedByWifi = false
+                        TunnelStateHolder.pausedByWifiSsid = ""
+                        startTunnel(
+                            resolvedConfig,
+                            resolvedAllowed,
+                            resolvedDisallowed,
+                            resolvedServerName,
+                            resolvedMtu,
+                            resolvedProxyOnly,
+                        )
+                        startWifiWatcher()
+                    }
                 }
             }
         }
@@ -508,6 +543,7 @@ class TachyonVpnService : VpnService() {
                 if (!running) break
                 runCatching {
                     val raw = TachyonCore.stats()
+                    TunnelStateHolder.updateStats(raw)
                     val obj = JSONObject(raw)
                     val up = obj.optLong("up", 0L)
                     val down = obj.optLong("down", 0L)
@@ -556,14 +592,14 @@ class TachyonVpnService : VpnService() {
                 if (running) {
                     runCatching { setUnderlyingNetworks(arrayOf(network)) }
                 }
-                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-avail").start()
+                lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
 
             override fun onCapabilitiesChanged(
                 network: Network,
                 networkCapabilities: NetworkCapabilities,
             ) {
-                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-caps").start()
+                lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
 
             override fun onLost(network: Network) {
@@ -573,7 +609,7 @@ class TachyonVpnService : VpnService() {
                         runCatching { setUnderlyingNetworks(null) }
                     }
                 }
-                Thread({ runCatching { evaluateHomeWifiState() } }, "tachyon-net-lost").start()
+                lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
         }
         try {
@@ -633,12 +669,19 @@ class TachyonVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopTunnel()
+        pausedByWifi = false
+        stopWifiWatcher()
+        lifecycleExecutor.execute { stopTunnel() }
         super.onDestroy()
     }
 
     override fun onRevoke() {
-        stopTunnel()
+        pausedByWifi = false
+        stopWifiWatcher()
+        lifecycleExecutor.execute {
+            stopTunnel()
+            stopSelf()
+        }
         super.onRevoke()
     }
 

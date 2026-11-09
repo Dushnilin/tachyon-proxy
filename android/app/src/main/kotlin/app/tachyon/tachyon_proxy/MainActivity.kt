@@ -65,8 +65,10 @@ class MainActivity : FlutterFragmentActivity() {
                 res.success(null)
                 return@registerForActivityResult
             }
-            val parsed = readContentUriMap(uri)
-            res.success(parsed)
+            Thread({
+                val parsed = readContentUriMap(uri)
+                runOnUiThread { res.success(parsed) }
+            }, "tachyon-file-read").start()
         }
 
     /** Запрос разрешения геолокации для чтения SSID Wi-Fi в режиме «Домашний интернет». */
@@ -230,17 +232,32 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun readContentUriMap(uri: android.net.Uri): Map<String, String>? {
         return runCatching {
+            val maxBytes = 4 * 1024 * 1024
             var displayName = uri.lastPathSegment.orEmpty()
             contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0 && cursor.moveToFirst()) {
-                    displayName = cursor.getString(idx).orEmpty()
+                val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (cursor.moveToFirst()) {
+                    if (nameIdx >= 0) {
+                        displayName = cursor.getString(nameIdx).orEmpty()
+                    }
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx) && cursor.getLong(sizeIdx) > maxBytes) {
+                        return@runCatching null
+                    }
                 }
             }
             val content = contentResolver.openInputStream(uri)?.use { stream ->
-                val bytes = stream.readBytes()
-                if (bytes.size > 4 * 1024 * 1024) return@runCatching null
-                String(bytes, Charsets.UTF_8)
+                val out = java.io.ByteArrayOutputStream(16 * 1024)
+                val buf = ByteArray(16 * 1024)
+                var total = 0
+                while (true) {
+                    val read = stream.read(buf)
+                    if (read <= 0) break
+                    total += read
+                    if (total > maxBytes) return@runCatching null
+                    out.write(buf, 0, read)
+                }
+                out.toString(Charsets.UTF_8.name())
             }.orEmpty()
             if (content.isBlank()) null else mapOf("name" to displayName, "content" to content)
         }.getOrNull()
@@ -255,9 +272,8 @@ class MainActivity : FlutterFragmentActivity() {
                 android.util.Log.i("TachyonDump", "STATS: $stats")
                 val logFile = File(filesDir, LOG_FILE_NAME)
                 if (logFile.exists()) {
-                    val lines = logFile.readLines()
-                    val tail = if (lines.size > 150) lines.subList(lines.size - 150, lines.size) else lines
-                    android.util.Log.i("TachyonDump", "=== TACHYON.LOG (${lines.size} lines) ===")
+                    val tail = readLogTail(logFile, 150)
+                    android.util.Log.i("TachyonDump", "=== TACHYON.LOG (tail ${tail.size} lines) ===")
                     for (line in tail) {
                         android.util.Log.i("TachyonDump", "LOG: $line")
                     }
@@ -466,27 +482,74 @@ class MainActivity : FlutterFragmentActivity() {
         }, "tachyon-version").start()
     }
 
-    /** Статистика трафика: байты и число соединений. */
+    /** Статистика трафика: байты и число соединений (с использованием общего кэша сервиса). */
     private fun handleStats(result: MethodChannel.Result) {
+        val cached = TunnelStateHolder.latestStatsJson
+        val ageMs = System.currentTimeMillis() - TunnelStateHolder.latestStatsAtMs
+        if (cached.isNotEmpty() && ageMs in 0..1800L) {
+            result.success(cached)
+            return
+        }
         Thread({
             val stats = TachyonCore.stats()
+            TunnelStateHolder.updateStats(stats)
             runOnUiThread { result.success(stats) }
         }, "tachyon-stats").start()
     }
 
-    /** Хвост журнала ядра. */
+    /** Хвост журнала ядра (чтение с конца файла через RandomAccessFile и авто-ротация при > 2 МБ). */
     private fun handleLogs(call: MethodCall, result: MethodChannel.Result) {
         val limit = call.argument<Int>("limit") ?: 400
         Thread({
             val file = File(filesDir, LOG_FILE_NAME)
-            val lines = if (file.exists()) {
-                runCatching { file.readLines() }.getOrDefault(emptyList())
+            val tail = if (file.exists()) {
+                runCatching { readLogTail(file, limit) }.getOrDefault(emptyList())
             } else {
                 emptyList()
             }
-            val tail = if (lines.size > limit) lines.subList(lines.size - limit, lines.size) else lines
             runOnUiThread { result.success(tail) }
         }, "tachyon-logs").start()
+    }
+
+    private fun readLogTail(file: File, maxLines: Int): List<String> {
+        val length = file.length()
+        if (length <= 0L) return emptyList()
+
+        // Авто-ротация лога, если файл разросся свыше 2 МБ: оставляем последние 512 КБ.
+        if (length > 2L * 1024L * 1024L) {
+            runCatching {
+                val keepBytes = 512 * 1024
+                val kept = ByteArray(keepBytes)
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    raf.seek(length - keepBytes)
+                    raf.readFully(kept)
+                }
+                file.writeBytes(kept)
+            }
+        }
+
+        val currentLen = file.length()
+        if (currentLen <= 0L) return emptyList()
+        val windowBytes = minOf(currentLen, 128L * 1024L).toInt()
+        val buf = ByteArray(windowBytes)
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            raf.seek(currentLen - windowBytes)
+            raf.readFully(buf)
+        }
+        val text = String(buf, Charsets.UTF_8)
+        var lines = text.lines()
+        if (currentLen > windowBytes && lines.size > 1) {
+            // Отбрасываем потенциально обрезанную первую строку окна.
+            lines = lines.subList(1, lines.size)
+        }
+        if (lines.isNotEmpty() && lines.last().isEmpty()) {
+            lines = lines.subList(0, lines.size - 1)
+        }
+        return if (lines.size > maxLines) {
+            lines.subList(lines.size - maxLines, lines.size)
+        } else {
+            lines
+        }
     }
 
     /** Очищает журнал ядра. */

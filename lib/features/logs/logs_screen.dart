@@ -18,6 +18,7 @@ class LogsScreen extends StatefulWidget {
 class _LogsScreenState extends State<LogsScreen> {
   List<String> _lines = const [];
   bool _loading = true;
+  bool _reloading = false;
   bool _liveTail = true;
   String _query = '';
   String _levelFilter = 'ALL'; // ALL, ERROR, WARN, INFO
@@ -41,14 +42,19 @@ class _LogsScreenState extends State<LogsScreen> {
   }
 
   Future<void> _reload() async {
-    if (!mounted) return;
-    final controller = AppScope.read(context);
-    await controller.refreshLogs();
-    if (!mounted) return;
-    setState(() {
-      _lines = controller.logs;
-      _loading = false;
-    });
+    if (!mounted || _reloading) return;
+    _reloading = true;
+    try {
+      final controller = AppScope.read(context);
+      await controller.refreshLogs();
+      if (!mounted) return;
+      setState(() {
+        _lines = controller.logs;
+        _loading = false;
+      });
+    } finally {
+      _reloading = false;
+    }
   }
 
   bool _matchesLevel(String line) {

@@ -47,6 +47,22 @@ object TunnelStateHolder {
     @Volatile
     var pausedByWifiSsid: String = ""
 
+    /** Последний JSON статистики ядра, обновляемый сервисом раз в 2 с, чтобы Flutter не опрашивал JNI повторно. */
+    @Volatile
+    var latestStatsJson: String = ""
+        private set
+
+    @Volatile
+    var latestStatsAtMs: Long = 0L
+        private set
+
+    fun updateStats(rawJson: String?) {
+        if (!rawJson.isNullOrEmpty()) {
+            latestStatsJson = rawJson
+            latestStatsAtMs = System.currentTimeMillis()
+        }
+    }
+
     /** Подписка на изменения состояния. */
     fun addListener(listener: Listener) {
         listeners.add(listener)
@@ -82,6 +98,10 @@ object TunnelStateHolder {
         state = newState
         error = newError
         pausedByWifiSsid = pausedWifi
+        if (newState == State.Stopped || newState == State.Failed) {
+            latestStatsJson = ""
+            latestStatsAtMs = 0L
+        }
         listeners.forEach { listener ->
             runCatching { listener.onStateChanged(newState, newError) }
         }

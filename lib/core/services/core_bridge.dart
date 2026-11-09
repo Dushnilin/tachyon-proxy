@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:flutter/services.dart';
 
@@ -112,6 +113,18 @@ class CoreBridge {
     }
   }
 
+  static Map<String, dynamic>? _decodeMapJson(String raw) {
+    final decoded = jsonDecode(raw);
+    return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+  }
+
+  static Future<Map<String, dynamic>?> _decodeMapAsync(String raw) async {
+    if (raw.length > 24 * 1024) {
+      return Isolate.run(() => _decodeMapJson(raw));
+    }
+    return _decodeMapJson(raw);
+  }
+
   /// Адаптивно скачивает и разбирает подписку напрямую через нативный движок `tachyon-core`.
   Future<Map<String, dynamic>?> fetchSubscription(
     String url, {
@@ -129,8 +142,7 @@ class CoreBridge {
         'insecure': insecure,
       });
       if (raw == null || raw.isEmpty) return null;
-      final decoded = jsonDecode(raw);
-      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+      return await _decodeMapAsync(raw);
     } catch (_) {
       return null;
     }
@@ -143,8 +155,7 @@ class CoreBridge {
         'payload': payload,
       });
       if (raw == null || raw.isEmpty) return null;
-      final decoded = jsonDecode(raw);
-      return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+      return await _decodeMapAsync(raw);
     } catch (_) {
       return null;
     }

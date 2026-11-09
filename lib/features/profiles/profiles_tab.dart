@@ -41,28 +41,30 @@ class _ProfilesTabState extends State<ProfilesTab> {
     final tokens = context.tokens;
     final profiles = controller.settings.visibleProfiles;
     final subs = controller.settings.visibleSubscriptions;
-    final standaloneProfiles = _filter(controller.sortProfiles(
-      profiles.where((p) => p.subscriptionId.isEmpty).toList(),
-    ));
-    final hasDead = controller.pings.values.any((ms) => ms < 0);
 
     return Scaffold(
       backgroundColor: tokens.surface,
       appBar: AppBar(
         title: const Text('Профили'),
         actions: [
-          if (hasDead)
-            IconButton(
-              tooltip: 'Удалить недоступные серверы (✗)',
-              onPressed: () async {
-                final removed = await controller.removeDeadProfiles();
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Удалено недоступных серверов: $removed')),
-                );
-              },
-              icon: Icon(Icons.cleaning_services_outlined, color: tokens.danger),
-            ),
+          ValueListenableBuilder<int>(
+            valueListenable: controller.pingRevision,
+            builder: (context, _, _) {
+              final hasDead = controller.pings.values.any((ms) => ms < 0);
+              if (!hasDead) return const SizedBox.shrink();
+              return IconButton(
+                tooltip: 'Удалить недоступные серверы (✗)',
+                onPressed: () async {
+                  final removed = await controller.removeDeadProfiles();
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Удалено недоступных серверов: $removed')),
+                  );
+                },
+                icon: Icon(Icons.cleaning_services_outlined, color: tokens.danger),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Списки серверов для Wi-Fi и Мобильной сети',
             onPressed: (profiles.isEmpty && subs.isEmpty)
@@ -163,71 +165,224 @@ class _ProfilesTabState extends State<ProfilesTab> {
                 ],
               ),
             )
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(Space.lg, Space.sm, Space.lg, Space.xxl),
-              children: [
-                if (profiles.length > 4) ...[
-                  TextField(
-                    onChanged: (v) => setState(() => _searchQuery = v),
-                    decoration: const InputDecoration(
-                      hintText: 'Фильтр по названию, хосту или протоколу...',
-                      prefixIcon: Icon(Icons.search, size: 18),
-                      isDense: true,
-                    ),
+          : ValueListenableBuilder<int>(
+              valueListenable: controller.pingRevision,
+              builder: (context, _, _) {
+                final freshStandalone = _filter(controller.sortProfiles(
+                  controller.settings.profilesForSubscription(''),
+                ));
+                return CustomScrollView(
+                  slivers: _buildProfileSlivers(
+                    context,
+                    controller,
+                    profiles,
+                    subs,
+                    freshStandalone,
                   ),
-                  const SizedBox(height: Space.md),
-                ],
-                if (profiles.length >= 2 && _searchQuery.trim().isEmpty) ...[
-                  _AutoBalancerTile(
-                    title: 'Глобальный балансировщик (все серверы)',
-                    selected: controller.settings.selectedProfileId == 'auto:all',
-                    controller: controller,
-                    onSelect: () => controller.selectProfile('auto:all'),
-                    onConfigure: () => showBalancerSettingsSheet(context, controller),
-                  ),
-                  const SizedBox(height: Space.sm),
-                  _NetworkListsSummaryTile(
-                    controller: controller,
-                    onTap: () => showNetworkListsSheet(context, controller),
-                  ),
-                  const SizedBox(height: Space.md),
-                ],
-                if (subs.isNotEmpty) ...[
-                  _SubscriptionGroupList(
-                    controller: controller,
-                    searchQuery: _searchQuery,
-                    onEditProfile: (profile) =>
-                        _showManualDialog(context, controller, edit: profile),
-                    onShareProfile: (profile) =>
-                        _showQrDialog(context, controller, profile),
-                  ),
-                  const SizedBox(height: Space.xl),
-                ],
-                if (standaloneProfiles.isNotEmpty) ...[
-                  const SectionLabel('Пользовательские серверы'),
-                  for (final profile in standaloneProfiles) ...[
-                    _ProfileTile(
-                      profile: profile,
-                      selected: profile.id == controller.settings.selectedProfileId,
-                      onSelect: () => controller.selectProfile(profile.id),
-                      onDelete: () => controller.removeProfile(profile.id),
-                      onEdit: () => _showManualDialog(context, controller, edit: profile),
-                      onShare: () => _showQrDialog(context, controller, profile),
-                      onPing: () => controller.pingProfile(profile.id),
-                      onChangeNetworkScope: (scope) =>
-                          controller.setProfileNetworkScope(profile.id, scope),
-                      ping: controller.pingOf(profile.id),
-                      isPinging: controller.isPinging(profile.id),
-                      telemetry: controller.balancerTelemetryOf(profile.id),
-                      isBalancerWinner:
-                          controller.activeBalancerWinner?.id == profile.id,
-                    ),
-                    const SizedBox(height: Space.sm),
-                  ],
-                ],
-              ],
+                );
+              },
             ),
     );
+  }
+
+  List<Widget> _buildProfileSlivers(
+    BuildContext context,
+    AppController controller,
+    List<Profile> profiles,
+    List<SubscriptionEntry> subs,
+    List<Profile> standaloneProfiles,
+  ) {
+    final selectedId = controller.settings.selectedProfileId;
+    final winnerId = controller.activeBalancerWinner?.id;
+    final slivers = <Widget>[
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(Space.lg, Space.sm, Space.lg, 0),
+        sliver: SliverToBoxAdapter(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (profiles.length > 4) ...[
+                TextField(
+                  onChanged: (v) => setState(() => _searchQuery = v),
+                  decoration: const InputDecoration(
+                    hintText: 'Фильтр по названию, хосту или протоколу...',
+                    prefixIcon: Icon(Icons.search, size: 18),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: Space.md),
+              ],
+              if (profiles.length >= 2 && _searchQuery.trim().isEmpty) ...[
+                _AutoBalancerTile(
+                  title: 'Глобальный балансировщик (все серверы)',
+                  selected: selectedId == 'auto:all',
+                  controller: controller,
+                  onSelect: () => controller.selectProfile('auto:all'),
+                  onConfigure: () => showBalancerSettingsSheet(context, controller),
+                ),
+                const SizedBox(height: Space.sm),
+                _NetworkListsSummaryTile(
+                  controller: controller,
+                  onTap: () => showNetworkListsSheet(context, controller),
+                ),
+                const SizedBox(height: Space.md),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ];
+
+    for (final sub in subs) {
+      final isCollapsed =
+          controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
+      final subProfiles = _filter(controller.sortProfiles(
+        controller.settings.profilesForSubscription(sub.id),
+      ));
+
+      slivers.add(
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+          sliver: SliverToBoxAdapter(
+            child: _CollapsibleSubCard(
+              sub: sub,
+              controller: controller,
+              isCollapsed: isCollapsed,
+              profiles: subProfiles,
+              selectedId: selectedId,
+              onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
+              onToggleSub: () => controller.toggleSubscription(sub.id),
+              onRemoveSub: () => controller.removeSubscription(sub.id),
+              onRefreshSub: () async {
+                if (sub.isFptnToken) {
+                  await showFptnTokenDialog(
+                    context,
+                    controller,
+                    sub.url,
+                    existingSub: sub,
+                  );
+                  return;
+                }
+                final count = await controller.refreshSubscription(sub.id);
+                if (!context.mounted) return;
+                final msg = count > 0
+                    ? 'Подписка обновлена (серверов: $count)'
+                    : (controller.lastError.isNotEmpty
+                        ? controller.lastError
+                        : 'Не удалось обновить подписку');
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(msg),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
+              onPingAllSub: () =>
+                  controller.pingAllProfiles(subscriptionId: sub.id),
+              onSelectProfile: (id) => controller.selectProfile(id),
+              onEditSub: () => sub.isFptnToken
+                  ? showFptnTokenDialog(
+                      context,
+                      controller,
+                      sub.url,
+                      existingSub: sub,
+                    )
+                  : _showEditSubDialog(context, controller, sub),
+            ),
+          ),
+        ),
+      );
+
+      if (!isCollapsed && subProfiles.isNotEmpty) {
+        slivers.add(
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(Space.lg, 4, Space.lg, 0),
+            sliver: SliverList.builder(
+              itemCount: subProfiles.length,
+              itemBuilder: (context, index) {
+                final p = subProfiles[index];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _ProfileTile(
+                    controller: controller,
+                    profile: p,
+                    selected: p.id == selectedId,
+                    ping: controller.pingOf(p.id),
+                    isPinging: controller.isPinging(p.id),
+                    telemetry: controller.balancerTelemetryOf(p.id),
+                    isBalancerWinner: winnerId == p.id,
+                    onSelect: () => controller.selectProfile(p.id),
+                    onDelete: () => controller.removeProfile(p.id),
+                    onEdit: () => _showManualDialog(context, controller, edit: p),
+                    onShare: () => _showQrDialog(context, controller, p),
+                    onPing: () => controller.pingProfile(p.id),
+                    onChangeNetworkScope: (scope) =>
+                        controller.setProfileNetworkScope(p.id, scope),
+                  ),
+                );
+              },
+            ),
+          ),
+        );
+      }
+
+      slivers.add(
+        const SliverToBoxAdapter(child: SizedBox(height: Space.md)),
+      );
+    }
+
+    if (subs.isNotEmpty) {
+      slivers.add(
+        const SliverToBoxAdapter(child: SizedBox(height: Space.md)),
+      );
+    }
+
+    if (standaloneProfiles.isNotEmpty) {
+      slivers.add(
+        const SliverPadding(
+          padding: EdgeInsets.symmetric(horizontal: Space.lg),
+          sliver: SliverToBoxAdapter(
+            child: SectionLabel('Пользовательские серверы'),
+          ),
+        ),
+      );
+      slivers.add(
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+          sliver: SliverList.builder(
+            itemCount: standaloneProfiles.length,
+            itemBuilder: (context, index) {
+              final profile = standaloneProfiles[index];
+              return Padding(
+                padding: const EdgeInsets.only(bottom: Space.sm),
+                child: _ProfileTile(
+                  controller: controller,
+                  profile: profile,
+                  selected: profile.id == selectedId,
+                  onSelect: () => controller.selectProfile(profile.id),
+                  onDelete: () => controller.removeProfile(profile.id),
+                  onEdit: () =>
+                      _showManualDialog(context, controller, edit: profile),
+                  onShare: () => _showQrDialog(context, controller, profile),
+                  onPing: () => controller.pingProfile(profile.id),
+                  onChangeNetworkScope: (scope) =>
+                      controller.setProfileNetworkScope(profile.id, scope),
+                  ping: controller.pingOf(profile.id),
+                  isPinging: controller.isPinging(profile.id),
+                  telemetry: controller.balancerTelemetryOf(profile.id),
+                  isBalancerWinner: winnerId == profile.id,
+                ),
+              );
+            },
+          ),
+        ),
+      );
+    }
+
+    slivers.add(
+      const SliverToBoxAdapter(child: SizedBox(height: Space.xxl)),
+    );
+    return slivers;
   }
 
   void _showQrDialog(
@@ -1643,6 +1798,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
 /// Плитка профиля: имя, адрес, тип, пинг, телеметрия балансировщика и компактное меню действий.
 class _ProfileTile extends StatelessWidget {
   const _ProfileTile({
+    this.controller,
     required this.profile,
     required this.selected,
     required this.onSelect,
@@ -1657,6 +1813,7 @@ class _ProfileTile extends StatelessWidget {
     this.isBalancerWinner = false,
   });
 
+  final AppController? controller;
   final Profile profile;
   final bool selected;
   final VoidCallback onSelect;
@@ -1780,43 +1937,51 @@ class _ProfileTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Space.xs),
-          FocusableTap(
-            borderRadius: BorderRadius.circular(4),
-            onTap: onPing,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              decoration: BoxDecoration(
-                color: tokens.raised,
+          ValueListenableBuilder<int>(
+            valueListenable:
+                controller?.serverRevisionOf(profile.id) ?? ValueNotifier<int>(0),
+            builder: (context, _, _) {
+              final livePing = controller?.pingOf(profile.id) ?? ping;
+              final livePinging = controller?.isPinging(profile.id) ?? isPinging;
+              return FocusableTap(
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: tokens.line),
-              ),
-              child: isPinging
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: tokens.accent,
-                      ),
-                    )
-                  : ping == null
-                      ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
-                      : Text(
-                          ping! < 0 ? '✗' : '${ping}ms',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            fontFamily: 'monospace',
-                            color: ping! < 0
-                                ? tokens.danger
-                                : ping! < 150
-                                    ? tokens.success
-                                    : ping! < 400
-                                        ? tokens.warning
-                                        : tokens.danger,
+                onTap: onPing,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: tokens.raised,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: tokens.line),
+                  ),
+                  child: livePinging
+                      ? SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: tokens.accent,
                           ),
-                        ),
-            ),
+                        )
+                      : livePing == null
+                          ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
+                          : Text(
+                              livePing < 0 ? '✗' : '${livePing}ms',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                fontFamily: 'monospace',
+                                color: livePing < 0
+                                    ? tokens.danger
+                                    : livePing < 150
+                                        ? tokens.success
+                                        : livePing < 400
+                                            ? tokens.warning
+                                            : tokens.danger,
+                              ),
+                            ),
+                ),
+              );
+            },
           ),
           const SizedBox(width: 2),
           PopupMenuButton<String>(
@@ -2064,258 +2229,167 @@ class _AutoBalancerTile extends StatelessWidget {
   }
 }
 
-/// Список подписок со сворачиваемыми серверами внутри.
-class _SubscriptionGroupList extends StatelessWidget {
-  const _SubscriptionGroupList({
-    required this.controller,
-    required this.searchQuery,
-    required this.onEditProfile,
-    required this.onShareProfile,
-  });
+Future<void> _showEditSubDialog(
+  BuildContext context,
+  AppController controller,
+  SubscriptionEntry sub,
+) async {
+  final nameCtrl = TextEditingController(text: sub.name);
+  final urlCtrl = TextEditingController(text: sub.url);
+  final hwidCtrl = TextEditingController(text: sub.customHwid);
+  final globalHwid = controller.effectiveHwid;
+  var selectedScope = sub.networkScope;
 
-  final AppController controller;
-  final String searchQuery;
-  final void Function(Profile profile) onEditProfile;
-  final void Function(Profile profile) onShareProfile;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogCtx) => StatefulBuilder(
+      builder: (ctx, setStateDialog) {
+        final tokens = ctx.tokens;
+        final shortGlobalHwid = globalHwid.length > 12
+            ? '${globalHwid.substring(0, 12)}…'
+            : globalHwid;
 
-  List<Profile> _filter(List<Profile> items) {
-    final q = searchQuery.trim().toLowerCase();
-    if (q.isEmpty) return items;
-    return items
-        .where((p) =>
-            p.name.toLowerCase().contains(q) ||
-            p.server.toLowerCase().contains(q) ||
-            p.type.toLowerCase().contains(q))
-        .toList();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final subs = controller.settings.visibleSubscriptions;
-    final allProfiles = controller.settings.visibleProfiles;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final sub in subs) ...[
-          _CollapsibleSubCard(
-            sub: sub,
-            controller: controller,
-            isCollapsed:
-                controller.isSubCollapsed(sub.id) && searchQuery.trim().isEmpty,
-            profiles: _filter(controller.sortProfiles(
-              allProfiles.where((p) => p.subscriptionId == sub.id).toList(),
-            )),
-            selectedId: controller.settings.selectedProfileId,
-            onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
-            onToggleSub: () => controller.toggleSubscription(sub.id),
-            onRemoveSub: () => controller.removeSubscription(sub.id),
-            onRefreshSub: () async {
-              if (sub.isFptnToken) {
-                await showFptnTokenDialog(
-                  context,
-                  controller,
-                  sub.url,
-                  existingSub: sub,
-                );
-                return;
-              }
-              final count = await controller.refreshSubscription(sub.id);
-              if (!context.mounted) return;
-              final msg = count > 0
-                  ? 'Подписка обновлена (серверов: $count)'
-                  : (controller.lastError.isNotEmpty
-                      ? controller.lastError
-                      : 'Не удалось обновить подписку');
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(msg),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            },
-            onPingAllSub: () => controller.pingAllProfiles(subscriptionId: sub.id),
-            onSelectProfile: (id) => controller.selectProfile(id),
-            onDeleteProfile: (id) => controller.removeProfile(id),
-            onEditProfile: onEditProfile,
-            onShareProfile: onShareProfile,
-            onPingProfile: (id) => controller.pingProfile(id),
-            onEditSub: () => sub.isFptnToken
-                ? showFptnTokenDialog(
-                    context,
-                    controller,
-                    sub.url,
-                    existingSub: sub,
-                  )
-                : _showEditSubDialog(context, controller, sub),
-          ),
-          const SizedBox(height: Space.md),
-        ],
-      ],
-    );
-  }
-
-  Future<void> _showEditSubDialog(
-    BuildContext context,
-    AppController controller,
-    SubscriptionEntry sub,
-  ) async {
-    final nameCtrl = TextEditingController(text: sub.name);
-    final urlCtrl = TextEditingController(text: sub.url);
-    final hwidCtrl = TextEditingController(text: sub.customHwid);
-    final globalHwid = controller.effectiveHwid;
-    var selectedScope = sub.networkScope;
-
-    await showDialog<void>(
-      context: context,
-      builder: (dialogCtx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) {
-          final tokens = ctx.tokens;
-          final shortGlobalHwid = globalHwid.length > 12
-              ? '${globalHwid.substring(0, 12)}…'
-              : globalHwid;
-
-          return AlertDialog(
-            title: const Text('Редактировать подписку'),
-            content: SizedBox(
-              width: 440,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: nameCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Название (опционально)',
-                      ),
+        return AlertDialog(
+          title: const Text('Редактировать подписку'),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Название (опционально)',
                     ),
-                    const SizedBox(height: Space.md),
-                    TextField(
-                      controller: urlCtrl,
-                      maxLines: 3,
-                      minLines: 1,
-                      decoration: const InputDecoration(
-                        labelText: 'Ссылка на подписку',
-                      ),
+                  ),
+                  const SizedBox(height: Space.md),
+                  TextField(
+                    controller: urlCtrl,
+                    maxLines: 3,
+                    minLines: 1,
+                    decoration: const InputDecoration(
+                      labelText: 'Ссылка на подписку',
                     ),
-                    const SizedBox(height: Space.md),
-                    TextField(
-                      controller: hwidCtrl,
-                      style: const TextStyle(fontSize: 12.5, fontFamily: 'monospace'),
-                      onChanged: (_) => setStateDialog(() {}),
-                      decoration: InputDecoration(
-                        labelText: 'HWID подписки (X-HWID)',
-                        hintText: globalHwid,
-                        helperText: hwidCtrl.text.trim().isEmpty
-                            ? 'По умолчанию: общий HWID ($shortGlobalHwid)'
-                            : 'Индивидуальный HWID для этой подписки',
-                        helperMaxLines: 2,
-                        suffixIcon: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
+                  ),
+                  const SizedBox(height: Space.md),
+                  TextField(
+                    controller: hwidCtrl,
+                    style: const TextStyle(fontSize: 12.5, fontFamily: 'monospace'),
+                    onChanged: (_) => setStateDialog(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'HWID подписки (X-HWID)',
+                      hintText: globalHwid,
+                      helperText: hwidCtrl.text.trim().isEmpty
+                          ? 'По умолчанию: общий HWID ($shortGlobalHwid)'
+                          : 'Индивидуальный HWID для этой подписки',
+                      helperMaxLines: 2,
+                      suffixIcon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Сгенерировать новый случайный HWID',
+                            icon: const Icon(Icons.casino_outlined, size: 19),
+                            onPressed: () {
+                              setStateDialog(() {
+                                hwidCtrl.text = AppController.generateRandomHwid();
+                              });
+                            },
+                          ),
+                          if (hwidCtrl.text.isNotEmpty)
                             IconButton(
-                              tooltip: 'Сгенерировать новый случайный HWID',
-                              icon: const Icon(Icons.casino_outlined, size: 19),
+                              tooltip: 'Сбросить на общий HWID устройства',
+                              icon: const Icon(Icons.restore_rounded, size: 19),
                               onPressed: () {
                                 setStateDialog(() {
-                                  hwidCtrl.text = AppController.generateRandomHwid();
+                                  hwidCtrl.clear();
                                 });
                               },
+                            )
+                          else
+                            IconButton(
+                              tooltip: 'Скопировать текущий HWID',
+                              icon: const Icon(Icons.copy_rounded, size: 17),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: globalHwid));
+                                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                                  const SnackBar(content: Text('HWID скопирован в буфер')),
+                                );
+                              },
                             ),
-                            if (hwidCtrl.text.isNotEmpty)
-                              IconButton(
-                                tooltip: 'Сбросить на общий HWID устройства',
-                                icon: const Icon(Icons.restore_rounded, size: 19),
-                                onPressed: () {
-                                  setStateDialog(() {
-                                    hwidCtrl.clear();
-                                  });
-                                },
-                              )
-                            else
-                              IconButton(
-                                tooltip: 'Скопировать текущий HWID',
-                                icon: const Icon(Icons.copy_rounded, size: 17),
-                                onPressed: () {
-                                  Clipboard.setData(ClipboardData(text: globalHwid));
-                                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                                    const SnackBar(content: Text('HWID скопирован в буфер')),
-                                  );
-                                },
-                              ),
-                          ],
-                        ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: Space.md),
-                    Text(
-                      'Сеть для серверов подписки',
-                      style: Theme.of(ctx).textTheme.titleSmall,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Позволяет использовать разные подписки для Wi-Fi и мобильной сети при автовыборе.',
-                      style: TextStyle(fontSize: 11, color: tokens.faint),
-                    ),
-                    const SizedBox(height: Space.xs),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        for (final item in const [
-                          ('all', 'Все сети', Icons.public_rounded),
-                          ('wifi', 'Только Wi-Fi', Icons.wifi_rounded),
-                          ('cellular', 'Мобильная сеть', Icons.signal_cellular_alt_rounded),
-                        ])
-                          ChoiceChip(
-                            avatar: Icon(item.$3, size: 15),
-                            label: Text(item.$2),
-                            selected: selectedScope == item.$1,
-                            onSelected: (_) =>
-                                setStateDialog(() => selectedScope = item.$1),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: Space.md),
+                  Text(
+                    'Сеть для серверов подписки',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Позволяет использовать разные подписки для Wi-Fi и мобильной сети при автовыборе.',
+                    style: TextStyle(fontSize: 11, color: tokens.faint),
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final item in const [
+                        ('all', 'Все сети', Icons.public_rounded),
+                        ('wifi', 'Только Wi-Fi', Icons.wifi_rounded),
+                        ('cellular', 'Мобильная сеть', Icons.signal_cellular_alt_rounded),
+                      ])
+                        ChoiceChip(
+                          avatar: Icon(item.$3, size: 15),
+                          label: Text(item.$2),
+                          selected: selectedScope == item.$1,
+                          onSelected: (_) =>
+                              setStateDialog(() => selectedScope = item.$1),
+                        ),
+                    ],
+                  ),
+                ],
               ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogCtx).pop(),
-                child: const Text('Отмена'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  final newUrl = urlCtrl.text.trim();
-                  final newName = nameCtrl.text.trim();
-                  final newHwid = hwidCtrl.text.trim();
-                  Navigator.of(dialogCtx).pop();
-                  if (newUrl.isNotEmpty) {
-                    await controller.editSubscription(
-                      sub.id,
-                      url: newUrl,
-                      name: newName,
-                      customHwid: newHwid,
-                      networkScope: selectedScope,
-                    );
-                  }
-                },
-                child: const Text('Сохранить и обновить'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-    nameCtrl.dispose();
-    urlCtrl.dispose();
-    hwidCtrl.dispose();
-  }
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final newUrl = urlCtrl.text.trim();
+                final newName = nameCtrl.text.trim();
+                final newHwid = hwidCtrl.text.trim();
+                Navigator.of(dialogCtx).pop();
+                if (newUrl.isNotEmpty) {
+                  await controller.editSubscription(
+                    sub.id,
+                    url: newUrl,
+                    name: newName,
+                    customHwid: newHwid,
+                    networkScope: selectedScope,
+                  );
+                }
+              },
+              child: const Text('Сохранить и обновить'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+  nameCtrl.dispose();
+  urlCtrl.dispose();
+  hwidCtrl.dispose();
 }
 
-/// Сворачиваемая карточка подписки с информацией о трафике и сроке действия.
+/// Сворачиваемая карточка заголовка подписки с информацией о трафике и сроке действия.
+/// Сами серверы подписки рендерятся лениво через `SliverList.builder` в `ProfilesTab`.
 class _CollapsibleSubCard extends StatelessWidget {
   const _CollapsibleSubCard({
     required this.sub,
@@ -2329,10 +2403,6 @@ class _CollapsibleSubCard extends StatelessWidget {
     required this.onRefreshSub,
     required this.onPingAllSub,
     required this.onSelectProfile,
-    required this.onDeleteProfile,
-    required this.onEditProfile,
-    required this.onShareProfile,
-    required this.onPingProfile,
     required this.onEditSub,
   });
 
@@ -2348,10 +2418,6 @@ class _CollapsibleSubCard extends StatelessWidget {
   final VoidCallback onPingAllSub;
   final VoidCallback onEditSub;
   final void Function(String id) onSelectProfile;
-  final void Function(String id) onDeleteProfile;
-  final void Function(Profile profile) onEditProfile;
-  final void Function(Profile profile) onShareProfile;
-  final void Function(String id) onPingProfile;
 
   static String _fmtBytes(int b) {
     if (b <= 0) return '0 Б';
@@ -2704,25 +2770,6 @@ class _CollapsibleSubCard extends StatelessWidget {
                 onSelect: () => onSelectProfile('auto:${sub.id}'),
                 onConfigure: () => showBalancerSettingsSheet(context, controller),
               ),
-              const SizedBox(height: 4),
-              for (final p in profiles) ...[
-                _ProfileTile(
-                  profile: p,
-                  selected: p.id == selectedId,
-                  ping: controller.pingOf(p.id),
-                  isPinging: controller.isPinging(p.id),
-                  telemetry: controller.balancerTelemetryOf(p.id),
-                  isBalancerWinner: controller.activeBalancerWinner?.id == p.id,
-                  onSelect: () => onSelectProfile(p.id),
-                  onDelete: () => onDeleteProfile(p.id),
-                  onEdit: () => onEditProfile(p),
-                  onShare: () => onShareProfile(p),
-                  onPing: () => onPingProfile(p.id),
-                  onChangeNetworkScope: (scope) =>
-                      controller.setProfileNetworkScope(p.id, scope),
-                ),
-                const SizedBox(height: 4),
-              ],
             ] else ...[
               const Divider(height: Space.sm),
               Padding(

@@ -25,15 +25,11 @@ class HomeTab extends StatefulWidget {
 }
 
 class _HomeTabState extends State<HomeTab> {
-  Timer? _ticker;
   String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
-    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       AppScope.read(context).startTrafficPolling();
     });
@@ -41,7 +37,6 @@ class _HomeTabState extends State<HomeTab> {
 
   @override
   void dispose() {
-    _ticker?.cancel();
     AppScope.read(context).stopTrafficPolling();
     super.dispose();
   }
@@ -54,7 +49,7 @@ class _HomeTabState extends State<HomeTab> {
             p.name.toLowerCase().contains(q) ||
             p.server.toLowerCase().contains(q) ||
             p.type.toLowerCase().contains(q))
-        .toList();
+        .toList(growable: false);
   }
 
   @override
@@ -70,17 +65,20 @@ class _HomeTabState extends State<HomeTab> {
       mainAxisSize: MainAxisSize.min,
       children: [
         const SizedBox(height: Space.xs),
-        _PowerDial(
-          status: tunnel.status,
-          pausedWifiSsid: tunnel.pausedWifiSsid,
-          downSpeed: controller.downSpeed,
-          upSpeed: controller.upSpeed,
-          pingMs: controller.urlTestPing,
-          onPressed: (controller.canConnect ||
-                  controller.settings.visibleSubscriptions.isNotEmpty ||
-                  tunnel.isPausedByWifi)
-              ? controller.toggleTunnel
-              : null,
+        ValueListenableBuilder<int>(
+          valueListenable: controller.trafficRevision,
+          builder: (context, _, _) => _PowerDial(
+            status: tunnel.status,
+            pausedWifiSsid: tunnel.pausedWifiSsid,
+            downSpeed: controller.downSpeed,
+            upSpeed: controller.upSpeed,
+            pingMs: controller.urlTestPing,
+            onPressed: (controller.canConnect ||
+                    controller.settings.visibleSubscriptions.isNotEmpty ||
+                    tunnel.isPausedByWifi)
+                ? controller.toggleTunnel
+                : null,
+          ),
         ),
         const SizedBox(height: Space.md),
         _StatusLine(
@@ -125,144 +123,11 @@ class _HomeTabState extends State<HomeTab> {
       ],
     );
 
-    final detailsListChildren = <Widget>[
-      if (tunnel.status.isActive) ...[
-        if (!isWideTv) const SizedBox(height: Space.lg),
-        _ExitNodeCard(controller: controller),
-        const SizedBox(height: Space.lg),
-      ] else if (!isWideTv) ...[
-        const SizedBox(height: Space.lg),
-      ],
-      _TrafficRow(controller: controller),
-      const SizedBox(height: Space.lg),
-      _StatsRow(controller: controller),
-      const SizedBox(height: Space.lg),
-      _ProfileCard(controller: controller),
-      if (controller.settings.visibleProfiles.isNotEmpty) ...[
-        const SizedBox(height: Space.lg),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                onChanged: (v) => setState(() => _searchQuery = v),
-                decoration: const InputDecoration(
-                  hintText: 'Поиск сервера или страны...',
-                  prefixIcon: Icon(Icons.search, size: 18),
-                  isDense: true,
-                ),
-              ),
-            ),
-            const SizedBox(width: Space.sm),
-            FilledButton.tonalIcon(
-              onPressed: controller.pingingAll
-                  ? null
-                  : () async {
-                      final best = await controller.autoSelectBestServer();
-                      if (!context.mounted || best == null) return;
-                      final ms = controller.pingOf(best.id);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Выбран лучший сервер: ${best.name} (${ms}ms)',
-                          ),
-                        ),
-                      );
-                    },
-              icon: controller.pingingAll
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: tokens.accent,
-                      ),
-                    )
-                  : const Icon(Icons.network_check_rounded, size: 16),
-              label: const Text('Лучший'),
-            ),
-          ],
-        ),
-        const SizedBox(height: Space.md),
-        if (controller.settings.visibleSubscriptions.isNotEmpty) ...[
-          for (final sub in controller.settings.visibleSubscriptions) ...[
-            _buildSubscriptionSection(context, controller, sub),
-            const SizedBox(height: Space.md),
-          ],
-          if (controller.settings.visibleProfiles
-              .any((p) => p.subscriptionId.isEmpty)) ...[
-            SectionLabel(
-              'Пользовательские серверы',
-              trailing: Text(
-                '${controller.settings.visibleProfiles.where((p) => p.subscriptionId.isEmpty).length}',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-            for (final p in _filter(controller.sortProfiles(
-              controller.settings.visibleProfiles
-                  .where((p) => p.subscriptionId.isEmpty)
-                  .toList(),
-            ))) ...[
-              _DashboardServerTile(
-                profile: p,
-                selected: p.id == controller.settings.selectedProfileId,
-                ping: controller.pingOf(p.id),
-                isPinging: controller.isPinging(p.id),
-                onSelect: () => controller.selectProfile(p.id),
-                onPing: () => controller.pingProfile(p.id),
-              ),
-              const SizedBox(height: Space.sm),
-            ],
-          ],
-        ] else ...[
-          SectionLabel(
-            'Серверы',
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  tooltip: 'Сортировать по пингу',
-                  icon: Icon(
-                    Icons.sort_rounded,
-                    size: 18,
-                    color: controller.sortByPing ? tokens.accent : tokens.muted,
-                  ),
-                  onPressed: controller.toggleSortByPing,
-                ),
-                IconButton(
-                  tooltip: 'Пропинговать все',
-                  icon: controller.pingingAll
-                      ? SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: tokens.accent,
-                          ),
-                        )
-                      : const Icon(Icons.network_ping, size: 18),
-                  onPressed: controller.pingingAll
-                      ? null
-                      : () => controller.pingAllProfiles(),
-                ),
-              ],
-            ),
-          ),
-          for (final p in _filter(
-              controller.sortProfiles(controller.settings.visibleProfiles))) ...[
-            _DashboardServerTile(
-              profile: p,
-              selected: p.id == controller.settings.selectedProfileId,
-              ping: controller.pingOf(p.id),
-              isPinging: controller.isPinging(p.id),
-              onSelect: () => controller.selectProfile(p.id),
-              onPing: () => controller.pingProfile(p.id),
-            ),
-            const SizedBox(height: Space.sm),
-          ],
-        ],
-      ],
-      const SizedBox(height: Space.lg),
-    ];
+    final detailsSlivers = _buildDetailsSlivers(
+      context,
+      controller,
+      isWideTv: isWideTv,
+    );
 
     return SafeArea(
       child: Padding(
@@ -322,19 +187,17 @@ class _HomeTabState extends State<HomeTab> {
                         ),
                         const SizedBox(width: Space.xl),
                         Expanded(
-                          child: SingleChildScrollView(
-                            child: Column(children: detailsListChildren),
+                          child: CustomScrollView(
+                            slivers: detailsSlivers,
                           ),
                         ),
                       ],
                     )
-                  : SingleChildScrollView(
-                      child: Column(
-                        children: [
-                          dialAndModeColumn,
-                          ...detailsListChildren,
-                        ],
-                      ),
+                  : CustomScrollView(
+                      slivers: [
+                        SliverToBoxAdapter(child: dialAndModeColumn),
+                        ...detailsSlivers,
+                      ],
                     ),
             ),
           ],
@@ -343,18 +206,254 @@ class _HomeTabState extends State<HomeTab> {
     );
   }
 
-  Widget _buildSubscriptionSection(
+  List<Widget> _buildDetailsSlivers(
+    BuildContext context,
+    AppController controller, {
+    required bool isWideTv,
+  }) {
+    final tokens = context.tokens;
+    final tunnel = controller.tunnel;
+    final visibleProfiles = controller.settings.visibleProfiles;
+    final visibleSubs = controller.settings.visibleSubscriptions;
+    final selectedId = controller.settings.selectedProfileId;
+
+    final slivers = <Widget>[
+      SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (tunnel.status.isActive) ...[
+              if (!isWideTv) const SizedBox(height: Space.lg),
+              ValueListenableBuilder<int>(
+                valueListenable: controller.trafficRevision,
+                builder: (context, _, _) => _ExitNodeCard(controller: controller),
+              ),
+              const SizedBox(height: Space.lg),
+            ] else if (!isWideTv) ...[
+              const SizedBox(height: Space.lg),
+            ],
+            ValueListenableBuilder<int>(
+              valueListenable: controller.trafficRevision,
+              builder: (context, _, _) => _TrafficRow(controller: controller),
+            ),
+            const SizedBox(height: Space.lg),
+            _StatsRow(controller: controller),
+            const SizedBox(height: Space.lg),
+            _ProfileCard(controller: controller),
+            if (visibleProfiles.isNotEmpty) ...[
+              const SizedBox(height: Space.lg),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      onChanged: (v) => setState(() => _searchQuery = v),
+                      decoration: const InputDecoration(
+                        hintText: 'Поиск сервера или страны...',
+                        prefixIcon: Icon(Icons.search, size: 18),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: Space.sm),
+                  FilledButton.tonalIcon(
+                    onPressed: controller.pingingAll
+                        ? null
+                        : () async {
+                            final best = await controller.autoSelectBestServer();
+                            if (!context.mounted || best == null) return;
+                            final ms = controller.pingOf(best.id);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Выбран лучший сервер: ${best.name} (${ms}ms)',
+                                ),
+                              ),
+                            );
+                          },
+                    icon: controller.pingingAll
+                        ? SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: tokens.accent,
+                            ),
+                          )
+                        : const Icon(Icons.network_check_rounded, size: 16),
+                    label: const Text('Лучший'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: Space.md),
+            ],
+          ],
+        ),
+      ),
+    ];
+
+    if (visibleProfiles.isNotEmpty) {
+      if (visibleSubs.isNotEmpty) {
+        for (final sub in visibleSubs) {
+          final isCollapsed =
+              controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
+          final rawSubProfiles = controller.settings.profilesForSubscription(sub.id);
+          final subProfiles = isCollapsed
+              ? rawSubProfiles
+              : _filter(controller.sortProfiles(rawSubProfiles));
+
+          slivers.add(
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: (!isCollapsed && subProfiles.isNotEmpty) ? 4 : Space.md,
+                ),
+                child: _buildSubscriptionHeaderCard(
+                  context,
+                  controller,
+                  sub,
+                  rawCount: rawSubProfiles.length,
+                  hasVisibleServers: subProfiles.isNotEmpty,
+                  isCollapsed: isCollapsed,
+                ),
+              ),
+            ),
+          );
+
+          if (!isCollapsed && subProfiles.isNotEmpty) {
+            slivers.add(
+              SliverList.builder(
+                itemCount: subProfiles.length,
+                itemBuilder: (context, index) {
+                  final p = subProfiles[index];
+                  return Padding(
+                    key: ValueKey<String>('home-sub-${sub.id}-${p.id}'),
+                    padding: EdgeInsets.only(
+                      bottom: index == subProfiles.length - 1 ? Space.md : 4,
+                    ),
+                    child: _DashboardServerTile(
+                      profile: p,
+                      controller: controller,
+                      selected: p.id == selectedId,
+                      onSelect: () => controller.selectProfile(p.id),
+                      onPing: () => controller.pingProfile(p.id),
+                    ),
+                  );
+                },
+              ),
+            );
+          }
+        }
+
+        final rawCustom = controller.settings.profilesForSubscription('');
+        if (rawCustom.isNotEmpty) {
+          final customProfiles = _filter(controller.sortProfiles(rawCustom));
+          slivers.add(
+            SliverToBoxAdapter(
+              child: SectionLabel(
+                'Пользовательские серверы',
+                trailing: Text(
+                  '${rawCustom.length}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ),
+          );
+          slivers.add(
+            SliverList.builder(
+              itemCount: customProfiles.length,
+              itemBuilder: (context, index) {
+                final p = customProfiles[index];
+                return Padding(
+                  key: ValueKey<String>('home-custom-${p.id}'),
+                  padding: const EdgeInsets.only(bottom: Space.sm),
+                  child: _DashboardServerTile(
+                    profile: p,
+                    controller: controller,
+                    selected: p.id == selectedId,
+                    onSelect: () => controller.selectProfile(p.id),
+                    onPing: () => controller.pingProfile(p.id),
+                  ),
+                );
+              },
+            ),
+          );
+        }
+      } else {
+        final sortedAll = _filter(controller.sortProfiles(visibleProfiles));
+        slivers.add(
+          SliverToBoxAdapter(
+            child: SectionLabel(
+              'Серверы',
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Сортировать по пингу',
+                    icon: Icon(
+                      Icons.sort_rounded,
+                      size: 18,
+                      color: controller.sortByPing ? tokens.accent : tokens.muted,
+                    ),
+                    onPressed: controller.toggleSortByPing,
+                  ),
+                  IconButton(
+                    tooltip: 'Пропинговать все',
+                    icon: controller.pingingAll
+                        ? SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: tokens.accent,
+                            ),
+                          )
+                        : const Icon(Icons.network_ping, size: 18),
+                    onPressed: controller.pingingAll
+                        ? null
+                        : () => controller.pingAllProfiles(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+        slivers.add(
+          SliverList.builder(
+            itemCount: sortedAll.length,
+            itemBuilder: (context, index) {
+              final p = sortedAll[index];
+              return Padding(
+                key: ValueKey<String>('home-srv-${p.id}'),
+                padding: const EdgeInsets.only(bottom: Space.sm),
+                child: _DashboardServerTile(
+                  profile: p,
+                  controller: controller,
+                  selected: p.id == selectedId,
+                  onSelect: () => controller.selectProfile(p.id),
+                  onPing: () => controller.pingProfile(p.id),
+                ),
+              );
+            },
+          ),
+        );
+      }
+    }
+
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: Space.lg)));
+    return slivers;
+  }
+
+  Widget _buildSubscriptionHeaderCard(
     BuildContext context,
     AppController controller,
-    SubscriptionEntry sub,
-  ) {
+    SubscriptionEntry sub, {
+    required int rawCount,
+    required bool hasVisibleServers,
+    required bool isCollapsed,
+  }) {
     final tokens = context.tokens;
     final title =
         sub.name.isNotEmpty ? sub.name : (Uri.tryParse(sub.url)?.host ?? sub.url);
-    final isCollapsed = controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
-    final subProfiles = _filter(controller.sortProfiles(
-      controller.settings.profiles.where((p) => p.subscriptionId == sub.id).toList(),
-    ));
 
     return HairlineCard(
       padding: const EdgeInsets.all(Space.sm),
@@ -386,9 +485,9 @@ class _HomeTabState extends State<HomeTab> {
                               ),
                         ),
                         Text(
-                          subProfiles.isEmpty
+                          rawCount == 0
                               ? 'нет серверов'
-                              : '${subProfiles.length} серверов · ${isCollapsed ? "развернуть" : "свернуть"}',
+                              : '$rawCount серверов · ${isCollapsed ? "развернуть" : "свернуть"}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -461,7 +560,7 @@ class _HomeTabState extends State<HomeTab> {
             ),
           ),
           if (!isCollapsed) ...[
-            if (subProfiles.isNotEmpty) ...[
+            if (hasVisibleServers) ...[
               const Divider(height: Space.sm),
               HairlineCard(
                 onTap: () => controller.selectProfile('auto:${sub.id}'),
@@ -530,19 +629,7 @@ class _HomeTabState extends State<HomeTab> {
                   ],
                 ),
               ),
-              const SizedBox(height: 4),
-              for (final p in subProfiles) ...[
-                _DashboardServerTile(
-                  profile: p,
-                  selected: p.id == controller.settings.selectedProfileId,
-                  ping: controller.pingOf(p.id),
-                  isPinging: controller.isPinging(p.id),
-                  onSelect: () => controller.selectProfile(p.id),
-                  onPing: () => controller.pingProfile(p.id),
-                ),
-                const SizedBox(height: 4),
-              ],
-            ] else ...[
+            ] else if (rawCount == 0) ...[
               const Divider(height: Space.sm),
               Padding(
                 padding: const EdgeInsets.all(Space.md),
@@ -618,6 +705,8 @@ class _PowerDial extends StatefulWidget {
 class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
   late final AnimationController _loopController;
   late final AnimationController _revealController;
+  late final CurvedAnimation _revealCurve;
+  late final Listenable _dialRepaint;
   bool _pressed = false;
   bool _focused = false;
 
@@ -636,6 +725,11 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 650),
       value: widget.status == VpnStatus.connected ? 1.0 : 0.0,
     );
+    _revealCurve = CurvedAnimation(
+      parent: _revealController,
+      curve: const Cubic(0.22, 1.0, 0.36, 1.0),
+    );
+    _dialRepaint = Listenable.merge([_loopController, _revealController]);
   }
 
   @override
@@ -667,6 +761,7 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _revealCurve.dispose();
     _loopController.dispose();
     _revealController.dispose();
     super.dispose();
@@ -721,131 +816,125 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
         ? _shortSpeed(widget.downSpeed + widget.upSpeed)
         : '';
 
-    return FocusableActionDetector(
-      autofocus: true,
-      enabled: widget.onPressed != null,
-      onShowFocusHighlight: (f) {
-        if (_focused != f) setState(() => _focused = f);
-      },
-      actions: <Type, Action<Intent>>{
-        ActivateIntent: CallbackAction<ActivateIntent>(
-          onInvoke: (_) {
-            HapticFeedback.mediumImpact();
-            widget.onPressed?.call();
-            return null;
-          },
-        ),
-      },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: widget.onPressed == null
-            ? null
-            : (_) {
-                HapticFeedback.lightImpact();
-                setState(() => _pressed = true);
-              },
-        onTapCancel: () {
-          if (_pressed) setState(() => _pressed = false);
+    return RepaintBoundary(
+      child: FocusableActionDetector(
+        autofocus: true,
+        enabled: widget.onPressed != null,
+        onShowFocusHighlight: (f) {
+          if (_focused != f) setState(() => _focused = f);
         },
-        onTapUp: widget.onPressed == null
-            ? null
-            : (_) {
-                setState(() => _pressed = false);
-                HapticFeedback.mediumImpact();
-                widget.onPressed?.call();
-              },
-        child: AnimatedScale(
-          scale: _pressed ? 0.97 : (_focused ? 1.02 : 1.0),
-          duration: Duration(milliseconds: _pressed ? 100 : 180),
-          curve: const Cubic(0.22, 1.0, 0.36, 1.0),
-          child: Container(
-            width: 240,
-            height: 240,
-            decoration: _focused
-                ? BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: tokens.accent.withValues(alpha: 0.85),
-                      width: 2.0,
-                    ),
-                  )
-                : null,
-            child: AnimatedBuilder(
-              animation: Listenable.merge([_loopController, _revealController]),
-              builder: (context, child) {
-                return CustomPaint(
-                  painter: _TachyonDialPainter(
-                    status: widget.status,
-                    phase: _loopController.value,
-                    reveal: CurvedAnimation(
-                      parent: _revealController,
-                      curve: const Cubic(0.22, 1.0, 0.36, 1.0),
-                    ).value,
-                    primaryColor: primary,
-                    secondaryColor: secondary,
-                    surfaceColor: tokens.raised,
-                    lineColor: tokens.line,
-                    inkColor: tokens.ink,
-                    downSpeed: widget.downSpeed,
-                  ),
-                  child: child,
-                );
-              },
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 220),
-                      child: TachyonBoltIcon(
-                        key: ValueKey<VpnStatus>(widget.status),
-                        size: 46,
-                        primaryColor: tokens.ink,
-                        secondaryColor: widget.status == VpnStatus.disconnected
-                            ? tokens.accent
-                            : primary,
+        actions: <Type, Action<Intent>>{
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              HapticFeedback.mediumImpact();
+              widget.onPressed?.call();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: widget.onPressed == null
+              ? null
+              : (_) {
+                  HapticFeedback.lightImpact();
+                  setState(() => _pressed = true);
+                },
+          onTapCancel: () {
+            if (_pressed) setState(() => _pressed = false);
+          },
+          onTapUp: widget.onPressed == null
+              ? null
+              : (_) {
+                  setState(() => _pressed = false);
+                  HapticFeedback.mediumImpact();
+                  widget.onPressed?.call();
+                },
+          child: AnimatedScale(
+            scale: _pressed ? 0.97 : (_focused ? 1.02 : 1.0),
+            duration: Duration(milliseconds: _pressed ? 100 : 180),
+            curve: const Cubic(0.22, 1.0, 0.36, 1.0),
+            child: Container(
+              width: 240,
+              height: 240,
+              decoration: _focused
+                  ? BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: tokens.accent.withValues(alpha: 0.85),
+                        width: 2.0,
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      label,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 0,
-                        color: widget.status == VpnStatus.disconnected
-                            ? tokens.muted
-                            : primary,
-                      ),
-                    ),
-                    if (liveSpeed.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        liveSpeed,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w500,
-                          fontFamily: 'monospace',
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                          color: tokens.ink,
+                    )
+                  : null,
+              child: CustomPaint(
+                painter: _TachyonDialPainter(
+                  repaint: _dialRepaint,
+                  status: widget.status,
+                  phaseAnimation: _loopController,
+                  revealAnimation: _revealCurve,
+                  primaryColor: primary,
+                  secondaryColor: secondary,
+                  surfaceColor: tokens.raised,
+                  lineColor: tokens.line,
+                  inkColor: tokens.ink,
+                  downSpeed: widget.downSpeed,
+                ),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        child: TachyonBoltIcon(
+                          key: ValueKey<VpnStatus>(widget.status),
+                          size: 46,
+                          primaryColor: tokens.ink,
+                          secondaryColor: widget.status == VpnStatus.disconnected
+                              ? tokens.accent
+                              : primary,
                         ),
                       ),
-                    ] else if (widget.status == VpnStatus.connected &&
-                        widget.pingMs != null &&
-                        widget.pingMs! > 0) ...[
-                      const SizedBox(height: 4),
+                      const SizedBox(height: 8),
                       Text(
-                        '${widget.pingMs} мс',
+                        label,
                         style: TextStyle(
-                          fontSize: 11.5,
+                          fontSize: 12,
                           fontWeight: FontWeight.w500,
-                          fontFamily: 'monospace',
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                          color: tokens.muted,
+                          letterSpacing: 0,
+                          color: widget.status == VpnStatus.disconnected
+                              ? tokens.muted
+                              : primary,
                         ),
                       ),
+                      if (liveSpeed.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          liveSpeed,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            fontFamily: 'monospace',
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                            color: tokens.ink,
+                          ),
+                        ),
+                      ] else if (widget.status == VpnStatus.connected &&
+                          widget.pingMs != null &&
+                          widget.pingMs! > 0) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${widget.pingMs} мс',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w500,
+                            fontFamily: 'monospace',
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                            color: tokens.muted,
+                          ),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -858,20 +947,21 @@ class _PowerDialState extends State<_PowerDial> with TickerProviderStateMixin {
 
 class _TachyonDialPainter extends CustomPainter {
   _TachyonDialPainter({
+    required Listenable repaint,
     required this.status,
-    required this.phase,
-    required this.reveal,
+    required this.phaseAnimation,
+    required this.revealAnimation,
     required this.primaryColor,
     required this.secondaryColor,
     required this.surfaceColor,
     required this.lineColor,
     required this.inkColor,
     required this.downSpeed,
-  });
+  }) : super(repaint: repaint);
 
   final VpnStatus status;
-  final double phase;
-  final double reveal;
+  final Animation<double> phaseAnimation;
+  final Animation<double> revealAnimation;
   final Color primaryColor;
   final Color secondaryColor;
   final Color surfaceColor;
@@ -883,6 +973,8 @@ class _TachyonDialPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final phase = phaseAnimation.value;
+    final reveal = revealAnimation.value;
     final center = Offset(size.width / 2, size.height / 2);
     final maxR = math.min(size.width, size.height) / 2;
     final dialR = maxR * 0.84;
@@ -1015,11 +1107,11 @@ class _TachyonDialPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _TachyonDialPainter old) {
-    return old.phase != phase ||
-        old.reveal != reveal ||
-        old.status != status ||
+    return old.status != status ||
         old.downSpeed != downSpeed ||
-        old.primaryColor != primaryColor;
+        old.primaryColor != primaryColor ||
+        old.phaseAnimation != phaseAnimation ||
+        old.revealAnimation != revealAnimation;
   }
 }
 
@@ -1194,35 +1286,89 @@ class _StatusLine extends StatelessWidget {
       );
     }
 
-    final duration = tunnel.connectedFor;
-    final elapsed = duration == Duration.zero
-        ? '—'
-        : '${duration.inHours.toString().padLeft(2, '0')}:'
-            '${(duration.inMinutes % 60).toString().padLeft(2, '0')}:'
-            '${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
-
     final displayName = tunnel.serverName.isNotEmpty
         ? tunnel.serverName
         : (fallbackServerName.isNotEmpty ? fallbackServerName : 'сервер не выбран');
 
     return Column(
       children: [
-        Text(
-          elapsed,
-          style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.2,
-            color: tokens.ink,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
+        _SessionElapsedText(tunnel: tunnel),
         const SizedBox(height: Space.xs),
         Text(
           displayName,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
       ],
+    );
+  }
+}
+
+/// Отдельный виджет таймера сессии: обновляет только текстовую метку раз в секунду.
+class _SessionElapsedText extends StatefulWidget {
+  const _SessionElapsedText({required this.tunnel});
+
+  final TunnelState tunnel;
+
+  @override
+  State<_SessionElapsedText> createState() => _SessionElapsedTextState();
+}
+
+class _SessionElapsedTextState extends State<_SessionElapsedText> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SessionElapsedText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tunnel.startedAt != widget.tunnel.startedAt ||
+        oldWidget.tunnel.status != widget.tunnel.status) {
+      _syncTimer();
+    }
+  }
+
+  void _syncTimer() {
+    final shouldTick = widget.tunnel.startedAt != null &&
+        widget.tunnel.status == VpnStatus.connected;
+    if (shouldTick) {
+      _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      _timer?.cancel();
+      _timer = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final duration = widget.tunnel.connectedFor;
+    final elapsed = duration == Duration.zero
+        ? '—'
+        : '${duration.inHours.toString().padLeft(2, '0')}:'
+            '${(duration.inMinutes % 60).toString().padLeft(2, '0')}:'
+            '${(duration.inSeconds % 60).toString().padLeft(2, '0')}';
+
+    return Text(
+      elapsed,
+      style: TextStyle(
+        fontSize: 30,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 1.2,
+        color: tokens.ink,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
     );
   }
 }
@@ -1906,19 +2052,17 @@ class _QuickRoutingBar extends StatelessWidget {
 class _DashboardServerTile extends StatelessWidget {
   const _DashboardServerTile({
     required this.profile,
+    required this.controller,
     required this.selected,
     required this.onSelect,
     required this.onPing,
-    this.ping,
-    this.isPinging = false,
   });
 
   final Profile profile;
+  final AppController controller;
   final bool selected;
   final VoidCallback onSelect;
   final VoidCallback onPing;
-  final int? ping;
-  final bool isPinging;
 
   @override
   Widget build(BuildContext context) {
@@ -1967,43 +2111,50 @@ class _DashboardServerTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Space.sm),
-          FocusableTap(
-            borderRadius: BorderRadius.circular(6),
-            onTap: onPing,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: tokens.raised,
+          ValueListenableBuilder<int>(
+            valueListenable: controller.serverRevisionOf(profile.id),
+            builder: (context, _, _) {
+              final isPinging = controller.isPinging(profile.id);
+              final ping = controller.pingOf(profile.id);
+              return FocusableTap(
                 borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: tokens.line),
-              ),
-              child: isPinging
-                  ? SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.5,
-                        color: tokens.accent,
-                      ),
-                    )
-                  : ping == null
-                      ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
-                      : Text(
-                          ping! < 0 ? '✗' : '${ping}ms',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            fontFamily: 'monospace',
-                            color: ping! < 0
-                                ? tokens.danger
-                                : ping! < 150
-                                    ? tokens.success
-                                    : ping! < 400
-                                        ? tokens.warning
-                                        : tokens.danger,
+                onTap: onPing,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: tokens.raised,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: tokens.line),
+                  ),
+                  child: isPinging
+                      ? SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: tokens.accent,
                           ),
-                        ),
-            ),
+                        )
+                      : ping == null
+                          ? Icon(Icons.network_ping, size: 14, color: tokens.faint)
+                          : Text(
+                              ping < 0 ? '✗' : '${ping}ms',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                fontFamily: 'monospace',
+                                color: ping < 0
+                                    ? tokens.danger
+                                    : ping < 150
+                                        ? tokens.success
+                                        : ping < 400
+                                            ? tokens.warning
+                                            : tokens.danger,
+                              ),
+                            ),
+                ),
+              );
+            },
           ),
         ],
       ),

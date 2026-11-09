@@ -16,27 +16,106 @@ class SettingsStore {
   final String directory;
 
   File get _file => File('$directory/tachyon-settings.json');
+  File get _tmpFile => File('$directory/tachyon-settings.json.tmp');
+  File get _wifiFile => File('$directory/tachyon-wifi.json');
+  File get _wifiTmpFile => File('$directory/tachyon-wifi.json.tmp');
+
+  Future<void> _writeChain = Future<void>.value();
+  Timer? _debounceTimer;
+  AppSettings? _pendingSettings;
+  bool? _lastSavedHomeWifiMode;
+  String? _lastSavedTrustedWifiJson;
 
   /// Читает настройки; при отсутствии файла — значения по умолчанию.
   Future<AppSettings> load() async {
     try {
-      if (!await _file.exists()) return const AppSettings();
-      final raw = await _file.readAsString();
-      return AppSettings.fromJson(
-        jsonDecode(raw) as Map<String, dynamic>,
-      );
+      if (await _file.exists()) {
+        final raw = await _file.readAsString();
+        if (raw.trim().isNotEmpty) {
+          final parsed = AppSettings.fromJson(
+            jsonDecode(raw) as Map<String, dynamic>,
+          );
+          _syncWifiFileIfNeeded(parsed);
+          return parsed;
+        }
+      }
+      if (await _tmpFile.exists()) {
+        final raw = await _tmpFile.readAsString();
+        if (raw.trim().isNotEmpty) {
+          return AppSettings.fromJson(
+            jsonDecode(raw) as Map<String, dynamic>,
+          );
+        }
+      }
+      return const AppSettings();
     } catch (_) {
       // Повреждённый файл не должен мешать запуску: начинаем с умолчаний.
       return const AppSettings();
     }
   }
 
-  /// Сохраняет настройки.
-  Future<void> save(AppSettings settings) async {
-    await _file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(settings.toJson()),
-      flush: true,
-    );
+  /// Отложенное сохранение для частых UI-переключений (например, сворачивание групп).
+  void saveDebounced(
+    AppSettings settings, {
+    Duration delay = const Duration(milliseconds: 350),
+  }) {
+    _pendingSettings = settings;
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(delay, () {
+      final pending = _pendingSettings;
+      _pendingSettings = null;
+      if (pending != null) {
+        unawaited(save(pending));
+      }
+    });
+  }
+
+  /// Сохраняет настройки последовательно и атомарно через временный файл.
+  Future<void> save(AppSettings settings) {
+    _debounceTimer?.cancel();
+    _pendingSettings = null;
+    _writeChain = _writeChain.then((_) => _writeAtomically(settings)).catchError((_) {});
+    return _writeChain;
+  }
+
+  Future<void> _writeAtomically(AppSettings settings) async {
+    if (directory.isEmpty) return;
+    final encoded = jsonEncode(settings.toJson());
+    await _tmpFile.parent.create(recursive: true);
+    await _tmpFile.writeAsString(encoded, flush: true);
+    try {
+      await _tmpFile.rename(_file.path);
+    } catch (_) {
+      await _file.writeAsString(encoded, flush: true);
+      try {
+        await _tmpFile.delete();
+      } catch (_) {}
+    }
+    await _syncWifiFileIfNeeded(settings);
+  }
+
+  Future<void> _syncWifiFileIfNeeded(AppSettings settings) async {
+    if (directory.isEmpty) return;
+    final trustedJson = jsonEncode(settings.trustedWifiSsids);
+    if (_lastSavedHomeWifiMode == settings.homeWifiMode &&
+        _lastSavedTrustedWifiJson == trustedJson &&
+        _wifiFile.existsSync()) {
+      return;
+    }
+    _lastSavedHomeWifiMode = settings.homeWifiMode;
+    _lastSavedTrustedWifiJson = trustedJson;
+    final payload = jsonEncode({
+      'homeWifiMode': settings.homeWifiMode,
+      'trustedWifiSsids': settings.trustedWifiSsids,
+    });
+    try {
+      await _wifiTmpFile.writeAsString(payload, flush: true);
+      await _wifiTmpFile.rename(_wifiFile.path);
+    } catch (_) {
+      try {
+        await _wifiFile.writeAsString(payload, flush: true);
+      } catch (_) {}
+    }
   }
 }
 
@@ -164,11 +243,65 @@ class AppSettings {
   static bool isFreeSubId(String subId) =>
       subId == 'free-warp' || subId == 'free-shard';
 
-  List<Profile> get visibleProfiles =>
-      profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
+  static final Expando<List<Profile>> _visibleProfilesCache =
+      Expando<List<Profile>>('visibleProfiles');
+  static final Expando<Map<String, List<Profile>>> _groupedProfilesCache =
+      Expando<Map<String, List<Profile>>>('groupedProfiles');
+  static final Expando<List<SubscriptionEntry>> _visibleSubsCache =
+      Expando<List<SubscriptionEntry>>('visibleSubscriptions');
 
-  List<SubscriptionEntry> get visibleSubscriptions =>
-      subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
+  List<Profile> get visibleProfiles {
+    if (profiles.isEmpty) return const [];
+    try {
+      final cached = _visibleProfilesCache[profiles];
+      if (cached != null) return cached;
+      final computed =
+          profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
+      _visibleProfilesCache[profiles] = computed;
+      return computed;
+    } catch (_) {
+      return profiles.where((p) => !isFreeSubId(p.subscriptionId)).toList(growable: false);
+    }
+  }
+
+  /// Предварительно сгруппированные по `subscriptionId` видимые профили (`''` — пользовательские).
+  Map<String, List<Profile>> get profilesBySubscription {
+    final vis = visibleProfiles;
+    if (vis.isEmpty) return const {};
+    try {
+      final cached = _groupedProfilesCache[vis];
+      if (cached != null) return cached;
+      final map = <String, List<Profile>>{};
+      for (final p in vis) {
+        (map[p.subscriptionId] ??= <Profile>[]).add(p);
+      }
+      _groupedProfilesCache[vis] = map;
+      return map;
+    } catch (_) {
+      final map = <String, List<Profile>>{};
+      for (final p in vis) {
+        (map[p.subscriptionId] ??= <Profile>[]).add(p);
+      }
+      return map;
+    }
+  }
+
+  List<Profile> profilesForSubscription(String subId) =>
+      profilesBySubscription[subId] ?? const [];
+
+  List<SubscriptionEntry> get visibleSubscriptions {
+    if (subscriptions.isEmpty) return const [];
+    try {
+      final cached = _visibleSubsCache[subscriptions];
+      if (cached != null) return cached;
+      final computed =
+          subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
+      _visibleSubsCache[subscriptions] = computed;
+      return computed;
+    } catch (_) {
+      return subscriptions.where((s) => !isFreeSubId(s.id)).toList(growable: false);
+    }
+  }
 
   Profile? get detourProfile {
     if (detourProfileId.isEmpty) return null;

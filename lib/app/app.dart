@@ -41,10 +41,11 @@ class TachyonApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return AppScope(
       controller: controller,
-      child: AnimatedBuilder(
-        animation: controller,
-        builder: (context, _) {
-          final isDark = controller.settings.themeMode != 'light';
+      child: ValueListenableBuilder<String>(
+        valueListenable: controller.themeModeNotifier,
+        child: const RootShell(),
+        builder: (context, themeMode, home) {
+          final isDark = themeMode != 'light';
           return MaterialApp(
             title: 'Tachyon',
             debugShowCheckedModeBanner: false,
@@ -61,7 +62,7 @@ class TachyonApp extends StatelessWidget {
               const SingleActivator(LogicalKeyboardKey.enter):
                   const ActivateIntent(),
             },
-            home: const RootShell(),
+            home: home,
           );
         },
       ),

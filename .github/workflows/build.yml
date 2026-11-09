@@ -41,14 +41,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          latest_tag=$(gh api 'repos/Dushnilin/tachyon-core/releases?per_page=10' --jq '
+          latest_tag=$(gh api 'repos/Dushnilin/tachyon-core/releases?per_page=10' | jq -r '
             [ .[] | select(
               ([.assets[].name] | index("libtachyon-arm64-v8a.so")) != null and
               ([.assets[].name] | index("libtachyon-armeabi-v7a.so")) != null and
               ([.assets[].name] | index("libtachyon-x86_64.so")) != null and
-              ([.assets[].name[] | select(test("tachyon-core-ios-xcframework"))] | length > 0)
+              ([.assets[].name | select(test("tachyon-core-ios-xcframework"))] | length > 0)
             ) ][0].tag_name // empty
-          ' 2>/dev/null | tr -d '\r' || true)
+          ' | tr -d '\r' || true)
           if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
             latest_tag=$(gh api repos/Dushnilin/tachyon-core/releases/latest --jq '.tag_name' 2>/dev/null | tr -d '\r' || true)
           fi

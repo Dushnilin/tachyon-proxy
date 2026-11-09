@@ -31,20 +31,17 @@ class _HomeTabState extends State<HomeTab> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       AppScope.read(context).startTrafficPolling();
     });
   }
 
-  @override
-  void dispose() {
-    AppScope.read(context).stopTrafficPolling();
-    super.dispose();
-  }
-
-  List<Profile> _filter(List<Profile> items) {
+  List<Profile> _filter(List<Profile> items, AppController controller) {
+    final allowed = items.where(controller.isProfileAllowedByFilters).toList(growable: false);
+    final base = allowed.isNotEmpty ? allowed : items;
     final q = _searchQuery.trim().toLowerCase();
-    if (q.isEmpty) return items;
-    return items
+    if (q.isEmpty) return base;
+    return base
         .where((p) =>
             p.name.toLowerCase().contains(q) ||
             p.server.toLowerCase().contains(q) ||
@@ -299,7 +296,7 @@ class _HomeTabState extends State<HomeTab> {
           final rawSubProfiles = controller.settings.profilesForSubscription(sub.id);
           final subProfiles = isCollapsed
               ? rawSubProfiles
-              : _filter(controller.sortProfiles(rawSubProfiles));
+              : _filter(controller.sortProfiles(rawSubProfiles), controller);
 
           slivers.add(
             SliverToBoxAdapter(
@@ -346,7 +343,7 @@ class _HomeTabState extends State<HomeTab> {
 
         final rawCustom = controller.settings.profilesForSubscription('');
         if (rawCustom.isNotEmpty) {
-          final customProfiles = _filter(controller.sortProfiles(rawCustom));
+          final customProfiles = _filter(controller.sortProfiles(rawCustom), controller);
           slivers.add(
             SliverToBoxAdapter(
               child: SectionLabel(
@@ -379,7 +376,7 @@ class _HomeTabState extends State<HomeTab> {
           );
         }
       } else {
-        final sortedAll = _filter(controller.sortProfiles(visibleProfiles));
+        final sortedAll = _filter(controller.sortProfiles(visibleProfiles), controller);
         slivers.add(
           SliverToBoxAdapter(
             child: SectionLabel(

@@ -839,6 +839,208 @@ PersistentKeepalive = 15-30
       expect(restored.isFptnToken, isTrue);
       expect(restored.selectedServerKeys, ['198.51.100.1:443']);
     });
+
+    test('Фильтры исключения стран, протоколов и пользовательский URL балансировщика применяются корректно', () {
+      const nlVless = Profile(
+        id: 'n1',
+        name: '🇳🇱 Нидерланды #1',
+        type: 'vless',
+        server: 'nl.example.com',
+        port: 443,
+        subscriptionId: 'sub1',
+      );
+      const ruVless = Profile(
+        id: 'n2',
+        name: '🇷🇺 Москва #1',
+        type: 'vless',
+        server: 'ru.example.com',
+        port: 443,
+        subscriptionId: 'sub1',
+      );
+      const deHy2 = Profile(
+        id: 'n3',
+        name: '🇩🇪 Франкфурт HY2',
+        type: 'hysteria2',
+        server: 'de.example.com',
+        port: 443,
+        subscriptionId: 'sub1',
+      );
+
+      expect(
+        BalancerSettings.matchesFilter(
+          ruVless,
+          excludedCountries: const ['RU'],
+          excludedProtocols: const [],
+        ),
+        isFalse,
+      );
+      expect(
+        BalancerSettings.matchesFilter(
+          deHy2,
+          excludedCountries: const [],
+          excludedProtocols: const ['hysteria2'],
+        ),
+        isFalse,
+      );
+      expect(
+        BalancerSettings.matchesFilter(
+          nlVless,
+          excludedCountries: const ['RU'],
+          excludedProtocols: const ['hysteria2'],
+        ),
+        isTrue,
+      );
+
+      const autoProfile = Profile(
+        id: 'auto:sub1',
+        name: 'Auto Sub1',
+        type: 'urltest',
+        server: 'auto',
+        port: 0,
+        subscriptionId: 'sub1',
+      );
+      const subs = [
+        SubscriptionEntry(
+          id: 'sub1',
+          url: 'https://example.com/sub',
+          excludedCountries: ['RU'],
+        ),
+      ];
+      const balancer = BalancerSettings(
+        url: 'https://cp.cloudflare.com/generate_204',
+        excludedProtocols: ['hysteria2'],
+      );
+
+      final candidates = RuntimeConfig.resolveAutoCandidates(
+        autoProfile,
+        const [nlVless, ruVless, deHy2],
+        subscriptions: subs,
+        balancer: balancer,
+      );
+      expect(candidates.map((p) => p.id).toList(), ['n1']);
+
+      final cfg = RuntimeConfig(
+        profile: autoProfile,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        extraProfiles: const [nlVless, ruVless, deHy2],
+        allSubscriptions: subs,
+        balancer: balancer,
+      );
+
+      final json = cfg.toJson();
+      final outbounds = (json['outbounds'] as List).cast<Map<String, dynamic>>();
+      final proxyOut = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      expect(proxyOut['url'], 'https://cp.cloudflare.com/generate_204');
+      expect(proxyOut['outbounds'], ['auto-srv-0']);
+    });
+
+    test('Сервис ru -> direct добавляет package_name российских приложений и оба списка ru_domains / ru_only_inside', () {
+      final tmpDir = Directory.systemTemp.createTempSync('tachyon_ru_test_');
+      try {
+        final listsDir = Directory('${tmpDir.path}/lists')..createSync(recursive: true);
+        File('${listsDir.path}/ru_domains.trs').writeAsBytesSync([1, 2, 3, 4]);
+        File('${listsDir.path}/ru_only_inside.trs').writeAsBytesSync([1, 2, 3, 4]);
+
+        final cfg = RuntimeConfig(
+          profile: _vlessProfile(),
+          routingMode: RoutingMode.rules,
+          dns: const DnsSettings(fakeIp: true),
+          ruleSets: const [],
+          filesDir: tmpDir.path,
+          serviceRoutes: const {'ru': 'direct'},
+        ).toJson();
+
+        final ruleSets = ((cfg['route'] as Map)['rule_set'] as List).cast<Map<String, dynamic>>();
+        expect(ruleSets.any((rs) => rs['tag'] == 'ru_domains'), isTrue);
+        expect(ruleSets.any((rs) => rs['tag'] == 'ru_only_inside'), isTrue);
+
+        final routeRules = ((cfg['route'] as Map)['rules'] as List).cast<Map<String, dynamic>>();
+        expect(
+          routeRules.any((r) =>
+              r['outbound'] == 'direct' &&
+              ((r['package_name'] as List?)?.contains('ru.sberbankmobile') ?? false)),
+        isTrue,
+        );
+      } finally {
+        tmpDir.deleteSync(recursive: true);
+      }
+    });
+
+    test('XHTTP sc_max_each_post_bytes и диапазоны с плавающей точкой ("1000000.0") нормализуются в целые строки', () {
+      final tr = normalizeXhttpTransport({
+        'type': 'xhttp',
+        'sc_max_each_post_bytes': '1000000.0',
+        'sc_min_posts_interval_ms': '30.0',
+        'x_padding_bytes': '100.0-500.0',
+        'sc_stream_up_server_secs': [20.0, 80.0],
+        'sc_max_concurrent_posts': '4.0',
+      });
+      expect(tr['sc_max_each_post_bytes'], '1000000');
+      expect(tr['sc_min_posts_interval_ms'], '30');
+      expect(tr['x_padding_bytes'], '100-500');
+      expect(tr['sc_stream_up_server_secs'], '20-80');
+      expect(tr['sc_max_concurrent_posts'], 4);
+    });
+
+    test('Глобальный балансировщик auto:all строго разделяет подписки по networkScope (Wi-Fi vs LTE) и читает оба ключа subscriptionId', () {
+      final fptnProfile = Profile.fromJson({
+        'id': 'fptn-fi-1',
+        'name': 'Russia-Premium (Finland)',
+        'type': 'fptn',
+        'server': '198.51.100.10',
+        'port': 443,
+        'subscription_id': 'sub_fptn',
+      });
+      expect(fptnProfile.subscriptionId, 'sub_fptn');
+
+      const wifiProfile = Profile(
+        id: 'wifi-nl-1',
+        name: '🇳🇱 Netherlands Wi-Fi',
+        type: 'vless',
+        server: '203.0.113.20',
+        port: 443,
+        subscriptionId: 'sub_wifi',
+      );
+      const autoAll = Profile(
+        id: 'auto:all',
+        name: 'Global Auto',
+        type: 'urltest',
+        server: 'auto',
+        port: 0,
+      );
+      const subs = [
+        SubscriptionEntry(
+          id: 'sub_fptn',
+          url: 'fptn://FPTN',
+          name: 'FPTN',
+          networkScope: 'cellular',
+        ),
+        SubscriptionEntry(
+          id: 'sub_wifi',
+          url: 'https://example.com/sub',
+          name: 'Main Sub',
+          networkScope: 'wifi',
+        ),
+      ];
+
+      final wifiCandidates = RuntimeConfig.resolveAutoCandidates(
+        autoAll,
+        [fptnProfile, wifiProfile],
+        activeNetworkType: 'wifi',
+        subscriptions: subs,
+      );
+      expect(wifiCandidates.map((p) => p.id).toList(), ['wifi-nl-1']);
+
+      final lteCandidates = RuntimeConfig.resolveAutoCandidates(
+        autoAll,
+        [fptnProfile, wifiProfile],
+        activeNetworkType: 'cellular',
+        subscriptions: subs,
+      );
+      expect(lteCandidates.map((p) => p.id).toList(), ['fptn-fi-1']);
+    });
   });
 }
 

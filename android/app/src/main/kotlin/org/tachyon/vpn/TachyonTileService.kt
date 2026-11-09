@@ -50,6 +50,10 @@ class TachyonTileService : TileService() {
                     startService(resumeIntent)
                     return
                 }
+                if (VpnService.prepare(this) == null && TunnelStateHolder.hasCommandListeners()) {
+                    TunnelStateHolder.dispatchCommand("connect")
+                    return
+                }
                 val sessionFile = File(filesDir, TachyonVpnService.LAST_SESSION_FILE)
                 if (VpnService.prepare(this) == null && sessionFile.exists()) {
                     val startIntent = Intent(this, TachyonVpnService::class.java).setAction(

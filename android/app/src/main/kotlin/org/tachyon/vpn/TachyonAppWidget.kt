@@ -41,6 +41,13 @@ class TachyonAppWidget : AppWidgetProvider() {
                 }
                 context.startService(stop)
             } else {
+                if (android.net.VpnService.prepare(context) == null &&
+                    TunnelStateHolder.hasCommandListeners()
+                ) {
+                    TunnelStateHolder.dispatchCommand("connect")
+                    updateAll(context)
+                    return
+                }
                 val sessionFile = File(context.filesDir, "last-session.json")
                 if (sessionFile.exists()) {
                     try {

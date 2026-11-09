@@ -279,11 +279,120 @@ class _SettingsTabState extends State<SettingsTab> {
                         ),
                         const Hairline(),
                         SwitchRow(
-                          title: 'Автообновление подписок (раз в 12 ч)',
-                          subtitle: 'Фоновая синхронизация списков серверов',
+                          title: 'Автообновление подписок',
+                          subtitle: settings.autoUpdateSubs
+                              ? (settings.autoUpdateIntervalMinutes % 60 == 0
+                                  ? 'Каждые ${settings.autoUpdateIntervalMinutes ~/ 60} ч'
+                                  : 'Каждые ${settings.autoUpdateIntervalMinutes} мин')
+                              : 'Фоновая синхронизация списков серверов',
                           value: settings.autoUpdateSubs,
                           onChanged: controller.setAutoUpdateSubs,
                         ),
+                        if (settings.autoUpdateSubs)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                              Space.md,
+                              0,
+                              Space.md,
+                              Space.sm,
+                            ),
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                for (final preset in const [
+                                  (60, '1 ч'),
+                                  (180, '3 ч'),
+                                  (360, '6 ч'),
+                                  (720, '12 ч'),
+                                  (1440, '24 ч'),
+                                ])
+                                  ChoiceChip(
+                                    label: Text(preset.$2),
+                                    selected:
+                                        settings.autoUpdateIntervalMinutes == preset.$1,
+                                    onSelected: (_) => controller
+                                        .setAutoUpdateIntervalMinutes(preset.$1),
+                                  ),
+                                ActionChip(
+                                  avatar: const Icon(Icons.schedule_rounded, size: 15),
+                                  label: Text(
+                                    const [60, 180, 360, 720, 1440]
+                                            .contains(settings.autoUpdateIntervalMinutes)
+                                        ? 'Своё...'
+                                        : '${settings.autoUpdateIntervalMinutes} мин',
+                                  ),
+                                  onPressed: () async {
+                                    final hoursInit =
+                                        settings.autoUpdateIntervalMinutes ~/ 60;
+                                    final minsInit =
+                                        settings.autoUpdateIntervalMinutes % 60;
+                                    final hCtrl = TextEditingController(
+                                      text: hoursInit > 0 ? '$hoursInit' : '',
+                                    );
+                                    final mCtrl = TextEditingController(
+                                      text: minsInit > 0 ? '$minsInit' : '',
+                                    );
+                                    final totalMins = await showDialog<int>(
+                                      context: context,
+                                      builder: (dCtx) => AlertDialog(
+                                        title: const Text('Интервал автообновления'),
+                                        content: Row(
+                                          children: [
+                                            Expanded(
+                                              child: TextField(
+                                                controller: hCtrl,
+                                                keyboardType: TextInputType.number,
+                                                decoration: const InputDecoration(
+                                                  labelText: 'Часы',
+                                                  hintText: '0–168',
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: Space.sm),
+                                            Expanded(
+                                              child: TextField(
+                                                controller: mCtrl,
+                                                keyboardType: TextInputType.number,
+                                                decoration: const InputDecoration(
+                                                  labelText: 'Минуты',
+                                                  hintText: '15–59',
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.of(dCtx).pop(),
+                                            child: const Text('Отмена'),
+                                          ),
+                                          FilledButton(
+                                            onPressed: () {
+                                              final h =
+                                                  int.tryParse(hCtrl.text.trim()) ?? 0;
+                                              final m =
+                                                  int.tryParse(mCtrl.text.trim()) ?? 0;
+                                              final mins = (h * 60 + m).clamp(15, 10080);
+                                              Navigator.of(dCtx).pop(mins);
+                                            },
+                                            child: const Text('Сохранить'),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    hCtrl.dispose();
+                                    mCtrl.dispose();
+                                    if (totalMins != null) {
+                                      await controller
+                                          .setAutoUpdateIntervalMinutes(totalMins);
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   ),

@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
-
 /// Каталог списков правил `tachyon-lists`.
 ///
 /// Файлы лежат в репозитории и разложены по форматам: приложению нужен `.trs`
@@ -12,7 +11,8 @@ import 'package:crypto/crypto.dart';
 /// рекомендованное действие и контрольную сумму.
 class ListsRepository {
   ListsRepository({required this.directory, HttpClient? client})
-      : _client = client ?? HttpClient();
+      : _client = client ?? HttpClient(),
+        _hasCustomClient = client != null;
 
   static const repoRoot = 'https://raw.githubusercontent.com/Dushnilin/tachyon-lists/main';
   static const catalogUrl = '$repoRoot/release/catalog.json';
@@ -21,6 +21,7 @@ class ListsRepository {
   final String directory;
 
   final HttpClient _client;
+  final bool _hasCustomClient;
 
   /// Каталог списков, полученный с сервера.
   ListsCatalog? _catalog;
@@ -31,16 +32,84 @@ class ListsRepository {
   /// Каталог списков: описание, группа и рекомендованное действие.
   List<ListsEntry> get entries => _catalog?.entries ?? const [];
 
+  /// Проверяет, слушает ли локальный mixed-прокси ядра (127.0.0.1:2080).
+  Future<bool> _isLocalProxyAlive() async {
+    try {
+      final s = await Socket.connect(
+        '127.0.0.1',
+        2080,
+        timeout: const Duration(milliseconds: 220),
+      );
+      s.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Выполняет GET-запрос сначала через активный локальный туннель (`127.0.0.1:2080`),
+  /// а при его отсутствии или сбое — напрямую.
+  Future<List<int>> _getBytesWithTunnelFallback(
+    Uri uri, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    if (_hasCustomClient) {
+      final request = await _client.getUrl(uri).timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      if (response.statusCode != 200) {
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      final bytes = <int>[];
+      await for (final chunk in response) {
+        bytes.addAll(chunk);
+      }
+      return bytes;
+    }
+
+    final useProxy = await _isLocalProxyAlive();
+    final modes = useProxy ? const [true, false] : const [false];
+    Object? lastError;
+
+    for (final viaProxy in modes) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10)
+        ..idleTimeout = const Duration(seconds: 5);
+      if (viaProxy) {
+        client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
+      } else {
+        client.findProxy = null;
+      }
+      try {
+        final request = await client.getUrl(uri).timeout(timeout);
+        final response = await request.close().timeout(timeout);
+        if (response.statusCode != 200) {
+          await response.drain<void>();
+          lastError = HttpException('HTTP ${response.statusCode}');
+          continue;
+        }
+        final bytes = <int>[];
+        await for (final chunk in response.timeout(timeout)) {
+          bytes.addAll(chunk);
+        }
+        if (bytes.isNotEmpty) {
+          return bytes;
+        }
+      } catch (e) {
+        lastError = e;
+      } finally {
+        client.close(force: true);
+      }
+    }
+    throw lastError ?? const HttpException('не удалось загрузить ресурс');
+  }
+
   /// Скачивает каталог. Ошибка не критична: приложение работает и без него.
   Future<ListsCatalog> refreshCatalog() async {
-    final request = await _client
-        .getUrl(Uri.parse(catalogUrl))
-        .timeout(const Duration(seconds: 20));
-    final response = await request.close();
-    if (response.statusCode != 200) {
-      throw HttpException('каталог недоступен: HTTP ${response.statusCode}');
-    }
-    final body = await response.transform(utf8.decoder).join();
+    final bytes = await _getBytesWithTunnelFallback(
+      Uri.parse(catalogUrl),
+      timeout: const Duration(seconds: 20),
+    );
+    final body = utf8.decode(bytes, allowMalformed: true);
     _catalog = ListsCatalog.fromJson(jsonDecode(body) as Map<String, dynamic>);
     return _catalog!;
   }
@@ -62,16 +131,16 @@ class ListsRepository {
     final entry = _catalog?.entryById(id);
     final relative = entry?.trsPath ?? 'release/tachyon/$id.trs';
     final url = '$repoRoot/$relative';
-    final request =
-        await _client.getUrl(Uri.parse(url)).timeout(const Duration(seconds: 60));
-    final response = await request.close();
-    if (response.statusCode != 200) {
-      return 'список недоступен: HTTP ${response.statusCode}';
-    }
-
-    final bytes = <int>[];
-    await for (final chunk in response) {
-      bytes.addAll(chunk);
+    final List<int> bytes;
+    try {
+      bytes = await _getBytesWithTunnelFallback(
+        Uri.parse(url),
+        timeout: const Duration(seconds: 45),
+      );
+    } on HttpException catch (e) {
+      return 'список недоступен: ${e.message}';
+    } catch (e) {
+      return 'список недоступен: $e';
     }
     if (bytes.length < 4) {
       return 'файл пустой';

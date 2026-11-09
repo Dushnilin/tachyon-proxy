@@ -146,6 +146,7 @@ class AppSettings {
     this.autoStart = false,
     this.allowLan = false,
     this.autoUpdateSubs = true,
+    this.autoUpdateIntervalMinutes = 360,
     this.proxyOnly = false,
     this.smartFailover = true,
     this.detourProfileId = '',
@@ -206,8 +207,11 @@ class AppSettings {
   /// Локальный HTTP/SOCKS5 прокси в локальную сеть на 0.0.0.0:2080.
   final bool allowLan;
 
-  /// Автообновление подписок при запуске приложения.
+  /// Автообновление подписок при запуске приложения и по расписанию.
   final bool autoUpdateSubs;
+
+  /// Интервал автоматического обновления подписок в минутах (по умолчанию 360 = 6 ч).
+  final int autoUpdateIntervalMinutes;
 
   /// Режим «Только прокси» (:2080 без поднятия системного VPN TUN).
   final bool proxyOnly;
@@ -362,6 +366,7 @@ class AppSettings {
     bool? autoStart,
     bool? allowLan,
     bool? autoUpdateSubs,
+    int? autoUpdateIntervalMinutes,
     bool? proxyOnly,
     bool? smartFailover,
     String? detourProfileId,
@@ -394,6 +399,8 @@ class AppSettings {
       autoStart: autoStart ?? this.autoStart,
       allowLan: allowLan ?? this.allowLan,
       autoUpdateSubs: autoUpdateSubs ?? this.autoUpdateSubs,
+      autoUpdateIntervalMinutes:
+          autoUpdateIntervalMinutes ?? this.autoUpdateIntervalMinutes,
       proxyOnly: proxyOnly ?? this.proxyOnly,
       smartFailover: smartFailover ?? this.smartFailover,
       detourProfileId: detourProfileId ?? this.detourProfileId,
@@ -429,6 +436,7 @@ class AppSettings {
         'autoStart': autoStart,
         'allowLan': allowLan,
         'autoUpdateSubs': autoUpdateSubs,
+        'autoUpdateIntervalMinutes': autoUpdateIntervalMinutes,
         'proxyOnly': proxyOnly,
         'smartFailover': smartFailover,
         'detourProfileId': detourProfileId,
@@ -493,6 +501,8 @@ class AppSettings {
       autoStart: json['autoStart'] == true,
       allowLan: json['allowLan'] == true,
       autoUpdateSubs: json['autoUpdateSubs'] != false,
+      autoUpdateIntervalMinutes:
+          ((json['autoUpdateIntervalMinutes'] as num?)?.toInt() ?? 360).clamp(15, 10080),
       proxyOnly: json['proxyOnly'] == true,
       smartFailover: json['smartFailover'] != false,
       detourProfileId: (json['detourProfileId'] as String?) ?? '',

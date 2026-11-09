@@ -37,11 +37,31 @@ object WifiSsidHelper {
     @Volatile
     private var onWifiEvent: (() -> Unit)? = null
 
+    @Volatile
+    private var lastDispatchedSignature: String = ""
+
+    @Volatile
+    private var lastDispatchAtMs: Long = 0L
+
     /** Кэш BSSID -> SSID, чтобы мгновенно узнавать сеть даже при задержке выдачи SSID в фоне. */
     private val bssidToSsid = ConcurrentHashMap<String, String>()
 
     fun setOnWifiEventListener(listener: (() -> Unit)?) {
         onWifiEvent = listener
+    }
+
+    private fun notifyNetworkEvent(context: Context) {
+        onWifiEvent?.invoke()
+        try {
+            val wifi = isWifiConnected(context)
+            val sig = "$wifi|$cachedCallbackSsid|$cachedCallbackBssid"
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (sig != lastDispatchedSignature || now - lastDispatchAtMs >= 350L) {
+                lastDispatchedSignature = sig
+                lastDispatchAtMs = now
+                TunnelStateHolder.dispatchCommand("network_changed")
+            }
+        } catch (_: Throwable) {}
     }
 
     fun cleanSsid(raw: String?): String {
@@ -107,7 +127,7 @@ object WifiSsidHelper {
                 val callback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
                         override fun onAvailable(network: Network) {
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
 
                         override fun onCapabilitiesChanged(
@@ -117,7 +137,7 @@ object WifiSsidHelper {
                             if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
                             val info = networkCapabilities.transportInfo as? WifiInfo
                             rememberWifiInfo(info?.ssid, info?.bssid)
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
 
                         override fun onLost(network: Network) {
@@ -125,13 +145,13 @@ object WifiSsidHelper {
                                 cachedCallbackSsid = ""
                                 cachedCallbackBssid = ""
                             }
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
                     }
                 } else {
                     object : ConnectivityManager.NetworkCallback() {
                         override fun onAvailable(network: Network) {
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
 
                         override fun onCapabilitiesChanged(
@@ -143,7 +163,7 @@ object WifiSsidHelper {
                                 val info = networkCapabilities.transportInfo as? WifiInfo
                                 rememberWifiInfo(info?.ssid, info?.bssid)
                             }
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
 
                         override fun onLost(network: Network) {
@@ -151,11 +171,38 @@ object WifiSsidHelper {
                                 cachedCallbackSsid = ""
                                 cachedCallbackBssid = ""
                             }
-                            onWifiEvent?.invoke()
+                            notifyNetworkEvent(appCtx)
                         }
                     }
                 }
                 cm.registerNetworkCallback(request, callback)
+
+                val physRequest = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+                val physCallback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        notifyNetworkEvent(appCtx)
+                    }
+
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: NetworkCapabilities,
+                    ) {
+                        if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                        notifyNetworkEvent(appCtx)
+                    }
+
+                    override fun onLost(network: Network) {
+                        if (!isWifiConnected(appCtx)) {
+                            cachedCallbackSsid = ""
+                            cachedCallbackBssid = ""
+                        }
+                        notifyNetworkEvent(appCtx)
+                    }
+                }
+                cm.registerNetworkCallback(physRequest, physCallback)
             }
         } catch (_: Throwable) {}
 
@@ -175,7 +222,7 @@ object WifiSsidHelper {
                     if (info != null) {
                         rememberWifiInfo(info.ssid, info.bssid)
                     }
-                    onWifiEvent?.invoke()
+                    notifyNetworkEvent(appCtx)
                 }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -223,10 +270,18 @@ object WifiSsidHelper {
     fun isWifiConnected(context: Context): Boolean {
         return try {
             val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
+            val active = cm.activeNetwork
+            if (active != null) {
+                val activeCaps = cm.getNetworkCapabilities(active)
+                if (activeCaps != null && !activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                    return activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                }
+            }
             for (net in cm.allNetworks) {
                 val caps = cm.getNetworkCapabilities(net) ?: continue
                 if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 ) {
                     return true
                 }

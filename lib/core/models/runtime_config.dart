@@ -737,6 +737,12 @@ class Profile {
         rawExtra['transport'] = normalizeXhttpTransport(tr);
       }
     }
+    if (rawExtra['chain_outbounds'] is List) {
+      rawExtra['chain_outbounds'] = (rawExtra['chain_outbounds'] as List)
+          .whereType<Map>()
+          .map((h) => normalizeOutboundNode(Map<String, dynamic>.from(h)))
+          .toList(growable: false);
+    }
     final savedTransport = (json['transport'] as String?) ?? '';
     final trFromExtra = (rawExtra['transport'] is Map)
         ? ((rawExtra['transport'] as Map)['type']?.toString() ?? '')
@@ -763,7 +769,9 @@ class Profile {
       flow: (json['flow'] as String?) ?? '',
       publicKey: (json['publicKey'] as String?) ?? '',
       shortId: (json['shortId'] as String?) ?? '',
-      subscriptionId: (json['subscriptionId'] as String?) ?? '',
+      subscriptionId: (json['subscriptionId'] as String?) ??
+          (json['subscription_id'] as String?) ??
+          '',
       extra: rawExtra,
     );
   }
@@ -1284,17 +1292,110 @@ class BuiltInService {
       id: 'ru',
       trsId: 'ru_domains',
       title: 'Сайты РФ (.ru / Банки / Госуслуги)',
-      subtitle: 'tachyon-lists/ru_domains.trs (Домены и подсети РФ напрямую)',
+      subtitle: 'tachyon-lists/ru_domains.trs (Домены, подсети и приложения РФ напрямую)',
       domains: [
         'ru',
         'su',
         'xn--p1ai',
+        'xn--p1acf',
+        'xn--80asehdb',
+        'xn--80aswg',
+        'xn--c1avg',
+        'xn--d1acj3b',
         'yandex.net',
+        'yandex.com',
+        'yandex.by',
+        'yandex.kz',
+        'yastatic.net',
+        'yandexcloud.net',
+        'ya.ru',
+        'dzen.ru',
+        'kinopoisk.ru',
         'vk.com',
+        'vk.me',
         'userapi.com',
+        'vkuser.net',
+        'vkuseraudio.net',
+        'vkuservideo.net',
+        'mycdn.me',
+        'imgsmail.ru',
+        'mail.ru',
+        'ok.ru',
+        'rutube.ru',
         'gosuslugi.ru',
+        'mos.ru',
+        'nalog.gov.ru',
         'sberbank.ru',
+        'sberbank.com',
+        'sber.ru',
         'tbank.ru',
+        'tinkoff.com',
+        'tinkoff.ru',
+        'vtb.ru',
+        'alfabank.ru',
+        'alfabank.st',
+        'gazprombank.ru',
+        'raiffeisen.ru',
+        'sovcombank.ru',
+        'psbank.ru',
+        'rshb.ru',
+        'nspk.ru',
+        'wildberries.ru',
+        'wb.ru',
+        'wbstatic.net',
+        'wbbasket.ru',
+        'ozon.ru',
+        'ozon.st',
+        'ozonusercontent.com',
+        'avito.ru',
+        'avito.st',
+        '2gis.ru',
+        '2gis.com',
+        'pochta.ru',
+        'rzd.ru',
+        'aeroflot.ru',
+        'habr.com',
+        'habrastorage.org',
+        'mts.ru',
+        'megafon.ru',
+        'beeline.ru',
+        't2.ru',
+        'tele2.ru',
+        'rt.ru',
+      ],
+      packages: [
+        'ru.sberbankmobile',
+        'com.idamob.tinkoff.android',
+        'ru.tinkoff.mb.kids',
+        'ru.vtb24.mobilebanking.android',
+        'ru.alfabank.mobile.android',
+        'ru.gazprombank.android.mobilebank.app',
+        'ru.raiffeisennews',
+        'ru.sovcomcard.halva.v1',
+        'ru.rostel',
+        'ru.gosuslugi.pos',
+        'ru.nspk.mirpay',
+        'ru.nspk.sbpay',
+        'com.vkontakte.android',
+        'com.vk.im',
+        'ru.oneme.app',
+        'ru.ok.android',
+        'ru.mail.mailapp',
+        'ru.yandex.taxi',
+        'ru.yandex.searchplugin',
+        'com.yandex.browser',
+        'ru.yandex.music',
+        'ru.yandex.yandexmaps',
+        'ru.yandex.yandexnavi',
+        'ru.beru.android',
+        'ru.kinopoisk',
+        'ru.rutube.app',
+        'ru.ozon.app.android',
+        'com.wildberries.ru',
+        'com.avito.android',
+        'ru.dublgis.dgismobile',
+        'ru.pochta.onenew',
+        'ru.rzd.pass',
       ],
     ),
   ];
@@ -1572,6 +1673,8 @@ class BalancerSettings {
     this.url = 'https://www.gstatic.com/generate_204',
     this.interval = '3m',
     this.tolerance = 50,
+    this.excludedCountries = const [],
+    this.excludedProtocols = const [],
   });
 
   /// Алгоритм выбора узла:
@@ -1600,6 +1703,129 @@ class BalancerSettings {
 
   /// Гистерезис переключения в мс для режима `least_test`.
   final int tolerance;
+
+  /// Глобальный список исключённых стран/ключевых слов (например, `['RU', 'KZ', '🇳🇱']`).
+  final List<String> excludedCountries;
+
+  /// Глобальный список исключённых протоколов (например, `['vmess', 'shadowsocks']`).
+  final List<String> excludedProtocols;
+
+  /// Популярные страны для быстрого выбора в фильтре исключений.
+  static const List<(String code, String flag, String label, List<String> aliases)>
+      commonCountryFilters = [
+    ('RU', '🇷🇺', 'Россия', ['ru', '🇷🇺', 'rus', 'russia', 'россия', 'мск', 'спб', 'moscow', 'spb']),
+    ('NL', '🇳🇱', 'Нидерланды', ['nl', '🇳🇱', 'nld', 'netherlands', 'нидерланды', 'голландия', 'amsterdam', 'амстердам']),
+    ('DE', '🇩🇪', 'Германия', ['de', '🇩🇪', 'deu', 'germany', 'германия', 'frankfurt', 'франкфурт', 'falkenstein']),
+    ('FI', '🇫🇮', 'Финляндия', ['fi', '🇫🇮', 'fin', 'finland', 'финляндия', 'helsinki', 'хельсинки']),
+    ('US', '🇺🇸', 'США', ['us', '🇺🇸', 'usa', 'united states', 'сша', 'америка', 'new york', 'dallas', 'miami']),
+    ('GB', '🇬🇧', 'Великобритания', ['gb', 'uk', '🇬🇧', 'united kingdom', 'британия', 'англия', 'london', 'лондон']),
+    ('FR', '🇫🇷', 'Франция', ['fr', '🇫🇷', 'fra', 'france', 'франция', 'paris', 'париж']),
+    ('TR', '🇹🇷', 'Турция', ['tr', '🇹🇷', 'tur', 'turkey', 'türkiye', 'турция', 'istanbul', 'стамбул']),
+    ('KZ', '🇰🇿', 'Казахстан', ['kz', '🇰🇿', 'kaz', 'kazakhstan', 'казахстан', 'алматы', 'астана']),
+    ('BY', '🇧🇾', 'Беларусь', ['by', '🇧🇾', 'blr', 'belarus', 'беларусь', 'минск', 'minsk']),
+    ('SE', '🇸🇪', 'Швеция', ['se', '🇸🇪', 'swe', 'sweden', 'швеция', 'stockholm', 'стокгольм']),
+    ('PL', '🇵🇱', 'Польша', ['pl', '🇵🇱', 'pol', 'poland', 'польша', 'warsaw', 'варшава']),
+    ('LV', '🇱🇻', 'Латвия', ['lv', '🇱🇻', 'lva', 'latvia', 'латвия', 'riga', 'рига']),
+    ('EE', '🇪🇪', 'Эстония', ['ee', '🇪🇪', 'est', 'estonia', 'эстония', 'tallinn', 'таллин']),
+    ('SG', '🇸🇬', 'Сингапур', ['sg', '🇸🇬', 'sgp', 'singapore', 'сингапур']),
+    ('JP', '🇯🇵', 'Япония', ['jp', '🇯🇵', 'jpn', 'japan', 'япония', 'tokyo', 'токио']),
+  ];
+
+  /// Протоколы для фильтра исключений.
+  static const List<(String id, String label)> commonProtocolFilters = [
+    ('vless', 'VLESS'),
+    ('vmess', 'VMess'),
+    ('trojan', 'Trojan'),
+    ('shadowsocks', 'Shadowsocks'),
+    ('hysteria2', 'Hysteria 2'),
+    ('tuic', 'TUIC'),
+    ('wireguard', 'WireGuard / AWG'),
+    ('anytls', 'AnyTLS'),
+    ('naive', 'NaiveProxy'),
+    ('fptn', 'FPTN'),
+    ('tewfai', 'Tewfai'),
+    ('socks', 'SOCKS / HTTP'),
+  ];
+
+  /// Проверяет, проходит ли профиль через фильтры исключения стран и протоколов.
+  static bool matchesFilter(
+    Profile p, {
+    List<String> excludedProtocols = const [],
+    List<String> excludedCountries = const [],
+  }) {
+    if (excludedProtocols.isNotEmpty) {
+      final pType = p.type.trim().toLowerCase();
+      for (final rawProto in excludedProtocols) {
+        final proto = rawProto.trim().toLowerCase();
+        if (proto.isEmpty) continue;
+        if (pType == proto) return false;
+        if ((proto == 'wireguard' || proto == 'awg' || proto == 'amneziawg') &&
+            (pType == 'wireguard' || pType == 'amneziawg')) {
+          return false;
+        }
+        if ((proto == 'socks' || proto == 'http') &&
+            (pType == 'socks' || pType == 'http')) {
+          return false;
+        }
+        if ((proto == 'ss' || proto == 'shadowsocks') && pType == 'shadowsocks') {
+          return false;
+        }
+        if ((proto == 'hy2' || proto == 'hysteria2' || proto == 'hysteria') &&
+            (pType == 'hysteria2' || pType == 'hysteria')) {
+          return false;
+        }
+      }
+    }
+
+    if (excludedCountries.isNotEmpty) {
+      final nameLower = p.name.toLowerCase();
+      final serverLower = p.server.toLowerCase();
+      final combined = '$nameLower $serverLower';
+      for (final rawToken in excludedCountries) {
+        final token = rawToken.trim().toLowerCase();
+        if (token.isEmpty) continue;
+
+        final preset = commonCountryFilters
+            .where((c) => c.$1.toLowerCase() == token || c.$2 == token || c.$3.toLowerCase() == token)
+            .firstOrNull;
+
+        if (preset != null) {
+          final code = preset.$1.toLowerCase();
+          final flag = preset.$2;
+          if (p.name.contains(flag)) return false;
+          if (serverLower.endsWith('.$code') || serverLower.startsWith('$code.') || serverLower.startsWith('$code-')) {
+            return false;
+          }
+          final wordBoundaryCode = RegExp(
+            '(^|[^a-zа-яё0-9])${RegExp.escape(code)}([^a-zа-яё0-9]|\$)',
+            caseSensitive: false,
+          );
+          if (wordBoundaryCode.hasMatch(nameLower)) return false;
+          for (final alias in preset.$4) {
+            if (alias.length <= 2) continue;
+            if (combined.contains(alias)) return false;
+          }
+        } else {
+          if (token.length == 2 && RegExp(r'^[a-z]{2}$').hasMatch(token)) {
+            final wordBoundary = RegExp(
+              '(^|[^a-zа-яё0-9])${RegExp.escape(token)}([^a-zа-яё0-9]|\$)',
+              caseSensitive: false,
+            );
+            if (wordBoundary.hasMatch(nameLower) ||
+                serverLower.endsWith('.$token') ||
+                serverLower.startsWith('$token.') ||
+                serverLower.startsWith('$token-')) {
+              return false;
+            }
+          } else if (combined.contains(token)) {
+            return false;
+          }
+        }
+      }
+    }
+
+    return true;
+  }
 
   static const List<BalancerModeOption> modes = [
     BalancerModeOption(
@@ -1753,6 +1979,8 @@ class BalancerSettings {
     String? url,
     String? interval,
     int? tolerance,
+    List<String>? excludedCountries,
+    List<String>? excludedProtocols,
   }) {
     return BalancerSettings(
       mode: mode ?? this.mode,
@@ -1763,6 +1991,8 @@ class BalancerSettings {
       url: url ?? this.url,
       interval: interval ?? this.interval,
       tolerance: tolerance ?? this.tolerance,
+      excludedCountries: excludedCountries ?? this.excludedCountries,
+      excludedProtocols: excludedProtocols ?? this.excludedProtocols,
     );
   }
 
@@ -1775,6 +2005,8 @@ class BalancerSettings {
         'url': url,
         'interval': interval,
         'tolerance': tolerance,
+        if (excludedCountries.isNotEmpty) 'excludedCountries': excludedCountries,
+        if (excludedProtocols.isNotEmpty) 'excludedProtocols': excludedProtocols,
       };
 
   static BalancerSettings fromJson(Map<String, dynamic> json) {
@@ -1784,6 +2016,16 @@ class BalancerSettings {
         .toList(growable: false);
     final rawMode = (json['mode'] as String?)?.trim().toLowerCase() ?? 'stability';
     final knownMode = modes.any((m) => m.id == rawMode) ? rawMode : 'stability';
+    final rawExCountries = (json['excludedCountries'] as List?)
+            ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+    final rawExProtocols = (json['excludedProtocols'] as List?)
+            ?.map((e) => e.toString().trim().toLowerCase())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
     return BalancerSettings(
       mode: knownMode,
       pool: ((json['pool'] as num?)?.toInt() ?? 4).clamp(1, 32),
@@ -1799,6 +2041,8 @@ class BalancerSettings {
           ? (json['interval'] as String).trim()
           : '3m',
       tolerance: ((json['tolerance'] as num?)?.toInt() ?? 50).clamp(1, 5000),
+      excludedCountries: rawExCountries,
+      excludedProtocols: rawExProtocols,
     );
   }
 }
@@ -1824,6 +2068,9 @@ class SubscriptionEntry {
     this.customHwid = '',
     this.networkScope = 'all',
     this.selectedServerKeys = const [],
+    this.excludedCountries = const [],
+    this.excludedProtocols = const [],
+    this.autoUpdateHours = 0,
   });
 
   /// Идентификатор: стабилен, участвует в тегах аутбаундов и файлах кэша.
@@ -1851,6 +2098,15 @@ class SubscriptionEntry {
   /// Список выбранных пользователем ключей серверов (`host:port` или `name`),
   /// если пользователь выбрал только часть серверов из токена FPTN.
   final List<String> selectedServerKeys;
+
+  /// Индивидуальный список исключённых стран / ключевых слов для подписки.
+  final List<String> excludedCountries;
+
+  /// Индивидуальный список исключённых протоколов для подписки.
+  final List<String> excludedProtocols;
+
+  /// Индивидуальный интервал автообновления в часах (`0` — использовать глобальный).
+  final int autoUpdateHours;
 
   bool get isFptnToken {
     final u = url.trim().toLowerCase();
@@ -1880,6 +2136,9 @@ class SubscriptionEntry {
     String? customHwid,
     String? networkScope,
     List<String>? selectedServerKeys,
+    List<String>? excludedCountries,
+    List<String>? excludedProtocols,
+    int? autoUpdateHours,
   }) =>
       SubscriptionEntry(
         id: id,
@@ -1896,6 +2155,9 @@ class SubscriptionEntry {
         customHwid: customHwid ?? this.customHwid,
         networkScope: networkScope ?? this.networkScope,
         selectedServerKeys: selectedServerKeys ?? this.selectedServerKeys,
+        excludedCountries: excludedCountries ?? this.excludedCountries,
+        excludedProtocols: excludedProtocols ?? this.excludedProtocols,
+        autoUpdateHours: autoUpdateHours ?? this.autoUpdateHours,
       );
 
   Map<String, dynamic> toJson() => {
@@ -1915,12 +2177,27 @@ class SubscriptionEntry {
           'networkScope': networkScope,
         if (selectedServerKeys.isNotEmpty)
           'selectedServerKeys': selectedServerKeys,
+        if (excludedCountries.isNotEmpty)
+          'excludedCountries': excludedCountries,
+        if (excludedProtocols.isNotEmpty)
+          'excludedProtocols': excludedProtocols,
+        if (autoUpdateHours > 0) 'autoUpdateHours': autoUpdateHours,
       };
 
   static SubscriptionEntry fromJson(Map<String, dynamic> json) {
     final rawScope = (json['networkScope'] as String?)?.trim().toLowerCase() ?? 'all';
     final rawSelected = (json['selectedServerKeys'] as List?)
             ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+    final rawExCountries = (json['excludedCountries'] as List?)
+            ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+    final rawExProtocols = (json['excludedProtocols'] as List?)
+            ?.map((e) => e.toString().trim().toLowerCase())
             .where((s) => s.isNotEmpty)
             .toList(growable: false) ??
         const <String>[];
@@ -1939,6 +2216,9 @@ class SubscriptionEntry {
       customHwid: (json['customHwid'] as String?)?.trim() ?? '',
       networkScope: (rawScope == 'wifi' || rawScope == 'cellular') ? rawScope : 'all',
       selectedServerKeys: rawSelected,
+      excludedCountries: rawExCountries,
+      excludedProtocols: rawExProtocols,
+      autoUpdateHours: ((json['autoUpdateHours'] as num?)?.toInt() ?? 0).clamp(0, 720),
     );
   }
 }
@@ -2041,6 +2321,7 @@ class RuntimeConfig {
     List<Profile> extraProfiles, {
     String activeNetworkType = '',
     List<SubscriptionEntry> subscriptions = const [],
+    BalancerSettings balancer = const BalancerSettings(),
   }) {
     if (profile.type != 'urltest' && !profile.id.startsWith('auto:')) {
       return const <Profile>[];
@@ -2054,27 +2335,48 @@ class RuntimeConfig {
         .toList(growable: false);
     if (basePool.isEmpty) return const <Profile>[];
 
-    final net = activeNetworkType.trim().toLowerCase();
-    if (net != 'wifi' && net != 'cellular') {
-      return basePool.take(256).toList(growable: false);
-    }
-
-    final subScopes = <String, String>{
+    final subById = <String, SubscriptionEntry>{
       for (final s in subscriptions)
-        if (s.id.isNotEmpty) s.id: s.networkScope,
+        if (s.id.isNotEmpty) s.id: s,
     };
 
-    final filtered = basePool.where((p) {
+    // 1. Применяем фильтры исключения стран и протоколов (подписки + глобального балансировщика)
+    final filterPool = basePool.where((p) {
+      final sub = subById[p.subscriptionId];
+      final exCountries = <String>[
+        ...balancer.excludedCountries,
+        if (sub != null) ...sub.excludedCountries,
+      ];
+      final exProtocols = <String>[
+        ...balancer.excludedProtocols,
+        if (sub != null) ...sub.excludedProtocols,
+      ];
+      if (exCountries.isEmpty && exProtocols.isEmpty) return true;
+      return BalancerSettings.matchesFilter(
+        p,
+        excludedProtocols: exProtocols,
+        excludedCountries: exCountries,
+      );
+    }).toList(growable: false);
+
+    final effectiveBase = filterPool.isNotEmpty ? filterPool : basePool;
+
+    final net = activeNetworkType.trim().toLowerCase();
+    if (net != 'wifi' && net != 'cellular') {
+      return effectiveBase.take(256).toList(growable: false);
+    }
+
+    final filtered = effectiveBase.where((p) {
       final profScope = p.networkScope;
       final effectiveScope = profScope != 'all'
           ? profScope
-          : (subScopes[p.subscriptionId] ?? 'all');
+          : (subById[p.subscriptionId]?.networkScope ?? 'all');
       return effectiveScope == 'all' || effectiveScope == net;
     }).take(256).toList(growable: false);
 
     return filtered.isNotEmpty
         ? filtered
-        : basePool.take(256).toList(growable: false);
+        : effectiveBase.take(256).toList(growable: false);
   }
 
   /// Собирает конфигурацию sing-box, которую принимает ядро.
@@ -2091,6 +2393,7 @@ class RuntimeConfig {
             extraProfiles,
             activeNetworkType: activeNetworkType,
             subscriptions: allSubscriptions.isNotEmpty ? allSubscriptions : subscriptions,
+            balancer: balancer,
           )
         : const <Profile>[];
 
@@ -2180,7 +2483,7 @@ class RuntimeConfig {
 
     if (dns.routeMode == 'split_ru') {
       dnsRules.add({
-        'domain_suffix': ['ru', 'su', 'xn--p1ai'],
+        'domain_suffix': ['ru', 'su', 'xn--p1ai', 'xn--p1acf', 'xn--80asehdb', 'xn--80aswg', 'xn--c1avg', 'xn--d1acj3b'],
         'action': 'route',
         'server': directTag,
       });
@@ -2246,7 +2549,7 @@ class RuntimeConfig {
 
     // Точечные правила сервисов (YouTube, Discord, Telegram, Сайты РФ и др.):
     // напрямую подключают `.trs` из `tachyon-lists` при наличии файла на диске,
-    // плюс базовые домены для мгновенного старта до завершения фоновой докачки.
+    // плюс базовые домены и пакеты приложений для мгновенного старта до завершения фоновой докачки.
     for (final service in BuiltInService.catalog) {
       final rawAction = serviceRoutes[service.id];
       if (rawAction == null || rawAction.isEmpty || rawAction == 'off') continue;
@@ -2258,24 +2561,44 @@ class RuntimeConfig {
       final action = resolveOutbound(rawAction);
       final useDirectDns = action == 'direct' || (!dns.fakeIp && action == 'desync');
 
-      final trsPath = filesDir.isNotEmpty ? '$filesDir/lists/${service.trsId}.trs' : '';
-      final hasTrsOnDisk = trsPath.isNotEmpty && File(trsPath).existsSync();
-      if (hasTrsOnDisk) {
-        ruleSetDefs[service.trsId] = {
-          'type': 'local',
-          'tag': service.trsId,
-          'format': 'trs',
-          'path': trsPath,
-        };
+      final servicePkgs = service.packages
+          .where((pkg) => pkg.isNotEmpty && (appRoutes[pkg] ?? '').isEmpty)
+          .toList(growable: false);
+      if (servicePkgs.isNotEmpty) {
+        routeRules.add({
+          'package_name': servicePkgs,
+          'action': 'route',
+          'outbound': action,
+        });
+      }
+
+      final trsIds = <String>[
+        service.trsId,
+        if (service.id == 'ru') ...['ru_only_inside', 'ru_whitelist'],
+      ];
+      final activeTrsIds = <String>[];
+      for (final tid in trsIds) {
+        final trsPath = filesDir.isNotEmpty ? '$filesDir/lists/$tid.trs' : '';
+        if (trsPath.isNotEmpty && File(trsPath).existsSync()) {
+          ruleSetDefs[tid] = {
+            'type': 'local',
+            'tag': tid,
+            'format': 'trs',
+            'path': trsPath,
+          };
+          activeTrsIds.add(tid);
+        }
+      }
+      if (activeTrsIds.isNotEmpty) {
         if (useDirectDns) {
           dnsRules.add({
-            'rule_set': [service.trsId],
+            'rule_set': activeTrsIds,
             'action': 'route',
             'server': directTag,
           });
         }
         routeRules.add({
-          'rule_set': [service.trsId],
+          'rule_set': activeTrsIds,
           'action': 'route',
           'outbound': action,
         });
@@ -2757,23 +3080,51 @@ Map<String, dynamic> normalizeOutboundNode(Map<String, dynamic> rawNode) {
   return node;
 }
 
-String? _formatXhttpRange(Object? val) {
+int? _parseXhttpIntPart(Object? val) {
   if (val == null) return null;
-  if (val is num) return val.toInt().toString();
+  if (val is int) return val;
+  if (val is num) return val.isFinite ? val.round() : null;
   if (val is String) {
     final s = val.trim();
-    return s.isEmpty ? null : s;
+    if (s.isEmpty) return null;
+    final asInt = int.tryParse(s);
+    if (asInt != null) return asInt;
+    final asDouble = double.tryParse(s);
+    if (asDouble != null && asDouble.isFinite) return asDouble.round();
+  }
+  return null;
+}
+
+String? _formatXhttpRange(Object? val) {
+  if (val == null) return null;
+  if (val is num) {
+    return val.isFinite ? val.round().toString() : null;
+  }
+  if (val is String) {
+    final s = val.trim();
+    if (s.isEmpty) return null;
+    final dashIdx = s.indexOf('-', 1);
+    if (dashIdx > 0 && !s.substring(0, dashIdx).toLowerCase().endsWith('e')) {
+      final a = _parseXhttpIntPart(s.substring(0, dashIdx));
+      final b = _parseXhttpIntPart(s.substring(dashIdx + 1));
+      if (a != null && b != null) {
+        return a == b ? '$a' : '$a-$b';
+      }
+      return null;
+    }
+    final single = _parseXhttpIntPart(s);
+    return single?.toString();
   }
   if (val is List && val.length == 2) {
-    final a = int.tryParse(val[0].toString().trim());
-    final b = int.tryParse(val[1].toString().trim());
+    final a = _parseXhttpIntPart(val[0]);
+    final b = _parseXhttpIntPart(val[1]);
     if (a != null && b != null) {
       return a == b ? '$a' : '$a-$b';
     }
   }
   if (val is Map && (val.containsKey('from') || val.containsKey('to'))) {
-    final from = int.tryParse((val['from'] ?? 0).toString().trim()) ?? 0;
-    final to = int.tryParse((val['to'] ?? from).toString().trim()) ?? from;
+    final from = _parseXhttpIntPart(val['from']) ?? 0;
+    final to = _parseXhttpIntPart(val['to']) ?? from;
     return from == to ? '$from' : '$from-$to';
   }
   return null;
@@ -2854,17 +3205,10 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
   void setInt(String targetKey, List<String> sourceKeys) {
     for (final k in sourceKeys) {
       if (raw.containsKey(k) && raw[k] != null) {
-        final val = raw[k];
-        if (val is num) {
-          out[targetKey] = val.toInt();
+        final parsed = _parseXhttpIntPart(raw[k]);
+        if (parsed != null) {
+          out[targetKey] = parsed;
           return;
-        }
-        if (val is String) {
-          final parsed = int.tryParse(val.trim());
-          if (parsed != null) {
-            out[targetKey] = parsed;
-            return;
-          }
         }
       }
     }

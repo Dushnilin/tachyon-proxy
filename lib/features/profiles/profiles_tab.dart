@@ -24,10 +24,12 @@ class ProfilesTab extends StatefulWidget {
 class _ProfilesTabState extends State<ProfilesTab> {
   String _searchQuery = '';
 
-  List<Profile> _filter(List<Profile> items) {
+  List<Profile> _filter(List<Profile> items, AppController controller) {
+    final allowed = items.where(controller.isProfileAllowedByFilters).toList(growable: false);
+    final base = allowed.isNotEmpty ? allowed : items;
     final q = _searchQuery.trim().toLowerCase();
-    if (q.isEmpty) return items;
-    return items
+    if (q.isEmpty) return base;
+    return base
         .where((p) =>
             p.name.toLowerCase().contains(q) ||
             p.server.toLowerCase().contains(q) ||
@@ -41,60 +43,15 @@ class _ProfilesTabState extends State<ProfilesTab> {
     final tokens = context.tokens;
     final profiles = controller.settings.visibleProfiles;
     final subs = controller.settings.visibleSubscriptions;
+    final hasActiveFilters = controller.settings.balancer.excludedCountries.isNotEmpty ||
+        controller.settings.balancer.excludedProtocols.isNotEmpty ||
+        subs.any((s) => s.excludedCountries.isNotEmpty || s.excludedProtocols.isNotEmpty);
 
     return Scaffold(
       backgroundColor: tokens.surface,
       appBar: AppBar(
         title: const Text('Профили'),
         actions: [
-          ValueListenableBuilder<int>(
-            valueListenable: controller.pingRevision,
-            builder: (context, _, _) {
-              final hasDead = controller.pings.values.any((ms) => ms < 0);
-              if (!hasDead) return const SizedBox.shrink();
-              return IconButton(
-                tooltip: 'Удалить недоступные серверы (✗)',
-                onPressed: () async {
-                  final removed = await controller.removeDeadProfiles();
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Удалено недоступных серверов: $removed')),
-                  );
-                },
-                icon: Icon(Icons.cleaning_services_outlined, color: tokens.danger),
-              );
-            },
-          ),
-          IconButton(
-            tooltip: 'Списки серверов для Wi-Fi и Мобильной сети',
-            onPressed: (profiles.isEmpty && subs.isEmpty)
-                ? null
-                : () => showNetworkListsSheet(context, controller),
-            icon: Icon(
-              Icons.swap_calls_rounded,
-              color: (controller.settings.wifiProfileId.isNotEmpty ||
-                      controller.settings.cellularProfileId.isNotEmpty ||
-                      subs.any((s) => s.networkScope != 'all') ||
-                      profiles.any((p) => p.networkScope != 'all'))
-                  ? tokens.accent
-                  : null,
-            ),
-          ),
-          IconButton(
-            tooltip: 'Настройки балансировщика (tachyon-core 0.3.9)',
-            onPressed: () => showBalancerSettingsSheet(context, controller),
-            icon: const Icon(Icons.tune_rounded),
-          ),
-          IconButton(
-            tooltip: controller.sortByPing
-                ? 'Сортировка по пингу включена'
-                : 'Сортировать по пингу',
-            onPressed: profiles.isEmpty ? null : controller.toggleSortByPing,
-            icon: Icon(
-              Icons.sort_rounded,
-              color: controller.sortByPing ? tokens.accent : null,
-            ),
-          ),
           if (controller.pingingAll)
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: Space.md),
@@ -111,24 +68,127 @@ class _ProfilesTabState extends State<ProfilesTab> {
               icon: const Icon(Icons.network_ping),
             ),
           IconButton(
-            tooltip: 'Принять с телефона по Wi-Fi (Android TV)',
-            onPressed: () => showTvReceiveDialog(context, controller),
-            icon: const Icon(Icons.tv_rounded),
+            tooltip: controller.sortByPing
+                ? 'Сортировка по пингу включена'
+                : 'Сортировать по пингу',
+            onPressed: profiles.isEmpty ? null : controller.toggleSortByPing,
+            icon: Icon(
+              Icons.sort_rounded,
+              color: controller.sortByPing ? tokens.accent : null,
+            ),
           ),
           IconButton(
-            tooltip: 'Сканировать QR-код',
-            onPressed: () => _handleQrScan(context, controller, fromGallery: false),
-            icon: const Icon(Icons.qr_code_scanner_rounded),
-          ),
-          IconButton(
-            tooltip: 'Добавить вручную',
-            onPressed: () => _showManualDialog(context, controller),
-            icon: const Icon(Icons.add),
-          ),
-          IconButton(
-            tooltip: 'Импорт подписки',
+            tooltip: 'Импорт подписки или серверов',
             onPressed: () => _showImportDialog(context, controller),
             icon: const Icon(Icons.file_download_outlined),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Дополнительные действия',
+            icon: Icon(
+              Icons.more_vert_rounded,
+              color: hasActiveFilters ? tokens.accent : null,
+            ),
+            onSelected: (action) async {
+              switch (action) {
+                case 'qr':
+                  await _handleQrScan(context, controller, fromGallery: false);
+                case 'add_manual':
+                  if (context.mounted) {
+                    _showManualDialog(context, controller);
+                  }
+                case 'balancer':
+                  if (context.mounted) {
+                    await showBalancerSettingsSheet(context, controller);
+                  }
+                case 'network_lists':
+                  if (context.mounted) {
+                    await showNetworkListsSheet(context, controller);
+                  }
+                case 'tv_receive':
+                  if (context.mounted) {
+                    await showTvReceiveDialog(context, controller);
+                  }
+                case 'clean_dead':
+                  final removed = await controller.removeDeadProfiles();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Удалено недоступных серверов: $removed')),
+                    );
+                  }
+              }
+            },
+            itemBuilder: (ctx) {
+              final hasDead = controller.pings.values.any((ms) => ms < 0);
+              return [
+                const PopupMenuItem(
+                  value: 'qr',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.qr_code_scanner_rounded, size: 20),
+                    title: Text('Сканировать QR-код'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'add_manual',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.add_rounded, size: 20),
+                    title: Text('Добавить сервер вручную'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'balancer',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      Icons.tune_rounded,
+                      size: 20,
+                      color: hasActiveFilters ? tokens.accent : null,
+                    ),
+                    title: const Text('Балансировщик и фильтры'),
+                  ),
+                ),
+                if (profiles.isNotEmpty || subs.isNotEmpty)
+                  const PopupMenuItem(
+                    value: 'network_lists',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.swap_calls_rounded, size: 20),
+                      title: Text('Списки для Wi-Fi и Мобильной сети'),
+                    ),
+                  ),
+                const PopupMenuItem(
+                  value: 'tv_receive',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.tv_rounded, size: 20),
+                    title: Text('Принять на ТВ (Wi-Fi)'),
+                  ),
+                ),
+                if (hasDead)
+                  PopupMenuItem(
+                    value: 'clean_dead',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        Icons.cleaning_services_outlined,
+                        size: 20,
+                        color: tokens.danger,
+                      ),
+                      title: Text(
+                        'Удалить недоступные серверы',
+                        style: TextStyle(color: tokens.danger),
+                      ),
+                    ),
+                  ),
+              ];
+            },
           ),
         ],
       ),
@@ -168,9 +228,12 @@ class _ProfilesTabState extends State<ProfilesTab> {
           : ValueListenableBuilder<int>(
               valueListenable: controller.pingRevision,
               builder: (context, _, _) {
-                final freshStandalone = _filter(controller.sortProfiles(
-                  controller.settings.profilesForSubscription(''),
-                ));
+                final freshStandalone = _filter(
+                  controller.sortProfiles(
+                    controller.settings.profilesForSubscription(''),
+                  ),
+                  controller,
+                );
                 return CustomScrollView(
                   slivers: _buildProfileSlivers(
                     context,
@@ -236,9 +299,12 @@ class _ProfilesTabState extends State<ProfilesTab> {
     for (final sub in subs) {
       final isCollapsed =
           controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
-      final subProfiles = _filter(controller.sortProfiles(
-        controller.settings.profilesForSubscription(sub.id),
-      ));
+      final subProfiles = _filter(
+        controller.sortProfiles(
+          controller.settings.profilesForSubscription(sub.id),
+        ),
+        controller,
+      );
 
       slivers.add(
         SliverPadding(
@@ -2136,10 +2202,28 @@ class _AutoBalancerTile extends StatelessWidget {
     final modeOpt = balancer.modeOption;
     final winner = selected ? controller.activeBalancerWinner : null;
     final winnerTel = winner != null ? controller.balancerTelemetryOf(winner.id) : null;
+    final hasScoped = controller.settings.visibleSubscriptions.any((s) => s.networkScope != 'all') ||
+        controller.settings.visibleProfiles.any((p) => p.networkScope != 'all');
+    final netType = controller.activeNetworkType;
+    final netLabel = netType == 'wifi'
+        ? 'Wi-Fi'
+        : (netType == 'cellular' ? 'LTE' : '');
+    final activeCount = (selected && hasScoped && controller.selectedProfile != null)
+        ? RuntimeConfig.resolveAutoCandidates(
+            controller.selectedProfile!,
+            controller.settings.visibleProfiles,
+            activeNetworkType: netType,
+            subscriptions: controller.settings.visibleSubscriptions,
+            balancer: balancer,
+          ).length
+        : 0;
+    final netSuffix = (selected && hasScoped && netLabel.isNotEmpty && activeCount > 0)
+        ? ' · Сеть: $netLabel ($activeCount серв.)'
+        : '';
 
     final subtitle = winner != null
-        ? 'Активен: ${winner.name}${winnerTel != null && winnerTel.ewmaRttMs > 0 ? ' (${winnerTel.ewmaRttMs}ms ±${winnerTel.jitterMs}ms)' : ''} · ${modeOpt.title}'
-        : '${modeOpt.title} · пул Top-${balancer.pool} · ${modeOpt.subtitle}';
+        ? 'Активен: ${winner.name}${winnerTel != null && winnerTel.ewmaRttMs > 0 ? ' (${winnerTel.ewmaRttMs}ms ±${winnerTel.jitterMs}ms)' : ''}$netSuffix · ${modeOpt.title}'
+        : '${modeOpt.title} · пул Top-${balancer.pool}$netSuffix · ${modeOpt.subtitle}';
 
     return HairlineCard(
       onTap: onSelect,
@@ -2237,8 +2321,11 @@ Future<void> _showEditSubDialog(
   final nameCtrl = TextEditingController(text: sub.name);
   final urlCtrl = TextEditingController(text: sub.url);
   final hwidCtrl = TextEditingController(text: sub.customHwid);
+  final countriesCtrl = TextEditingController(text: sub.excludedCountries.join(', '));
   final globalHwid = controller.effectiveHwid;
   var selectedScope = sub.networkScope;
+  var selectedAutoHours = sub.autoUpdateHours;
+  final selectedExProtos = <String>{...sub.excludedProtocols};
 
   await showDialog<void>(
     context: context,
@@ -2324,6 +2411,32 @@ Future<void> _showEditSubDialog(
                   ),
                   const SizedBox(height: Space.md),
                   Text(
+                    'Интервал автообновления',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final item in const [
+                        (0, 'По умолч.'),
+                        (1, '1 ч'),
+                        (3, '3 ч'),
+                        (6, '6 ч'),
+                        (12, '12 ч'),
+                        (24, '24 ч'),
+                      ])
+                        ChoiceChip(
+                          label: Text(item.$2),
+                          selected: selectedAutoHours == item.$1,
+                          onSelected: (_) =>
+                              setStateDialog(() => selectedAutoHours = item.$1),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: Space.md),
+                  Text(
                     'Сеть для серверов подписки',
                     style: Theme.of(ctx).textTheme.titleSmall,
                   ),
@@ -2351,6 +2464,84 @@ Future<void> _showEditSubDialog(
                         ),
                     ],
                   ),
+                  const SizedBox(height: Space.md),
+                  Text(
+                    'Исключить страны из подписки',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final c in BalancerSettings.commonCountryFilters)
+                        Builder(
+                          builder: (_) {
+                            final currentTokens = countriesCtrl.text
+                                .split(',')
+                                .map((s) => s.trim())
+                                .where((s) => s.isNotEmpty)
+                                .toList();
+                            final isSelected = currentTokens.any(
+                              (x) => x.toUpperCase() == c.$1,
+                            );
+                            return FilterChip(
+                              label: Text(
+                                '${c.$2} ${c.$1}',
+                                style: const TextStyle(fontSize: 11.5),
+                              ),
+                              tooltip: c.$3,
+                              selected: isSelected,
+                              onSelected: (on) {
+                                final next = currentTokens
+                                    .where((x) => x.toUpperCase() != c.$1)
+                                    .toList();
+                                if (on) next.add(c.$1);
+                                setStateDialog(() {
+                                  countriesCtrl.text = next.join(', ');
+                                });
+                              },
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: countriesCtrl,
+                    onChanged: (_) => setStateDialog(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Коды стран или ключевые слова (через запятую)',
+                      hintText: 'Например: RU, KZ, NL, реклама',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: Space.sm),
+                  Text(
+                    'Исключить протоколы',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final proto in BalancerSettings.commonProtocolFilters)
+                        FilterChip(
+                          label: Text(proto.$2, style: const TextStyle(fontSize: 11.5)),
+                          selected: selectedExProtos.contains(proto.$1),
+                          onSelected: (on) {
+                            setStateDialog(() {
+                              if (on) {
+                                selectedExProtos.add(proto.$1);
+                              } else {
+                                selectedExProtos.remove(proto.$1);
+                              }
+                            });
+                          },
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -2365,6 +2556,12 @@ Future<void> _showEditSubDialog(
                 final newUrl = urlCtrl.text.trim();
                 final newName = nameCtrl.text.trim();
                 final newHwid = hwidCtrl.text.trim();
+                final exCountries = countriesCtrl.text
+                    .split(',')
+                    .map((s) => s.trim())
+                    .where((s) => s.isNotEmpty)
+                    .toList(growable: false);
+                final exProtos = selectedExProtos.toList(growable: false);
                 Navigator.of(dialogCtx).pop();
                 if (newUrl.isNotEmpty) {
                   await controller.editSubscription(
@@ -2373,6 +2570,9 @@ Future<void> _showEditSubDialog(
                     name: newName,
                     customHwid: newHwid,
                     networkScope: selectedScope,
+                    excludedCountries: exCountries,
+                    excludedProtocols: exProtos,
+                    autoUpdateHours: selectedAutoHours,
                   );
                 }
               },
@@ -2386,6 +2586,7 @@ Future<void> _showEditSubDialog(
   nameCtrl.dispose();
   urlCtrl.dispose();
   hwidCtrl.dispose();
+  countriesCtrl.dispose();
 }
 
 /// Сворачиваемая карточка заголовка подписки с информацией о трафике и сроке действия.
@@ -2574,6 +2775,32 @@ class _CollapsibleSubCard extends StatelessWidget {
                                         fontWeight: FontWeight.w700,
                                         fontFamily: 'monospace',
                                         color: tokens.muted,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                if (sub.excludedCountries.isNotEmpty ||
+                                    sub.excludedProtocols.isNotEmpty) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: tokens.warning.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(
+                                        color: tokens.warning.withValues(alpha: 0.35),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      'Фильтр (${sub.excludedCountries.length + sub.excludedProtocols.length})',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        fontFamily: 'monospace',
+                                        color: tokens.warning,
                                       ),
                                     ),
                                   ),
@@ -3424,6 +3651,79 @@ Future<void> showBalancerSettingsSheet(
                                       ),
                                   ],
                                 ),
+                                const Divider(height: Space.lg),
+                                Text(
+                                  'URL проверки доступности (URL-Test)',
+                                  style: Theme.of(ctx).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  current.url,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontFamily: 'monospace',
+                                    color: tokens.accent,
+                                  ),
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final presetUrl in const [
+                                      ('https://www.gstatic.com/generate_204', 'Gstatic (HTTPS)'),
+                                      ('http://cp.cloudflare.com/generate_204', 'Cloudflare (HTTP)'),
+                                      ('https://cp.cloudflare.com/generate_204', 'Cloudflare (HTTPS)'),
+                                      ('http://connectivitycheck.gstatic.com/generate_204', 'Android Check'),
+                                    ])
+                                      ChoiceChip(
+                                        label: Text(presetUrl.$2),
+                                        selected: current.url == presetUrl.$1,
+                                        onSelected: (_) =>
+                                            updateBalancer(current.copyWith(url: presetUrl.$1)),
+                                      ),
+                                    ActionChip(
+                                      avatar: const Icon(Icons.edit_outlined, size: 15),
+                                      label: const Text('Свой URL...'),
+                                      onPressed: () async {
+                                        final urlCtrl = TextEditingController(text: current.url);
+                                        final saved = await showDialog<String>(
+                                          context: ctx,
+                                          builder: (dCtx) => AlertDialog(
+                                            title: const Text('Свой URL проверки'),
+                                            content: TextField(
+                                              controller: urlCtrl,
+                                              autofocus: true,
+                                              decoration: const InputDecoration(
+                                                labelText: 'HTTP/HTTPS адрес (200/204)',
+                                                hintText: 'https://www.gstatic.com/generate_204',
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(dCtx).pop(),
+                                                child: const Text('Отмена'),
+                                              ),
+                                              FilledButton(
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(urlCtrl.text.trim()),
+                                                child: const Text('Сохранить'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        urlCtrl.dispose();
+                                        if (saved != null &&
+                                            (saved.startsWith('http://') ||
+                                                saved.startsWith('https://'))) {
+                                          updateBalancer(current.copyWith(url: saved));
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
                                 if (current.modeOption.id == 'sticky') ...[
                                   const Divider(height: Space.lg),
                                   Text(
@@ -3487,6 +3787,151 @@ Future<void> showBalancerSettingsSheet(
                                     ],
                                   ),
                                 ],
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: Space.md),
+                          const SectionLabel('Фильтр исключения стран и протоколов'),
+                          HairlineCard(
+                            padding: const EdgeInsets.all(Space.md),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Исключить страны',
+                                        style: Theme.of(ctx).textTheme.titleSmall,
+                                      ),
+                                    ),
+                                    if (current.excludedCountries.isNotEmpty)
+                                      TextButton(
+                                        onPressed: () => updateBalancer(
+                                          current.copyWith(excludedCountries: const []),
+                                        ),
+                                        child: const Text('Сбросить'),
+                                      ),
+                                  ],
+                                ),
+                                Text(
+                                  'Отмеченные страны и ключевые слова исключаются из списка серверов и автовыбора.',
+                                  style: TextStyle(fontSize: 11, color: tokens.faint),
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final c in BalancerSettings.commonCountryFilters)
+                                      FilterChip(
+                                        label: Text(
+                                          '${c.$2} ${c.$1}',
+                                          style: const TextStyle(fontSize: 11.5),
+                                        ),
+                                        tooltip: c.$3,
+                                        selected: current.excludedCountries.any(
+                                          (x) => x.toUpperCase() == c.$1,
+                                        ),
+                                        onSelected: (on) {
+                                          final next = current.excludedCountries
+                                              .where((x) => x.toUpperCase() != c.$1)
+                                              .toList();
+                                          if (on) next.add(c.$1);
+                                          updateBalancer(
+                                            current.copyWith(excludedCountries: next),
+                                          );
+                                        },
+                                      ),
+                                    ActionChip(
+                                      avatar: const Icon(Icons.add_rounded, size: 15),
+                                      label: const Text('Свои слова...'),
+                                      onPressed: () async {
+                                        final ctrl = TextEditingController(
+                                          text: current.excludedCountries.join(', '),
+                                        );
+                                        final res = await showDialog<String>(
+                                          context: ctx,
+                                          builder: (dCtx) => AlertDialog(
+                                            title: const Text('Исключить страны / слова'),
+                                            content: TextField(
+                                              controller: ctrl,
+                                              autofocus: true,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Коды стран или слова через запятую',
+                                                hintText: 'RU, KZ, BY, реклама, vip',
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(dCtx).pop(),
+                                                child: const Text('Отмена'),
+                                              ),
+                                              FilledButton(
+                                                onPressed: () =>
+                                                    Navigator.of(dCtx).pop(ctrl.text),
+                                                child: const Text('Применить'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        ctrl.dispose();
+                                        if (res != null) {
+                                          final parsed = res
+                                              .split(',')
+                                              .map((s) => s.trim())
+                                              .where((s) => s.isNotEmpty)
+                                              .toList(growable: false);
+                                          updateBalancer(
+                                            current.copyWith(excludedCountries: parsed),
+                                          );
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
+                                const Divider(height: Space.lg),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Исключить протоколы',
+                                        style: Theme.of(ctx).textTheme.titleSmall,
+                                      ),
+                                    ),
+                                    if (current.excludedProtocols.isNotEmpty)
+                                      TextButton(
+                                        onPressed: () => updateBalancer(
+                                          current.copyWith(excludedProtocols: const []),
+                                        ),
+                                        child: const Text('Сбросить'),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final proto in BalancerSettings.commonProtocolFilters)
+                                      FilterChip(
+                                        label: Text(
+                                          proto.$2,
+                                          style: const TextStyle(fontSize: 11.5),
+                                        ),
+                                        selected: current.excludedProtocols.contains(proto.$1),
+                                        onSelected: (on) {
+                                          final next = current.excludedProtocols
+                                              .where((x) => x != proto.$1)
+                                              .toList();
+                                          if (on) next.add(proto.$1);
+                                          updateBalancer(
+                                            current.copyWith(excludedProtocols: next),
+                                          );
+                                        },
+                                      ),
+                                  ],
+                                ),
                               ],
                             ),
                           ),

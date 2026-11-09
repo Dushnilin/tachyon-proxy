@@ -658,22 +658,33 @@ class MainActivity : FlutterFragmentActivity() {
     /** Определяет активный тип сети: wifi / cellular / ethernet / none (игнорируя VPN поверх сети). */
     @Suppress("DEPRECATION")
     private fun currentNetworkType(): String {
-        if (WifiSsidHelper.isWifiConnected(this)) return "wifi"
         val cm = getSystemService(ConnectivityManager::class.java) ?: return "none"
+        val active = cm.activeNetwork
+        if (active != null) {
+            val activeCaps = cm.getNetworkCapabilities(active)
+            if (activeCaps != null && !activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                return when {
+                    activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                    activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                    activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                    else -> "other"
+                }
+            }
+        }
+        var cellularFallback = false
+        var ethernetFallback = false
         for (net in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(net) ?: continue
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "cellular"
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ethernet"
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi"
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) ethernetFallback = true
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) cellularFallback = true
         }
-        val active = cm.activeNetwork ?: return "none"
-        val caps = cm.getNetworkCapabilities(active) ?: return "none"
-        return when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-            else -> "other"
-        }
+        if (ethernetFallback) return "ethernet"
+        if (cellularFallback) return "cellular"
+        if (WifiSsidHelper.isWifiConnected(this)) return "wifi"
+        return "none"
     }
 
     /** Возвращает информацию о текущем Wi-Fi подключении и видимых рядом сетях. */

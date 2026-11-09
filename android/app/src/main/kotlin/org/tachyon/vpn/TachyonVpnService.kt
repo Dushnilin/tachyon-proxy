@@ -9,8 +9,11 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import app.tachyon.tachyon_proxy.MainActivity
@@ -54,6 +57,11 @@ class TachyonVpnService : VpnService() {
 
     @Volatile
     private var activeNetworkHandle: Long? = null
+
+    @Volatile
+    private var underlyingNetwork: Network? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val restarting = AtomicBoolean(false)
 
@@ -417,6 +425,18 @@ class TachyonVpnService : VpnService() {
                 .addDnsServer(DNS_SERVER)
                 .addRoute("0.0.0.0", 0)
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
+
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val physNet = if (cm != null) resolvePhysicalNetwork(cm) else null
+            if (physNet != null) {
+                underlyingNetwork = physNet
+                activeNetworkHandle = physNet.networkHandle
+                runCatching { builder.setUnderlyingNetworks(arrayOf(physNet)) }
+            }
+
             if (allowedPackages.isNotEmpty()) {
                 allowedPackages.filter { it != packageName }.forEach { name ->
                     runCatching { builder.addAllowedApplication(name) }
@@ -444,6 +464,11 @@ class TachyonVpnService : VpnService() {
                 return
             }
             tunDescriptor = descriptor
+            if (physNet != null) {
+                runCatching { setUnderlyingNetworks(arrayOf(physNet)) }
+            } else {
+                runCatching { setUnderlyingNetworks(null) }
+            }
 
             val detachedFd = detachTunFd(descriptor)
             if (detachedFd == null) {
@@ -579,19 +604,76 @@ class TachyonVpnService : VpnService() {
             .getOrNull()
 
     /**
-     * Следит за системной сетью по умолчанию, обновляет underlying network
-     * и мгновенно проверяет условие «Домашний интернет» при смене Wi-Fi / LTE.
+     * Находит активную физическую сеть (Wi-Fi / Ethernet / Cellular), строго исключая
+     * виртуальный интерфейс самого VPN (`TRANSPORT_VPN`), чтобы `ConnectivityService`
+     * и `SystemUI` сохраняли индикацию Wi-Fi в статус-баре Android.
+     */
+    @Suppress("DEPRECATION")
+    private fun resolvePhysicalNetwork(
+        manager: ConnectivityManager,
+        exclude: Network? = null,
+    ): Network? {
+        underlyingNetwork?.let { cached ->
+            if (cached != exclude) {
+                val caps = runCatching { manager.getNetworkCapabilities(cached) }.getOrNull()
+                if (caps != null &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                ) {
+                    return cached
+                }
+            }
+        }
+        var cellularFallback: Network? = null
+        runCatching {
+            for (net in manager.allNetworks) {
+                if (net == exclude) continue
+                val caps = manager.getNetworkCapabilities(net) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                ) {
+                    return net
+                }
+                if (cellularFallback == null &&
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                ) {
+                    cellularFallback = net
+                }
+            }
+        }
+        return cellularFallback
+    }
+
+    /**
+     * Следит за физической сетью (`NET_CAPABILITY_NOT_VPN`), обновляет `underlyingNetworks`
+     * и мгновенно проверяет условие «Домашний интернет» и переключение списков при смене Wi-Fi / LTE.
      */
     private fun watchNetwork() {
         if (networkCallback != null) return
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
-        activeNetworkHandle = null
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
+                val caps = runCatching { manager.getNetworkCapabilities(network) }.getOrNull()
+                if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                val prevHandle = activeNetworkHandle
+                underlyingNetwork = network
                 activeNetworkHandle = network.networkHandle
                 if (running) {
                     runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                    if (prevHandle != network.networkHandle) {
+                        TunnelStateHolder.dispatchCommand("network_restored")
+                    }
                 }
+                TunnelStateHolder.dispatchCommand("network_changed")
                 lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
 
@@ -599,24 +681,47 @@ class TachyonVpnService : VpnService() {
                 network: Network,
                 networkCapabilities: NetworkCapabilities,
             ) {
+                if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+                underlyingNetwork = network
+                activeNetworkHandle = network.networkHandle
+                if (running) {
+                    runCatching { setUnderlyingNetworks(arrayOf(network)) }
+                }
+                TunnelStateHolder.dispatchCommand("network_changed")
                 lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
 
             override fun onLost(network: Network) {
                 if (activeNetworkHandle == network.networkHandle) {
-                    activeNetworkHandle = null
+                    val nextPhys = resolvePhysicalNetwork(manager, exclude = network)
+                    underlyingNetwork = nextPhys
+                    activeNetworkHandle = nextPhys?.networkHandle
                     if (running) {
-                        runCatching { setUnderlyingNetworks(null) }
+                        runCatching {
+                            setUnderlyingNetworks(if (nextPhys != null) arrayOf(nextPhys) else null)
+                        }
                     }
                 }
+                TunnelStateHolder.dispatchCommand("network_changed")
                 lifecycleExecutor.execute { runCatching { evaluateHomeWifiState() } }
             }
         }
         try {
-            manager.registerDefaultNetworkCallback(callback)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                manager.registerBestMatchingNetworkCallback(request, callback, mainHandler)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                manager.requestNetwork(request, callback, mainHandler)
+            } else {
+                manager.registerNetworkCallback(request, callback)
+            }
             networkCallback = callback
         } catch (error: Throwable) {
-            Log.w(TAG, "не удалось следить за сетью", error)
+            runCatching {
+                manager.registerNetworkCallback(request, callback)
+                networkCallback = callback
+            }.onFailure {
+                Log.w(TAG, "не удалось следить за сетью", it)
+            }
         }
     }
 

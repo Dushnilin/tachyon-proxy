@@ -82,6 +82,8 @@ object TunnelStateHolder {
         commandListeners.remove(listener)
     }
 
+    fun hasCommandListeners(): Boolean = commandListeners.isNotEmpty()
+
     fun dispatchCommand(cmd: String) {
         commandListeners.forEach { listener ->
             runCatching { listener.onCommand(cmd) }

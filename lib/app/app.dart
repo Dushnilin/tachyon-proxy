@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -86,7 +88,11 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkClipboard());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      AppScope.read(context).startTrafficPolling();
+      _checkClipboard();
+    });
   }
 
   @override
@@ -97,8 +103,15 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final controller = AppScope.read(context);
     if (state == AppLifecycleState.resumed) {
+      controller.startTrafficPolling();
+      unawaited(controller.onAppResumed());
       _checkClipboard();
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      controller.stopTrafficPolling();
     }
   }
 

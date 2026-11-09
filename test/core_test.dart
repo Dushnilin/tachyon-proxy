@@ -6,6 +6,7 @@ import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/models/tunnel_state.dart';
 import 'package:tachyon_proxy/core/services/dns_benchmark.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
+import 'package:tachyon_proxy/core/services/settings_store.dart';
 
 Profile _vlessProfile() => const Profile(
       id: 'p',
@@ -1040,6 +1041,132 @@ PersistentKeepalive = 15-30
         subscriptions: subs,
       );
       expect(lteCandidates.map((p) => p.id).toList(), ['fptn-fi-1']);
+    });
+
+    test('normalizeXhttpTransport очищает нулевой session_length и валидирует пространство ID', () {
+      final zeroStr = normalizeXhttpTransport({
+        'type': 'xhttp',
+        'path': '/xhttp',
+        'session_length': '0',
+        'sc_max_each_post_bytes': '0-0',
+        'sc_max_concurrent_posts': 0,
+        'xmux': {
+          'max_connections': '0',
+          'h_keep_alive_period': 0,
+        },
+      });
+      expect(zeroStr.containsKey('session_length'), isFalse);
+      expect(zeroStr.containsKey('session_table'), isFalse);
+      expect(zeroStr.containsKey('sc_max_each_post_bytes'), isFalse);
+      expect(zeroStr.containsKey('sc_max_concurrent_posts'), isFalse);
+      expect(zeroStr.containsKey('xmux'), isFalse);
+
+      final zeroRange = normalizeXhttpTransport({
+        'type': 'xhttp',
+        'session_length': '0-14',
+      });
+      expect(zeroRange['session_length'], '1-14');
+      expect(zeroRange['session_table'], 'hex');
+
+      final smallHex = normalizeXhttpTransport({
+        'type': 'xhttp',
+        'session_length': 4,
+      });
+      expect(smallHex['session_length'], '4-6');
+      expect(smallHex['session_table'], 'hex');
+    });
+
+    test('объединённая группа подписок включает профили из выбранных подписок и работает параллельно с ними', () {
+      const pSub1 = Profile(
+        id: 'p1',
+        name: '🇳🇱 NL Sub1',
+        type: 'vless',
+        server: 'nl1.example.com',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+        subscriptionId: 'sub1',
+      );
+      const pSub2De = Profile(
+        id: 'p2',
+        name: '🇩🇪 DE Sub2',
+        type: 'vless',
+        server: 'de2.example.com',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+        subscriptionId: 'sub2',
+      );
+      const pSub2Fi = Profile(
+        id: 'p3',
+        name: '🇫🇮 FI Sub2',
+        type: 'hysteria2',
+        server: 'fi2.example.com',
+        port: 443,
+        password: 'pw',
+        subscriptionId: 'sub2',
+      );
+      const pStandalone = Profile(
+        id: 'p4',
+        name: '🇸🇪 SE Standalone',
+        type: 'vless',
+        server: 'se.example.com',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+        subscriptionId: '',
+      );
+
+      const subs = [
+        SubscriptionEntry(
+          id: 'group_1',
+          url: 'group://merged',
+          name: 'Общая группа',
+          mergedSubscriptionIds: ['sub1', 'sub2', '__standalone__'],
+          excludedCountries: ['DE'],
+        ),
+        SubscriptionEntry(
+          id: 'sub1',
+          url: 'https://example.com/1',
+          name: 'Подписка 1',
+          networkScope: 'wifi',
+        ),
+        SubscriptionEntry(
+          id: 'sub2',
+          url: 'https://example.com/2',
+          name: 'Подписка 2',
+          networkScope: 'cellular',
+        ),
+      ];
+
+      final settings = AppSettings(
+        profiles: const [pSub1, pSub2De, pSub2Fi, pStandalone],
+        subscriptions: subs,
+      );
+
+      // Отдельные подписки продолжают возвращать свои профили
+      expect(settings.profilesForSubscription('sub1').map((p) => p.id).toList(), ['p1']);
+      expect(settings.profilesForSubscription('sub2').map((p) => p.id).toList(), ['p2', 'p3']);
+      // Объединённая группа включает все входящие подписки и отдельные серверы
+      expect(
+        settings.profilesForSubscription('group_1').map((p) => p.id).toList(),
+        ['p1', 'p2', 'p3', 'p4'],
+      );
+
+      // Автобалансировщик группы применяет собственные фильтры стран (исключена DE)
+      // и игнорирует индивидуальный networkScope дочерних подписок при явном выборе группы
+      const autoGroup = Profile(
+        id: 'auto:group_1',
+        name: 'Авто (Общая группа)',
+        type: 'balancer',
+        server: 'auto',
+        port: 0,
+        subscriptionId: 'group_1',
+      );
+      final groupCandidates = RuntimeConfig.resolveAutoCandidates(
+        autoGroup,
+        settings.profiles,
+        activeNetworkType: 'wifi',
+        subscriptions: subs,
+      );
+      expect(groupCandidates.map((p) => p.id).toList(), ['p1', 'p3', 'p4']);
     });
   });
 }

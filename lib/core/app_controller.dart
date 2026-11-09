@@ -385,17 +385,21 @@ class AppController extends ChangeNotifier {
   }
 
   /// Проверяет, разрешён ли профиль текущими фильтрами исключения стран и протоколов.
-  bool isProfileAllowedByFilters(Profile p) {
+  bool isProfileAllowedByFilters(Profile p, {SubscriptionEntry? contextSub}) {
     final sub = p.subscriptionId.isEmpty
         ? null
         : _settings.subscriptions.where((s) => s.id == p.subscriptionId).firstOrNull;
     final exCountries = <String>[
       ..._settings.balancer.excludedCountries,
       if (sub != null) ...sub.excludedCountries,
+      if (contextSub != null && contextSub.id != sub?.id)
+        ...contextSub.excludedCountries,
     ];
     final exProtocols = <String>[
       ..._settings.balancer.excludedProtocols,
       if (sub != null) ...sub.excludedProtocols,
+      if (contextSub != null && contextSub.id != sub?.id)
+        ...contextSub.excludedProtocols,
     ];
     if (exCountries.isEmpty && exProtocols.isEmpty) return true;
     return BalancerSettings.matchesFilter(
@@ -418,7 +422,12 @@ class AppController extends ChangeNotifier {
     if (_loadingSubscription) return;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     for (final sub in _settings.visibleSubscriptions) {
-      if (!sub.enabled || AppSettings.isFreeSubId(sub.id) || sub.isFptnToken) continue;
+      if (!sub.enabled ||
+          AppSettings.isFreeSubId(sub.id) ||
+          sub.isFptnToken ||
+          sub.isCombinedGroup) {
+        continue;
+      }
       final autoEnabled = _settings.autoUpdateSubs || sub.autoUpdateHours > 0;
       if (!autoEnabled) continue;
       final intervalMs = _subAutoUpdateIntervalMs(sub);
@@ -432,7 +441,7 @@ class AppController extends ChangeNotifier {
   Future<void> _refreshStale() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     for (final sub in _settings.visibleSubscriptions) {
-      if (sub.enabled && !AppSettings.isFreeSubId(sub.id)) {
+      if (sub.enabled && !AppSettings.isFreeSubId(sub.id) && !sub.isCombinedGroup) {
         final hasServers = _settings.profiles.any((p) => p.subscriptionId == sub.id);
         final autoEnabled = _settings.autoUpdateSubs || sub.autoUpdateHours > 0;
         final intervalMs = _subAutoUpdateIntervalMs(sub);
@@ -1317,6 +1326,24 @@ class AppController extends ChangeNotifier {
   Future<int> fetchSubscription(String subId) async {
     final sub = _settings.subscriptions.where((s) => s.id == subId).firstOrNull;
     if (sub == null || sub.url.isEmpty) return 0;
+    if (sub.isCombinedGroup) {
+      var total = 0;
+      for (final memberId in sub.mergedSubscriptionIds) {
+        if (memberId == '__standalone__' || memberId == subId) continue;
+        total += await fetchSubscription(memberId);
+      }
+      final allGroupProfiles = _settings.profilesForSubscription(subId);
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      await _update(
+        _settings.copyWith(
+          subscriptions: [
+            for (final s in _settings.subscriptions)
+              if (s.id == subId) s.copyWith(updatedAt: nowMs) else s,
+          ],
+        ),
+      );
+      return total > 0 ? total : allGroupProfiles.length;
+    }
     if (sub.isFptnToken) {
       _loadingSubscription = true;
       _lastError = '';
@@ -1780,25 +1807,101 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Удаляет подписку, её серверы и её кэш.
-  Future<void> removeSubscription(String id) async {
-    final file = File('$filesDirPath/subs/$id.txt');
-    if (await file.exists()) {
-      try {
-        await file.delete();
-      } catch (_) {}
-    }
-    final remainingProfiles = _settings.profiles
-        .where((p) => p.subscriptionId != id)
+  /// Создаёт или обновляет объединённую группу из нескольких подписок (и/или отдельных серверов).
+  Future<SubscriptionEntry> saveCombinedSubscriptionGroup({
+    String? existingId,
+    required String name,
+    required List<String> memberIds,
+    String networkScope = 'all',
+    List<String> excludedCountries = const [],
+    List<String> excludedProtocols = const [],
+  }) async {
+    final cleanMembers = memberIds
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
         .toList(growable: false);
-    final nextSelected = remainingProfiles.any((p) => p.id == _settings.selectedProfileId)
-        ? _settings.selectedProfileId
+    final id = (existingId != null && existingId.isNotEmpty)
+        ? existingId
+        : 'group_${DateTime.now().millisecondsSinceEpoch}';
+    final cleanScope = (networkScope == 'wifi' || networkScope == 'cellular')
+        ? networkScope
+        : 'all';
+    final cleanName = name.trim().isNotEmpty ? name.trim() : 'Объединённая группа';
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final prev = _settings.subscriptions.where((s) => s.id == id).firstOrNull;
+    final entry = (prev ?? SubscriptionEntry(id: id, url: 'group://$id')).copyWith(
+      url: 'group://$id',
+      name: cleanName,
+      updatedAt: nowMs,
+      networkScope: cleanScope,
+      mergedSubscriptionIds: cleanMembers,
+      excludedCountries: excludedCountries,
+      excludedProtocols: excludedProtocols,
+    );
+    final List<SubscriptionEntry> updatedSubs;
+    if (prev != null) {
+      updatedSubs = [
+        for (final s in _settings.subscriptions)
+          if (s.id == id) entry else s,
+      ];
+    } else {
+      updatedSubs = [entry, ..._settings.subscriptions];
+    }
+    final nextSelected = prev == null ? 'auto:$id' : _settings.selectedProfileId;
+    await _update(
+      _settings.copyWith(
+        subscriptions: updatedSubs,
+        selectedProfileId: nextSelected,
+      ),
+    );
+    if (_tunnel.status.isActive &&
+        _settings.routingMode != RoutingMode.desync &&
+        nextSelected.startsWith('auto:')) {
+      await _restartActiveTunnel();
+    }
+    return entry;
+  }
+
+  /// Удаляет подписку, её серверы и её кэш (для объединённой группы удаляет только саму группу).
+  Future<void> removeSubscription(String id) async {
+    final targetSub = _settings.subscriptions.where((s) => s.id == id).firstOrNull;
+    final isGroup = targetSub != null && targetSub.isCombinedGroup;
+    if (!isGroup) {
+      final file = File('$filesDirPath/subs/$id.txt');
+      if (await file.exists()) {
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
+    }
+    final remainingProfiles = isGroup
+        ? _settings.profiles
+        : _settings.profiles
+            .where((p) => p.subscriptionId != id)
+            .toList(growable: false);
+    final remainingSubs = _settings.subscriptions
+        .where((sub) => sub.id != id)
+        .map((sub) => sub.isCombinedGroup && sub.mergedSubscriptionIds.contains(id)
+            ? sub.copyWith(
+                mergedSubscriptionIds: sub.mergedSubscriptionIds
+                    .where((m) => m != id)
+                    .toList(growable: false),
+              )
+            : sub)
+        .toList(growable: false);
+    final currentSel = _settings.selectedProfileId;
+    final keepSel = (currentSel == 'auto:all') ||
+        (currentSel.startsWith('auto:') &&
+            currentSel != 'auto:$id' &&
+            remainingSubs.any((s) => 'auto:${s.id}' == currentSel)) ||
+        remainingProfiles.any((p) => p.id == currentSel);
+    final nextSelected = keepSel
+        ? currentSel
         : (remainingProfiles.isNotEmpty ? remainingProfiles.first.id : '');
 
     await _update(_settings.copyWith(
-      subscriptions: _settings.subscriptions
-          .where((sub) => sub.id != id)
-          .toList(growable: false),
+      subscriptions: remainingSubs,
       profiles: remainingProfiles,
       selectedProfileId: nextSelected,
     ));
@@ -2893,7 +2996,7 @@ class AppController extends ChangeNotifier {
     await pingAllProfiles(subscriptionId: subscriptionId);
     final rawCandidates = subscriptionId == null
         ? _settings.visibleProfiles
-        : _settings.visibleProfiles.where((p) => p.subscriptionId == subscriptionId).toList();
+        : _settings.profilesForSubscription(subscriptionId);
     final filtered = rawCandidates.where(isProfileAllowedByFilters).toList(growable: false);
     final candidates = filtered.isNotEmpty ? filtered : rawCandidates;
     Profile? best;
@@ -2921,8 +3024,16 @@ class AppController extends ChangeNotifier {
   /// Удаляет недоступные серверы (с пингом < 0) из списка или конкретной подписки.
   Future<int> removeDeadProfiles({String? subscriptionId}) async {
     final before = _settings.profiles.length;
+    final targetSub = subscriptionId == null
+        ? null
+        : _settings.subscriptions.where((s) => s.id == subscriptionId).firstOrNull;
     final remaining = _settings.profiles.where((p) {
-      if (subscriptionId != null && p.subscriptionId != subscriptionId) return true;
+      if (subscriptionId != null) {
+        final inSub = targetSub != null
+            ? targetSub.containsProfile(p)
+            : p.subscriptionId == subscriptionId;
+        if (!inSub) return true;
+      }
       final ms = _pings[p.id];
       return ms == null || ms >= 0;
     }).toList();

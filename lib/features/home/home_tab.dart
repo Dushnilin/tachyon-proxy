@@ -36,8 +36,14 @@ class _HomeTabState extends State<HomeTab> {
     });
   }
 
-  List<Profile> _filter(List<Profile> items, AppController controller) {
-    final allowed = items.where(controller.isProfileAllowedByFilters).toList(growable: false);
+  List<Profile> _filter(
+    List<Profile> items,
+    AppController controller, {
+    SubscriptionEntry? contextSub,
+  }) {
+    final allowed = items
+        .where((p) => controller.isProfileAllowedByFilters(p, contextSub: contextSub))
+        .toList(growable: false);
     final base = allowed.isNotEmpty ? allowed : items;
     final q = _searchQuery.trim().toLowerCase();
     if (q.isEmpty) return base;
@@ -296,7 +302,11 @@ class _HomeTabState extends State<HomeTab> {
           final rawSubProfiles = controller.settings.profilesForSubscription(sub.id);
           final subProfiles = isCollapsed
               ? rawSubProfiles
-              : _filter(controller.sortProfiles(rawSubProfiles), controller);
+              : _filter(
+                  controller.sortProfiles(rawSubProfiles),
+                  controller,
+                  contextSub: sub,
+                );
 
           slivers.add(
             SliverToBoxAdapter(

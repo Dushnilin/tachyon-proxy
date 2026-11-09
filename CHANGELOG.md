@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.18]
+
+- **Фильтрация нулевых параметров и валидация `session_length` в `XHTTP` (`_formatXhttpRange`, `normalizeXhttpTransport`):** при разборе XHTTP-узлов с дефолтными нулевыми полями `extra` (`"sessionLength": 0`, `{"from": 0, "to": 0}`, `"0-0"`) нулевые и неположительные диапазоны и лимиты (`session_length`, `sc_max_each_post_bytes`, `sc_min_posts_interval_ms`, `x_padding_bytes`, `sc_stream_up_server_secs`, `sc_max_concurrent_posts`, `server_max_header_bytes`, `sc_max_buffered_posts`, `xmux.max_connections`, `xmux.h_keep_alive_period`) исключаются из конфигурации транспорта вместо записи `"0"`, что устраняет ошибку валидации ядра `transport.session_length: must be above 0`. Для диапазонов вида `"0-N"` нижняя граница приводится к `1`, а при малом верхнем пределе он автоматически расширяется до минимального пространства идентификаторов сессии ядра (`>= 2^24`).
+- **Объединение нескольких подписок в единую группу (`SubscriptionEntry.mergedSubscriptionIds`, `AppController.saveCombinedSubscriptionGroup`, `RuntimeConfig.resolveAutoCandidates`, `ProfilesTab`):** добавлено создание объединённых групп подписок (`Объединить подписки в группу`), позволяющее собрать серверы из выбранных подписок и/или отдельных серверов в общий список со своим балансировщиком (`auto:<groupId>`), привязкой к типу сети (`Wi-Fi` / `Мобильная`) и собственными фильтрами исключения стран и протоколов. Исходные подписки остаются на месте и продолжают работать как вместе (через объединённую группу), так и по отдельности; обновление объединённой группы обновляет все входящие в неё подписки, а её удаление не затрагивает исходные подписки и их серверы.
+
 ## [0.0.17]
 
 - **Изоляция замыкания `Isolate.run` при разборе подписок (`AppController.fetchSubscription`):** замыкание `parseEngineNodesAsync` вынесено в статический метод `_parseEngineNodesStatic`, не захватывающий экземпляр `AppController` (`this`) с активными таймерами `dart:async._Timer`, что устраняет ошибку `Invalid argument(s): Illegal argument in isolate message: object is unsendable - Class: _Timer` при добавлении и обновлении подписок.

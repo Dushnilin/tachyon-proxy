@@ -24,8 +24,14 @@ class ProfilesTab extends StatefulWidget {
 class _ProfilesTabState extends State<ProfilesTab> {
   String _searchQuery = '';
 
-  List<Profile> _filter(List<Profile> items, AppController controller) {
-    final allowed = items.where(controller.isProfileAllowedByFilters).toList(growable: false);
+  List<Profile> _filter(
+    List<Profile> items,
+    AppController controller, {
+    SubscriptionEntry? contextSub,
+  }) {
+    final allowed = items
+        .where((p) => controller.isProfileAllowedByFilters(p, contextSub: contextSub))
+        .toList(growable: false);
     final base = allowed.isNotEmpty ? allowed : items;
     final q = _searchQuery.trim().toLowerCase();
     if (q.isEmpty) return base;
@@ -104,6 +110,10 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   if (context.mounted) {
                     await showNetworkListsSheet(context, controller);
                   }
+                case 'merge_subs':
+                  if (context.mounted) {
+                    await showCombinedGroupDialog(context, controller);
+                  }
                 case 'tv_receive':
                   if (context.mounted) {
                     await showTvReceiveDialog(context, controller);
@@ -159,6 +169,18 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       contentPadding: EdgeInsets.zero,
                       leading: Icon(Icons.swap_calls_rounded, size: 20),
                       title: Text('Списки для Wi-Fi и Мобильной сети'),
+                    ),
+                  ),
+                if (subs.where((s) => !s.isCombinedGroup).length >= 2 ||
+                    (subs.any((s) => !s.isCombinedGroup) &&
+                        controller.settings.profilesForSubscription('').isNotEmpty))
+                  const PopupMenuItem(
+                    value: 'merge_subs',
+                    child: ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.workspaces_outline, size: 20),
+                      title: Text('Объединить подписки в группу'),
                     ),
                   ),
                 const PopupMenuItem(
@@ -288,6 +310,29 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   controller: controller,
                   onTap: () => showNetworkListsSheet(context, controller),
                 ),
+                if (subs.where((s) => !s.isCombinedGroup).length >= 2 ||
+                    (subs.any((s) => !s.isCombinedGroup) &&
+                        standaloneProfiles.isNotEmpty)) ...[
+                  const SizedBox(height: Space.xs),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Space.md,
+                          vertical: 8,
+                        ),
+                      ),
+                      onPressed: () => showCombinedGroupDialog(context, controller),
+                      icon: const Icon(Icons.workspaces_outline, size: 16),
+                      label: const Text(
+                        'Объединить подписки в группу',
+                        style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: Space.md),
               ],
             ],
@@ -304,6 +349,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
           controller.settings.profilesForSubscription(sub.id),
         ),
         controller,
+        contextSub: sub,
       );
 
       slivers.add(
@@ -346,14 +392,20 @@ class _ProfilesTabState extends State<ProfilesTab> {
               onPingAllSub: () =>
                   controller.pingAllProfiles(subscriptionId: sub.id),
               onSelectProfile: (id) => controller.selectProfile(id),
-              onEditSub: () => sub.isFptnToken
-                  ? showFptnTokenDialog(
+              onEditSub: () => sub.isCombinedGroup
+                  ? showCombinedGroupDialog(
                       context,
                       controller,
-                      sub.url,
-                      existingSub: sub,
+                      existingGroup: sub,
                     )
-                  : _showEditSubDialog(context, controller, sub),
+                  : (sub.isFptnToken
+                      ? showFptnTokenDialog(
+                          context,
+                          controller,
+                          sub.url,
+                          existingSub: sub,
+                        )
+                      : _showEditSubDialog(context, controller, sub)),
             ),
           ),
         ),
@@ -2589,6 +2641,308 @@ Future<void> _showEditSubDialog(
   countriesCtrl.dispose();
 }
 
+/// Диалог создания или редактирования объединённой группы из нескольких подписок (и/или отдельных серверов).
+Future<void> showCombinedGroupDialog(
+  BuildContext context,
+  AppController controller, {
+  SubscriptionEntry? existingGroup,
+}) async {
+  final sourceSubs = controller.settings.visibleSubscriptions
+      .where((s) => !s.isCombinedGroup)
+      .toList(growable: false);
+  final standaloneProfiles = controller.settings.profilesForSubscription('');
+  final nameCtrl = TextEditingController(
+    text: existingGroup?.name.isNotEmpty == true ? existingGroup!.name : 'Общая группа',
+  );
+  final countriesCtrl = TextEditingController(
+    text: existingGroup?.excludedCountries.join(', ') ?? '',
+  );
+  var selectedScope = existingGroup?.networkScope ?? 'all';
+  final selectedExProtos = <String>{...?existingGroup?.excludedProtocols};
+  final selectedMembers = <String>{
+    if (existingGroup != null && existingGroup.mergedSubscriptionIds.isNotEmpty)
+      ...existingGroup.mergedSubscriptionIds
+    else ...[
+      for (final s in sourceSubs) s.id,
+      if (standaloneProfiles.isNotEmpty) '__standalone__',
+    ],
+  };
+
+  await showDialog<void>(
+    context: context,
+    builder: (dialogCtx) => StatefulBuilder(
+      builder: (ctx, setStateDialog) {
+        final tokens = ctx.tokens;
+        return AlertDialog(
+          title: Text(
+            existingGroup == null
+                ? 'Объединить подписки в группу'
+                : 'Настроить объединённую группу',
+          ),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Объединяет серверы из выбранных подписок в единую группу со своим автовыбором. '
+                    'Исходные подписки остаются на месте и продолжают работать как вместе, так и по отдельности.',
+                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(color: tokens.muted),
+                  ),
+                  const SizedBox(height: Space.md),
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Название группы',
+                      hintText: 'Например: Основной пул',
+                    ),
+                  ),
+                  const SizedBox(height: Space.md),
+                  Row(
+                    children: [
+                      Text(
+                        'Включить подписки (${selectedMembers.length})',
+                        style: Theme.of(ctx).textTheme.titleSmall,
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () {
+                          setStateDialog(() {
+                            final totalAvailable = sourceSubs.length +
+                                (standaloneProfiles.isNotEmpty ? 1 : 0);
+                            if (selectedMembers.length >= totalAvailable) {
+                              selectedMembers.clear();
+                            } else {
+                              for (final s in sourceSubs) {
+                                selectedMembers.add(s.id);
+                              }
+                              if (standaloneProfiles.isNotEmpty) {
+                                selectedMembers.add('__standalone__');
+                              }
+                            }
+                          });
+                        },
+                        child: const Text('Все / Сброс', style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: tokens.surface,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: tokens.line),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final s in sourceSubs)
+                          Builder(
+                            builder: (_) {
+                              final count = controller.settings.profilesForSubscription(s.id).length;
+                              final label = s.name.isNotEmpty
+                                  ? s.name
+                                  : (s.isFptnToken
+                                      ? 'FPTN'
+                                      : (Uri.tryParse(s.url)?.host ?? 'Подписка'));
+                              return CheckboxListTile(
+                                dense: true,
+                                controlAffinity: ListTileControlAffinity.leading,
+                                value: selectedMembers.contains(s.id),
+                                onChanged: (on) {
+                                  setStateDialog(() {
+                                    if (on == true) {
+                                      selectedMembers.add(s.id);
+                                    } else {
+                                      selectedMembers.remove(s.id);
+                                    }
+                                  });
+                                },
+                                title: Text(
+                                  label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                                ),
+                                subtitle: Text(
+                                  '$count серв.',
+                                  style: TextStyle(fontSize: 11, color: tokens.muted),
+                                ),
+                              );
+                            },
+                          ),
+                        if (standaloneProfiles.isNotEmpty)
+                          CheckboxListTile(
+                            dense: true,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            value: selectedMembers.contains('__standalone__'),
+                            onChanged: (on) {
+                              setStateDialog(() {
+                                if (on == true) {
+                                  selectedMembers.add('__standalone__');
+                                } else {
+                                  selectedMembers.remove('__standalone__');
+                                }
+                              });
+                            },
+                            title: const Text(
+                              'Отдельные серверы (без подписки)',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
+                            subtitle: Text(
+                              '${standaloneProfiles.length} серв.',
+                              style: TextStyle(fontSize: 11, color: tokens.muted),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: Space.md),
+                  Text(
+                    'Сеть для этой группы',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final opt in const [
+                        ('all', 'Все сети', Icons.public_rounded),
+                        ('wifi', 'Только Wi-Fi', Icons.wifi_rounded),
+                        ('cellular', 'Мобильная (LTE/5G)', Icons.signal_cellular_alt_rounded),
+                      ])
+                        ChoiceChip(
+                          avatar: Icon(opt.$3, size: 15),
+                          label: Text(opt.$2, style: const TextStyle(fontSize: 12)),
+                          selected: selectedScope == opt.$1,
+                          onSelected: (_) => setStateDialog(() => selectedScope = opt.$1),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: Space.md),
+                  Text(
+                    'Исключить страны в этой группе',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final c in BalancerSettings.commonCountryFilters)
+                        Builder(
+                          builder: (_) {
+                            final currentTokens = countriesCtrl.text
+                                .split(',')
+                                .map((s) => s.trim())
+                                .where((s) => s.isNotEmpty)
+                                .toList();
+                            final isSelected = currentTokens.any(
+                              (x) => x.toUpperCase() == c.$1,
+                            );
+                            return FilterChip(
+                              label: Text(
+                                '${c.$2} ${c.$1}',
+                                style: const TextStyle(fontSize: 11.5),
+                              ),
+                              tooltip: c.$3,
+                              selected: isSelected,
+                              onSelected: (on) {
+                                final next = currentTokens
+                                    .where((x) => x.toUpperCase() != c.$1)
+                                    .toList();
+                                if (on) next.add(c.$1);
+                                setStateDialog(() {
+                                  countriesCtrl.text = next.join(', ');
+                                });
+                              },
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: Space.xs),
+                  TextField(
+                    controller: countriesCtrl,
+                    onChanged: (_) => setStateDialog(() {}),
+                    decoration: const InputDecoration(
+                      labelText: 'Коды стран или ключевые слова (через запятую)',
+                      hintText: 'Например: RU, KZ, NL',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: Space.sm),
+                  Text(
+                    'Исключить протоколы',
+                    style: Theme.of(ctx).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: Space.xs),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final proto in BalancerSettings.commonProtocolFilters)
+                        FilterChip(
+                          label: Text(proto.$2, style: const TextStyle(fontSize: 11.5)),
+                          selected: selectedExProtos.contains(proto.$1),
+                          onSelected: (on) {
+                            setStateDialog(() {
+                              if (on) {
+                                selectedExProtos.add(proto.$1);
+                              } else {
+                                selectedExProtos.remove(proto.$1);
+                              }
+                            });
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: selectedMembers.isEmpty
+                  ? null
+                  : () async {
+                      final exCountries = countriesCtrl.text
+                          .split(',')
+                          .map((s) => s.trim())
+                          .where((s) => s.isNotEmpty)
+                          .toList(growable: false);
+                      final exProtos = selectedExProtos.toList(growable: false);
+                      final groupName = nameCtrl.text.trim();
+                      final members = selectedMembers.toList(growable: false);
+                      Navigator.of(dialogCtx).pop();
+                      await controller.saveCombinedSubscriptionGroup(
+                        existingId: existingGroup?.id,
+                        name: groupName,
+                        memberIds: members,
+                        networkScope: selectedScope,
+                        excludedCountries: exCountries,
+                        excludedProtocols: exProtos,
+                      );
+                    },
+              child: Text(existingGroup == null ? 'Создать группу' : 'Сохранить'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+  nameCtrl.dispose();
+  countriesCtrl.dispose();
+}
+
 /// Сворачиваемая карточка заголовка подписки с информацией о трафике и сроке действия.
 /// Сами серверы подписки рендерятся лениво через `SliverList.builder` в `ProfilesTab`.
 class _CollapsibleSubCard extends StatelessWidget {
@@ -2706,6 +3060,31 @@ class _CollapsibleSubCard extends StatelessWidget {
                                         ),
                                   ),
                                 ),
+                                if (sub.isCombinedGroup) ...[
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: tokens.accent.withValues(alpha: 0.14),
+                                      borderRadius: BorderRadius.circular(3),
+                                      border: Border.all(
+                                        color: tokens.accent.withValues(alpha: 0.4),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      'ГРУППА (${sub.mergedSubscriptionIds.length})',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w700,
+                                        fontFamily: 'monospace',
+                                        color: tokens.accent,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                                 if (sub.isFptnToken) ...[
                                   const SizedBox(width: 6),
                                   Container(

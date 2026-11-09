@@ -290,8 +290,28 @@ class AppSettings {
     }
   }
 
-  List<Profile> profilesForSubscription(String subId) =>
-      profilesBySubscription[subId] ?? const [];
+  List<Profile> profilesForSubscription(String subId) {
+    if (subId.isNotEmpty) {
+      for (final s in subscriptions) {
+        if (s.id == subId && s.isCombinedGroup) {
+          final bySub = profilesBySubscription;
+          final out = <Profile>[];
+          final seenIds = <String>{};
+          for (final memberId in s.mergedSubscriptionIds) {
+            final key = memberId == '__standalone__' ? '' : memberId;
+            final list = bySub[key];
+            if (list != null) {
+              for (final p in list) {
+                if (seenIds.add(p.id)) out.add(p);
+              }
+            }
+          }
+          return out;
+        }
+      }
+    }
+    return profilesBySubscription[subId] ?? const [];
+  }
 
   List<SubscriptionEntry> get visibleSubscriptions {
     if (subscriptions.isEmpty) return const [];

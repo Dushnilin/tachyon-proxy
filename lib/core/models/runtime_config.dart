@@ -2071,6 +2071,7 @@ class SubscriptionEntry {
     this.excludedCountries = const [],
     this.excludedProtocols = const [],
     this.autoUpdateHours = 0,
+    this.mergedSubscriptionIds = const [],
   });
 
   /// Идентификатор: стабилен, участвует в тегах аутбаундов и файлах кэша.
@@ -2108,6 +2109,23 @@ class SubscriptionEntry {
   /// Индивидуальный интервал автообновления в часах (`0` — использовать глобальный).
   final int autoUpdateHours;
 
+  /// Идентификаторы подписок (или `'__standalone__'` для отдельных серверов),
+  /// объединённых в единую виртуальную группу.
+  final List<String> mergedSubscriptionIds;
+
+  bool get isCombinedGroup =>
+      mergedSubscriptionIds.isNotEmpty || url.trim().toLowerCase().startsWith('group://');
+
+  bool containsProfile(Profile p) {
+    if (isCombinedGroup) {
+      if (p.subscriptionId.isEmpty) {
+        return mergedSubscriptionIds.contains('__standalone__');
+      }
+      return mergedSubscriptionIds.contains(p.subscriptionId);
+    }
+    return p.subscriptionId == id;
+  }
+
   bool get isFptnToken {
     final u = url.trim().toLowerCase();
     return u.startsWith('fptn:') ||
@@ -2139,6 +2157,7 @@ class SubscriptionEntry {
     List<String>? excludedCountries,
     List<String>? excludedProtocols,
     int? autoUpdateHours,
+    List<String>? mergedSubscriptionIds,
   }) =>
       SubscriptionEntry(
         id: id,
@@ -2158,6 +2177,7 @@ class SubscriptionEntry {
         excludedCountries: excludedCountries ?? this.excludedCountries,
         excludedProtocols: excludedProtocols ?? this.excludedProtocols,
         autoUpdateHours: autoUpdateHours ?? this.autoUpdateHours,
+        mergedSubscriptionIds: mergedSubscriptionIds ?? this.mergedSubscriptionIds,
       );
 
   Map<String, dynamic> toJson() => {
@@ -2182,6 +2202,8 @@ class SubscriptionEntry {
         if (excludedProtocols.isNotEmpty)
           'excludedProtocols': excludedProtocols,
         if (autoUpdateHours > 0) 'autoUpdateHours': autoUpdateHours,
+        if (mergedSubscriptionIds.isNotEmpty)
+          'mergedSubscriptionIds': mergedSubscriptionIds,
       };
 
   static SubscriptionEntry fromJson(Map<String, dynamic> json) {
@@ -2198,6 +2220,11 @@ class SubscriptionEntry {
         const <String>[];
     final rawExProtocols = (json['excludedProtocols'] as List?)
             ?.map((e) => e.toString().trim().toLowerCase())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
+    final rawMerged = (json['mergedSubscriptionIds'] as List?)
+            ?.map((e) => e.toString().trim())
             .where((s) => s.isNotEmpty)
             .toList(growable: false) ??
         const <String>[];
@@ -2219,6 +2246,7 @@ class SubscriptionEntry {
       excludedCountries: rawExCountries,
       excludedProtocols: rawExProtocols,
       autoUpdateHours: ((json['autoUpdateHours'] as num?)?.toInt() ?? 0).clamp(0, 720),
+      mergedSubscriptionIds: rawMerged,
     );
   }
 }
@@ -2326,30 +2354,39 @@ class RuntimeConfig {
     if (profile.type != 'urltest' && !profile.id.startsWith('auto:')) {
       return const <Profile>[];
     }
-    final basePool = extraProfiles
-        .where((p) =>
-            p.server.isNotEmpty &&
-            p.type != 'urltest' &&
-            p.type != 'direct' &&
-            (profile.subscriptionId.isEmpty || p.subscriptionId == profile.subscriptionId))
-        .toList(growable: false);
-    if (basePool.isEmpty) return const <Profile>[];
-
     final subById = <String, SubscriptionEntry>{
       for (final s in subscriptions)
         if (s.id.isNotEmpty) s.id: s,
     };
+    final targetSub =
+        profile.subscriptionId.isNotEmpty ? subById[profile.subscriptionId] : null;
 
-    // 1. Применяем фильтры исключения стран и протоколов (подписки + глобального балансировщика)
+    final basePool = extraProfiles
+        .where((p) {
+          if (p.server.isEmpty || p.type == 'urltest' || p.type == 'direct') {
+            return false;
+          }
+          if (profile.subscriptionId.isEmpty) return true;
+          if (targetSub != null && targetSub.isCombinedGroup) {
+            return targetSub.containsProfile(p);
+          }
+          return p.subscriptionId == profile.subscriptionId;
+        })
+        .toList(growable: false);
+    if (basePool.isEmpty) return const <Profile>[];
+
+    // 1. Применяем фильтры исключения стран и протоколов (подписки + объединённой группы + глобального балансировщика)
     final filterPool = basePool.where((p) {
       final sub = subById[p.subscriptionId];
       final exCountries = <String>[
         ...balancer.excludedCountries,
         if (sub != null) ...sub.excludedCountries,
+        if (targetSub != null && targetSub.id != sub?.id) ...targetSub.excludedCountries,
       ];
       final exProtocols = <String>[
         ...balancer.excludedProtocols,
         if (sub != null) ...sub.excludedProtocols,
+        if (targetSub != null && targetSub.id != sub?.id) ...targetSub.excludedProtocols,
       ];
       if (exCountries.isEmpty && exProtocols.isEmpty) return true;
       return BalancerSettings.matchesFilter(
@@ -2366,11 +2403,16 @@ class RuntimeConfig {
       return effectiveBase.take(256).toList(growable: false);
     }
 
+    // Если выбрана конкретная объединённая группа, учитываем только личный networkScope серверов,
+    // чтобы объединение Wi-Fi и мобильных подписок работало вместе по выбору пользователя.
+    final isExplicitCombinedGroup = targetSub != null && targetSub.isCombinedGroup;
     final filtered = effectiveBase.where((p) {
       final profScope = p.networkScope;
       final effectiveScope = profScope != 'all'
           ? profScope
-          : (subById[p.subscriptionId]?.networkScope ?? 'all');
+          : (isExplicitCombinedGroup
+              ? 'all'
+              : (subById[p.subscriptionId]?.networkScope ?? 'all'));
       return effectiveScope == 'all' || effectiveScope == net;
     }).take(256).toList(growable: false);
 
@@ -3098,7 +3140,9 @@ int? _parseXhttpIntPart(Object? val) {
 String? _formatXhttpRange(Object? val) {
   if (val == null) return null;
   if (val is num) {
-    return val.isFinite ? val.round().toString() : null;
+    if (!val.isFinite) return null;
+    final n = val.round();
+    return n > 0 ? n.toString() : null;
   }
   if (val is String) {
     final s = val.trim();
@@ -3108,24 +3152,37 @@ String? _formatXhttpRange(Object? val) {
       final a = _parseXhttpIntPart(s.substring(0, dashIdx));
       final b = _parseXhttpIntPart(s.substring(dashIdx + 1));
       if (a != null && b != null) {
-        return a == b ? '$a' : '$a-$b';
+        var lo = a < b ? a : b;
+        final hi = a < b ? b : a;
+        if (lo <= 0 && hi <= 0) return null;
+        if (lo < 0) lo = 0;
+        return lo == hi ? '$lo' : '$lo-$hi';
       }
       return null;
     }
     final single = _parseXhttpIntPart(s);
-    return single?.toString();
+    if (single == null || single <= 0) return null;
+    return single.toString();
   }
   if (val is List && val.length == 2) {
     final a = _parseXhttpIntPart(val[0]);
     final b = _parseXhttpIntPart(val[1]);
     if (a != null && b != null) {
-      return a == b ? '$a' : '$a-$b';
+      var lo = a < b ? a : b;
+      final hi = a < b ? b : a;
+      if (lo <= 0 && hi <= 0) return null;
+      if (lo < 0) lo = 0;
+      return lo == hi ? '$lo' : '$lo-$hi';
     }
   }
   if (val is Map && (val.containsKey('from') || val.containsKey('to'))) {
     final from = _parseXhttpIntPart(val['from']) ?? 0;
     final to = _parseXhttpIntPart(val['to']) ?? from;
-    return from == to ? '$from' : '$from-$to';
+    var lo = from < to ? from : to;
+    final hi = from < to ? to : from;
+    if (lo <= 0 && hi <= 0) return null;
+    if (lo < 0) lo = 0;
+    return lo == hi ? '$lo' : '$lo-$hi';
   }
   return null;
 }
@@ -3156,13 +3213,14 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
 
   final out = <String, dynamic>{'type': 'xhttp'};
 
-  void setStr(String targetKey, List<String> sourceKeys) {
+  void setStr(String targetKey, List<String> sourceKeys, {Set<String>? allowed}) {
     for (final k in sourceKeys) {
       if (raw.containsKey(k) && raw[k] != null) {
         final v = raw[k];
         if (v is Map || v is List) continue;
         final val = v.toString().trim();
         if (val.isNotEmpty) {
+          if (allowed != null && !allowed.contains(val)) continue;
           out[targetKey] = val;
           return;
         }
@@ -3206,7 +3264,7 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
     for (final k in sourceKeys) {
       if (raw.containsKey(k) && raw[k] != null) {
         final parsed = _parseXhttpIntPart(raw[k]);
-        if (parsed != null) {
+        if (parsed != null && parsed > 0) {
           out[targetKey] = parsed;
           return;
         }
@@ -3216,22 +3274,46 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
 
   setStr('host', ['host']);
   setStr('path', ['path']);
-  setStr('mode', ['mode']);
-  setStr('session_placement', ['session_placement', 'sessionPlacement', 'sessionIDPlacement', 'sessionIdPlacement', 'session_id_placement']);
+  setStr(
+    'mode',
+    ['mode'],
+    allowed: const {'auto', 'packet-up', 'stream-up', 'stream-one'},
+  );
+  setStr(
+    'session_placement',
+    ['session_placement', 'sessionPlacement', 'sessionIDPlacement', 'sessionIdPlacement', 'session_id_placement'],
+    allowed: const {'path', 'query', 'header', 'cookie'},
+  );
   setStr('session_key', ['session_key', 'sessionKey', 'sessionIDKey', 'sessionIdKey', 'session_id_key']);
-  setStr('seq_placement', ['seq_placement', 'seqPlacement']);
+  setStr(
+    'seq_placement',
+    ['seq_placement', 'seqPlacement'],
+    allowed: const {'path', 'query', 'header', 'cookie'},
+  );
   setStr('seq_key', ['seq_key', 'seqKey']);
   setStr('session_table', ['session_table', 'sessionTable', 'sessionIDTable', 'sessionIdTable', 'session_id_table']);
   setRange('session_length', ['session_length', 'sessionLength', 'sessionIDLength', 'sessionIdLength', 'session_id_length']);
-  setStr('uplink_data_placement', ['uplink_data_placement', 'uplinkDataPlacement']);
+  setStr(
+    'uplink_data_placement',
+    ['uplink_data_placement', 'uplinkDataPlacement'],
+    allowed: const {'body', 'auto', 'header', 'cookie'},
+  );
   setStr('uplink_data_key', ['uplink_data_key', 'uplinkDataKey']);
   setRange('uplink_chunk_size', ['uplink_chunk_size', 'uplinkChunkSize']);
   setStr('uplink_http_method', ['uplink_http_method', 'uplinkHttpMethod', 'uplinkHTTPMethod']);
   setRange('x_padding_bytes', ['x_padding_bytes', 'xPaddingBytes', 'xpaddingbytes']);
   setStr('x_padding_key', ['x_padding_key', 'xPaddingKey']);
   setStr('x_padding_header', ['x_padding_header', 'xPaddingHeader']);
-  setStr('x_padding_placement', ['x_padding_placement', 'xPaddingPlacement']);
-  setStr('x_padding_method', ['x_padding_method', 'xPaddingMethod']);
+  setStr(
+    'x_padding_placement',
+    ['x_padding_placement', 'xPaddingPlacement'],
+    allowed: const {'cookie', 'header', 'query', 'queryInHeader'},
+  );
+  setStr(
+    'x_padding_method',
+    ['x_padding_method', 'xPaddingMethod'],
+    allowed: const {'repeat-x', 'tokenish'},
+  );
   setRange('sc_max_each_post_bytes', ['sc_max_each_post_bytes', 'scMaxEachPostBytes']);
   setRange('sc_min_posts_interval_ms', ['sc_min_posts_interval_ms', 'scMinPostsIntervalMs']);
   setRange('sc_stream_up_server_secs', ['sc_stream_up_server_secs', 'scStreamUpServerSecs']);
@@ -3243,6 +3325,17 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
   setInt('sc_max_concurrent_posts', ['sc_max_concurrent_posts', 'scMaxConcurrentPosts']);
   setInt('server_max_header_bytes', ['server_max_header_bytes', 'serverMaxHeaderBytes']);
   setInt('sc_max_buffered_posts', ['sc_max_buffered_posts', 'scMaxBufferedPosts']);
+
+  final uplinkPlacement = out['uplink_data_placement']?.toString() ?? '';
+  if (uplinkPlacement == 'header' || uplinkPlacement == 'cookie') {
+    final currentMode = out['mode']?.toString() ?? '';
+    if (currentMode.isEmpty || currentMode == 'auto') {
+      out['mode'] = 'packet-up';
+    } else if (currentMode != 'packet-up') {
+      out.remove('uplink_data_placement');
+      out.remove('uplink_data_key');
+    }
+  }
 
   if (raw['headers'] is Map) {
     out['headers'] = Map<String, dynamic>.from(raw['headers'] as Map);
@@ -3258,14 +3351,14 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
         case 'max_concurrency':
         case 'maxConcurrency':
           final r = _formatXhttpRange(v);
-          if (r != null && r != '0' && r != '0-0') {
+          if (r != null) {
             muxOut['max_concurrency'] = r;
           }
           break;
         case 'max_connections':
         case 'maxConnections':
           final r = _formatXhttpRange(v);
-          if (r != null && r != '0' && r != '0-0') {
+          if (r != null) {
             muxOut['max_connections'] = int.tryParse(r) ?? r;
           }
           break;
@@ -3287,8 +3380,8 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
           break;
         case 'h_keep_alive_period':
         case 'hKeepAlivePeriod':
-          final n = v is num ? v.toInt() : int.tryParse(v.toString().trim());
-          if (n != null) muxOut['h_keep_alive_period'] = n;
+          final n = _parseXhttpIntPart(v);
+          if (n != null && n > 0) muxOut['h_keep_alive_period'] = n;
           break;
       }
     }
@@ -3300,10 +3393,56 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
     }
   }
 
+  if (out.containsKey('session_table')) {
+    final tbl = out['session_table'].toString().trim();
+    if (tbl.isEmpty || tbl == '0') {
+      out.remove('session_table');
+    }
+  }
+
   if (out.containsKey('session_table') && !out.containsKey('session_length')) {
     out['session_length'] = '8-14';
   } else if (out.containsKey('session_length') && !out.containsKey('session_table')) {
     out['session_table'] = 'hex';
+  }
+
+  if (out.containsKey('session_length')) {
+    final tbl = (out['session_table'] ?? 'hex').toString();
+    final int radix = switch (tbl) {
+      'ALPHABET' || 'alphabet' => 26,
+      'Alphabet' => 52,
+      'BASE36' || 'base36' => 36,
+      'Base62' => 62,
+      'HEX' || 'hex' => 16,
+      'number' => 10,
+      _ => tbl.runes.length,
+    };
+    final effectiveRadix = radix < 2 ? 16 : radix;
+    if (radix < 2) {
+      out['session_table'] = 'hex';
+    }
+    final rawLen = out['session_length'].toString();
+    final parts = rawLen.split('-');
+    var lo = int.tryParse(parts.first.trim()) ?? 8;
+    var hi = parts.length > 1 ? (int.tryParse(parts[1].trim()) ?? lo) : lo;
+    if (lo <= 0) lo = 1;
+    if (hi < lo) hi = lo;
+    int calcSpace(int l, int h) {
+      var space = 0;
+      for (var n = l; n <= h && n <= l + 64; n++) {
+        var p = 1;
+        for (var i = 0; i < n && p < (1 << 24); i++) {
+          p *= effectiveRadix;
+        }
+        space += p;
+        if (space >= (1 << 24)) break;
+      }
+      return space;
+    }
+    while (calcSpace(lo, hi) < (1 << 24) && hi < 32) {
+      hi++;
+    }
+    out['session_length'] = lo == hi ? '$lo' : '$lo-$hi';
   }
 
   return out;

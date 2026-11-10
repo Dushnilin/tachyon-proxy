@@ -131,13 +131,11 @@ class AppSettings {
     this.appPackages = const [],
     this.appRoutes = const {},
     this.serviceRoutes = const {
-      'youtube': 'desync',
-      'discord': 'desync',
       'ru': 'direct',
     },
     this.themeMode = 'dark',
     this.logLevel = 'warn',
-    this.mtu = 9000,
+    this.mtu = 1400,
     this.desync = const DesyncSettings(),
     this.subscriptions = const [],
     this.hwid = '',
@@ -444,6 +442,7 @@ class AppSettings {
         'appPackages': appPackages,
         'appRoutes': appRoutes,
         'serviceRoutes': serviceRoutes,
+        'serviceRoutesV20': true,
         'themeMode': themeMode,
         'logLevel': logLevel,
         'mtu': mtu,
@@ -470,6 +469,25 @@ class AppSettings {
       };
 
   static AppSettings fromJson(Map<String, dynamic> json) {
+    final isMigratedV20 = json['serviceRoutesV20'] == true;
+    final rawServiceRoutes = json['serviceRoutes'] is Map
+        ? (json['serviceRoutes'] as Map)
+            .map((k, v) => MapEntry(k.toString(), v.toString()))
+        : const <String, String>{
+            'ru': 'direct',
+          };
+    final effectiveServiceRoutes = (!isMigratedV20 &&
+            rawServiceRoutes.length == 3 &&
+            rawServiceRoutes['youtube'] == 'desync' &&
+            rawServiceRoutes['discord'] == 'desync' &&
+            rawServiceRoutes['ru'] == 'direct')
+        ? const <String, String>{
+            'ru': 'direct',
+          }
+        : rawServiceRoutes;
+    final rawMtu = (json['mtu'] as num?)?.toInt() ?? 1400;
+    final effectiveMtu = (!isMigratedV20 && rawMtu == 9000) ? 1400 : rawMtu;
+
     return AppSettings(
       profiles: ((json['profiles'] as List?) ?? const [])
           .whereType<Map<String, dynamic>>()
@@ -491,17 +509,10 @@ class AppSettings {
           .toList(growable: false),
       appRoutes: ((json['appRoutes'] as Map?) ?? const {})
           .map((k, v) => MapEntry(k.toString(), v.toString())),
-      serviceRoutes: json['serviceRoutes'] is Map
-          ? (json['serviceRoutes'] as Map)
-              .map((k, v) => MapEntry(k.toString(), v.toString()))
-          : const {
-              'youtube': 'desync',
-              'discord': 'desync',
-              'ru': 'direct',
-            },
+      serviceRoutes: effectiveServiceRoutes,
       themeMode: (json['themeMode'] as String?) ?? 'dark',
       logLevel: (json['logLevel'] as String?) ?? 'warn',
-      mtu: (json['mtu'] as num?)?.toInt() ?? 9000,
+      mtu: effectiveMtu,
       desync: json['desync'] is Map<String, dynamic>
           ? DesyncSettings.fromJson(json['desync'] as Map<String, dynamic>)
           : const DesyncSettings(),

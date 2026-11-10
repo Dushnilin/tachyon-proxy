@@ -189,7 +189,10 @@ class LinkParser {
     }
     if (lower.startsWith('anytls://')) return _parseAnytls(value, subscriptionId: subscriptionId);
     if (lower.startsWith('naive+https://') ||
+        lower.startsWith('naive+http2://') ||
+        lower.startsWith('naive+h2://') ||
         lower.startsWith('naive+quic://') ||
+        lower.startsWith('naive+h3://') ||
         lower.startsWith('naive://')) {
       return _parseNaive(value, subscriptionId: subscriptionId);
     }
@@ -1150,11 +1153,16 @@ class LinkParser {
 
   Profile? _parseNaive(String link, {String subscriptionId = ''}) {
     final lower = link.toLowerCase();
-    final normalized = link.replaceFirst(RegExp(r'^naive(\+https|\+quic)?://', caseSensitive: false), 'https://');
+    final normalized = link.replaceFirst(
+      RegExp(r'^naive(\+https|\+http2|\+h2|\+quic|\+h3)?://', caseSensitive: false),
+      'https://',
+    );
     final uri = Uri.tryParse(normalized);
     if (uri == null || uri.host.isEmpty) return null;
     final query = uri.queryParameters;
-    final isQuic = lower.startsWith('naive+quic://') || _isTruthy(query['quic']);
+    final isQuic = lower.startsWith('naive+quic://') ||
+        lower.startsWith('naive+h3://') ||
+        _isTruthy(query['quic']);
     final server = _cleanHost(uri.host);
     final port = uri.port == 0 ? 443 : uri.port;
     final (username, password) = _splitUserPass(uri.userInfo);
@@ -2719,6 +2727,27 @@ class LinkParser {
           'server_port': port,
           'psk': (p['psk'] ?? '').toString(),
           'version': _toInt(p['version']) ?? 5,
+        };
+      case 'naive':
+        final tls = buildTls(true);
+        final isQuic = p['quic'] == true ||
+            _isTruthy(p['quic']?.toString()) ||
+            (p['network'] ?? '').toString().toLowerCase() == 'quic' ||
+            (p['network'] ?? '').toString().toLowerCase() == 'h3' ||
+            (p['network'] ?? '').toString().toLowerCase() == 'udp';
+        return {
+          'type': 'naive',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (p['username'] != null) 'username': p['username'].toString(),
+          if (p['password'] != null) 'password': p['password'].toString(),
+          if (isQuic) 'quic': true,
+          if (p['uot'] == true ||
+              p['udp-over-tcp'] == true ||
+              p['udp_over_tcp'] == true)
+            'udp_over_tcp': true,
+          'tls': ?tls,
         };
       default:
         return null;

@@ -13,7 +13,8 @@ import '../../core/models/runtime_config.dart';
 import '../../core/models/tunnel_state.dart';
 import '../connections/connections_screen.dart';
 import '../diagnostics/diagnostics_screen.dart';
-import '../profiles/profiles_tab.dart' show showBalancerSettingsSheet;
+import '../profiles/profiles_tab.dart'
+    show MultiServiceBalancerCard, showBalancerSettingsSheet;
 import '../profiles/tv_receive_dialog.dart';
 
 /// Главный экран: состояние туннеля и его включение.
@@ -243,6 +244,11 @@ class _HomeTabState extends State<HomeTab> {
             _StatsRow(controller: controller),
             const SizedBox(height: Space.lg),
             _ProfileCard(controller: controller),
+            if (visibleProfiles.length >= 2 &&
+                controller.settings.balancer.multiServiceEnabled) ...[
+              const SizedBox(height: Space.md),
+              MultiServiceBalancerCard(controller: controller),
+            ],
             if (visibleProfiles.isNotEmpty) ...[
               const SizedBox(height: Space.lg),
               Row(

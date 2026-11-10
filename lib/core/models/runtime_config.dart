@@ -322,11 +322,20 @@ class Profile {
         v == null ||
         (v is String && v.trim().isEmpty));
 
+    final rawMtu = cleanExtra.remove('mtu');
+    final parsedMtu = rawMtu is num
+        ? rawMtu.toInt()
+        : int.tryParse(rawMtu?.toString().trim() ?? '');
+    final effectiveWgMtu = (parsedMtu != null && parsedMtu >= 1200 && parsedMtu <= 1500)
+        ? parsedMtu
+        : 1280;
+
     return {
       'type': 'wireguard',
       'tag': tag,
       'address': addrs,
       'private_key': privKey,
+      'mtu': effectiveWgMtu,
       'peers': [
         {
           'address': server,
@@ -440,12 +449,8 @@ class Profile {
         }
         final cleanFlow = normalizeVlessFlow(flow);
         if (cleanFlow.isNotEmpty) outbound['flow'] = cleanFlow;
-        if (cleanExtra['packet_encoding'] != null) {
-          final pe = cleanExtra['packet_encoding'].toString();
-          if (pe != 'packetaddr' && pe != 'xudp') {
-            cleanExtra.remove('packet_encoding');
-          }
-        }
+        final rawPe = cleanExtra['packet_encoding']?.toString().trim().toLowerCase() ?? '';
+        cleanExtra['packet_encoding'] = rawPe == 'packetaddr' ? 'packetaddr' : 'xudp';
         return outbound..addAll(cleanExtra);
 
       case 'vmess':
@@ -1708,6 +1713,20 @@ class BalancerModeOption {
   String get shortBadge => shortLabel.toUpperCase();
 }
 
+class MultiUrlServiceSpec {
+  const MultiUrlServiceSpec({
+    required this.id,
+    required this.title,
+    required this.shortLabel,
+    required this.probeUrl,
+  });
+
+  final String id;
+  final String title;
+  final String shortLabel;
+  final String probeUrl;
+}
+
 /// Настройки нативного lock-free балансировщика `urltest` в `tachyon-core` 0.3.9+.
 class BalancerSettings {
   const BalancerSettings({
@@ -1723,7 +1742,75 @@ class BalancerSettings {
     this.excludedProtocols = const [],
     this.includeRegex = '',
     this.excludeRegex = '',
+    this.multiServiceEnabled = false,
+    this.multiServices = const [
+      'youtube',
+      'telegram',
+      'discord',
+      'instagram',
+      'openai',
+      'https',
+    ],
   });
+
+  /// Каталог сервисов для мульти-URL балансировщика.
+  static const List<MultiUrlServiceSpec> multiServiceCatalog = [
+    MultiUrlServiceSpec(
+      id: 'youtube',
+      title: 'YouTube',
+      shortLabel: 'YouTube',
+      probeUrl: 'https://www.youtube.com/generate_204',
+    ),
+    MultiUrlServiceSpec(
+      id: 'telegram',
+      title: 'Telegram',
+      shortLabel: 'Telegram',
+      probeUrl: 'https://core.telegram.org/favicon.ico',
+    ),
+    MultiUrlServiceSpec(
+      id: 'discord',
+      title: 'Discord',
+      shortLabel: 'Discord',
+      probeUrl: 'https://discord.com/api/v9/experiments',
+    ),
+    MultiUrlServiceSpec(
+      id: 'instagram',
+      title: 'Instagram',
+      shortLabel: 'Instagram',
+      probeUrl: 'https://www.instagram.com/robots.txt',
+    ),
+    MultiUrlServiceSpec(
+      id: 'openai',
+      title: 'ChatGPT / AI',
+      shortLabel: 'ChatGPT',
+      probeUrl: 'https://chatgpt.com/cdn-cgi/trace',
+    ),
+    MultiUrlServiceSpec(
+      id: 'https',
+      title: 'HTTPS (общий)',
+      shortLabel: 'HTTPS',
+      probeUrl: '',
+    ),
+  ];
+
+  static MultiUrlServiceSpec? multiServiceById(String id) {
+    final norm = id.trim().toLowerCase();
+    for (final s in multiServiceCatalog) {
+      if (s.id == norm) return s;
+    }
+    return null;
+  }
+
+  static String probeUrlForService(String id, String fallbackUrl) {
+    final spec = multiServiceById(id);
+    if (spec != null && spec.probeUrl.isNotEmpty) {
+      return spec.probeUrl;
+    }
+    final cleanFallback = fallbackUrl.trim();
+    return cleanFallback.isEmpty
+        ? 'https://www.gstatic.com/generate_204'
+        : cleanFallback;
+  }
 
   /// Алгоритм выбора узла:
   /// `stability`, `least_test`, `sticky`, `least_load`, `weighted`,
@@ -1763,6 +1850,12 @@ class BalancerSettings {
 
   /// Регулярное выражение (или ключевое слово) для исключения серверов по имени/хосту.
   final String excludeRegex;
+
+  /// Включён ли мульти-сервисный URL-тест (отдельный/общий лучший сервер под каждый сервис).
+  final bool multiServiceEnabled;
+
+  /// Выбранные сервисы для мульти-URL балансировщика (`youtube`, `telegram`, `discord`, `instagram`, `openai`, `https`).
+  final List<String> multiServices;
 
   /// Популярные страны для быстрого выбора в фильтре исключений.
   static const List<(String code, String flag, String label, List<String> aliases)>
@@ -2023,6 +2116,7 @@ class BalancerSettings {
   Map<String, dynamic> toUrltestOutbound({
     required String tag,
     required List<String> outbounds,
+    String? urlOverride,
   }) {
     final cleanMode = mode.trim().toLowerCase().isEmpty
         ? 'least_test'
@@ -2034,12 +2128,15 @@ class BalancerSettings {
         .map((e) => e.trim().toLowerCase())
         .where(_validStickyFields.contains)
         .toList(growable: false);
+    final resolvedUrl = (urlOverride != null && urlOverride.trim().isNotEmpty)
+        ? urlOverride.trim()
+        : (url.trim().isEmpty ? 'https://www.gstatic.com/generate_204' : url.trim());
 
     return {
       'type': 'urltest',
       'tag': tag,
       'outbounds': outbounds,
-      'url': url.trim().isEmpty ? 'https://www.gstatic.com/generate_204' : url.trim(),
+      'url': resolvedUrl,
       'interval': interval.trim().isEmpty ? '3m' : interval.trim(),
       'tolerance': safeTol,
       'mode': cleanMode,
@@ -2066,6 +2163,8 @@ class BalancerSettings {
     List<String>? excludedProtocols,
     String? includeRegex,
     String? excludeRegex,
+    bool? multiServiceEnabled,
+    List<String>? multiServices,
   }) {
     return BalancerSettings(
       mode: mode ?? this.mode,
@@ -2080,6 +2179,8 @@ class BalancerSettings {
       excludedProtocols: excludedProtocols ?? this.excludedProtocols,
       includeRegex: includeRegex ?? this.includeRegex,
       excludeRegex: excludeRegex ?? this.excludeRegex,
+      multiServiceEnabled: multiServiceEnabled ?? this.multiServiceEnabled,
+      multiServices: multiServices ?? this.multiServices,
     );
   }
 
@@ -2096,6 +2197,8 @@ class BalancerSettings {
         if (excludedProtocols.isNotEmpty) 'excludedProtocols': excludedProtocols,
         if (includeRegex.trim().isNotEmpty) 'includeRegex': includeRegex.trim(),
         if (excludeRegex.trim().isNotEmpty) 'excludeRegex': excludeRegex.trim(),
+        if (multiServiceEnabled) 'multiServiceEnabled': true,
+        'multiServices': multiServices,
       };
 
   static BalancerSettings fromJson(Map<String, dynamic> json) {
@@ -2115,6 +2218,11 @@ class BalancerSettings {
             .where((s) => s.isNotEmpty)
             .toList(growable: false) ??
         const <String>[];
+    final validMultiIds = {for (final s in multiServiceCatalog) s.id};
+    final rawMultiServices = (json['multiServices'] as List?)
+        ?.map((e) => e.toString().trim().toLowerCase())
+        .where(validMultiIds.contains)
+        .toList(growable: false);
     return BalancerSettings(
       mode: knownMode,
       pool: ((json['pool'] as num?)?.toInt() ?? 4).clamp(1, 32),
@@ -2134,6 +2242,10 @@ class BalancerSettings {
       excludedProtocols: rawExProtocols,
       includeRegex: (json['includeRegex'] as String?)?.trim() ?? '',
       excludeRegex: (json['excludeRegex'] as String?)?.trim() ?? '',
+      multiServiceEnabled: json['multiServiceEnabled'] == true,
+      multiServices: (rawMultiServices != null && rawMultiServices.isNotEmpty)
+          ? rawMultiServices
+          : const ['youtube', 'telegram', 'discord', 'instagram', 'openai', 'https'],
     );
   }
 }
@@ -2366,7 +2478,7 @@ class RuntimeConfig {
     required this.dns,
     required this.ruleSets,
     this.logLevel = 'warn',
-    this.mtu = 9000,
+    this.mtu = 1400,
     this.desync = const DesyncSettings(),
     this.subscriptions = const [],
     this.allSubscriptions = const [],
@@ -2389,6 +2501,23 @@ class RuntimeConfig {
   final List<RuleSetEntry> ruleSets;
   final String logLevel;
   final int mtu;
+
+  /// Эффективный MTU для TUN-интерфейса: при использовании WireGuard/AmneziaWG
+  /// ограничивается сверху (1280..1420), чтобы избежать PMTU blackhole на QUIC/TLS пакетах.
+  int get effectiveTunMtu {
+    final baseMtu = (mtu >= 1280 && mtu <= 9000) ? mtu : 1400;
+    if (profile.type == 'wireguard' || detourProfile?.type == 'wireguard') {
+      final rawProfMtu = profile.extra['mtu'];
+      final profMtu = rawProfMtu is num
+          ? rawProfMtu.toInt()
+          : int.tryParse(rawProfMtu?.toString().trim() ?? '');
+      final wgMtu = (profMtu != null && profMtu >= 1280 && profMtu <= 1420)
+          ? profMtu
+          : 1280;
+      return baseMtu < wgMtu ? baseMtu : wgMtu;
+    }
+    return baseMtu;
+  }
 
   /// Пакетная десинхронизация: настройки нативного desync-аутбаунда.
   final DesyncSettings desync;
@@ -2794,21 +2923,48 @@ class RuntimeConfig {
 
     final ruleSetDefs = <String, Map<String, dynamic>>{};
 
+    final activeMultiServiceIds = (isAutoGroup &&
+            autoCandidates.isNotEmpty &&
+            balancer.multiServiceEnabled)
+        ? balancer.multiServices
+            .map((e) => e.trim().toLowerCase())
+            .where((id) => id.isNotEmpty && id != 'https')
+            .toSet()
+        : const <String>{};
+
     // Точечные правила сервисов (YouTube, Discord, Telegram, Сайты РФ и др.):
     // напрямую подключают `.trs` из `tachyon-lists` при наличии файла на диске,
     // плюс базовые домены и пакеты приложений для мгновенного старта до завершения фоновой докачки.
     for (final service in BuiltInService.catalog) {
-      final rawAction = serviceRoutes[service.id];
-      if (rawAction == null || rawAction.isEmpty || rawAction == 'off') continue;
+      final explicitAction = serviceRoutes[service.id];
+      final rawAction = (explicitAction == null &&
+              !hasProxy &&
+              !desync.enabled &&
+              routingMode == RoutingMode.desync &&
+              (service.id == 'youtube' || service.id == 'discord'))
+          ? 'desync'
+          : explicitAction;
+      final isMultiManaged = activeMultiServiceIds.contains(service.id);
+      if ((rawAction == null || rawAction.isEmpty || rawAction == 'off') &&
+          !isMultiManaged) {
+        continue;
+      }
       if (routingMode == RoutingMode.desync &&
           rawAction != 'desync' &&
           rawAction != 'block' &&
           rawAction != 'direct' &&
-          !rawAction.startsWith('profile:') &&
-          !rawAction.startsWith('sub:')) {
+          (rawAction == null ||
+              (!rawAction.startsWith('profile:') &&
+                  !rawAction.startsWith('sub:')))) {
         continue;
       }
-      final action = resolveOutbound(rawAction);
+      final bool hasExplicitOverride = rawAction != null &&
+          rawAction.isNotEmpty &&
+          rawAction != 'off' &&
+          rawAction != 'proxy';
+      final action = (isMultiManaged && !hasExplicitOverride)
+          ? 'urltest-svc-${service.id}'
+          : resolveOutbound(rawAction ?? 'proxy');
       final useDirectDns = action == 'direct' || (!dns.fakeIp && action == 'desync');
 
       final servicePkgs = service.packages
@@ -3042,6 +3198,12 @@ class RuntimeConfig {
           tag: 'proxy',
           outbounds: autoMemberTags,
         ),
+        for (final svcId in activeMultiServiceIds)
+          balancer.toUrltestOutbound(
+            tag: 'urltest-svc-$svcId',
+            outbounds: autoMemberTags,
+            urlOverride: BalancerSettings.probeUrlForService(svcId, balancer.url),
+          ),
         ...autoMemberOutbounds,
       ],
       if (autoMemberTags.isEmpty && subTags.isEmpty && hasStatic && !isMainWg)
@@ -3122,6 +3284,10 @@ class RuntimeConfig {
           'path': cacheFilePath,
           if (dns.fakeIp) 'store_fakeip': true,
         },
+        if (autoMemberTags.isNotEmpty && balancer.multiServiceEnabled)
+          'clash_api': {
+            'external_controller': '127.0.0.1:19090',
+          },
       },
       'dns': {
         'servers': dnsServers,
@@ -3136,7 +3302,7 @@ class RuntimeConfig {
             'type': 'tun',
             'tag': 'tun-in',
             'address': ['172.19.0.1/30'],
-            'mtu': mtu,
+            'mtu': effectiveTunMtu,
             'auto_route': false,
             'strict_route': false,
             'stack': 'system',

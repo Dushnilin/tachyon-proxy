@@ -424,7 +424,7 @@ class _SettingsTabState extends State<SettingsTab> {
                                 spacing: 6,
                                 runSpacing: 4,
                                 children: [
-                                  for (final mtu in const [1360, 1400, 1420, 1500, 9000])
+                                  for (final mtu in const [1280, 1360, 1400, 1420, 1500, 9000])
                                     FocusableTap(
                                       onTap: () => controller.setMtu(mtu),
                                       child: Pill(

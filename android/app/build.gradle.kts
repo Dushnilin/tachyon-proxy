@@ -18,9 +18,8 @@ android {
 
     defaultConfig {
         applicationId = "app.tachyon.tachyon_proxy"
-        // Ядро собрано под API 26: более старые версии Android не
-        // поддерживаются.
-        minSdk = 26
+        // Нативное ядро libtachyon.so собрано с поддержкой API 24 (Android 7.0+).
+        minSdk = 24
         // targetSdk = 28 переводит процесс в SELinux-домен untrusted_app_27 на Android 10–16,
         // что разрешает горячую загрузку обновлённого ядра libtachyon.so из code_cache/engine через dlopen.
         targetSdk = 28
@@ -28,6 +27,23 @@ android {
         // смещённый на +5000 выше старых ABI-множителей (1000/2000/4000), чтобы обновление поверх любой старой сборки проходило без конфликта версий.
         versionCode = 5000 + flutter.versionCode
         versionName = flutter.versionName
+    }
+
+    packaging {
+        jniLibs {
+            // Сжимаем .so внутри APK и распаковываем при установке (extractNativeLibs=true):
+            // уменьшает размер APK в 2–2.5 раза и исключает ошибку «Файл повреждён» (INSTALL_FAILED_INVALID_APK)
+            // на устройствах с 4 КБ страницами и кастомных системных установщиках при прямом mmap из ZIP.
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += setOf(
+                "META-INF/*.version",
+                "META-INF/com/**",
+                "META-INF/version-control-info.textproto",
+                "DebugProbesKt.bin",
+            )
+        }
     }
 
     signingConfigs {
@@ -38,6 +54,9 @@ android {
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 

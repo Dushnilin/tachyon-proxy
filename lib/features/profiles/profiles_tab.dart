@@ -305,6 +305,10 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   onSelect: () => controller.selectProfile('auto:all'),
                   onConfigure: () => showBalancerSettingsSheet(context, controller),
                 ),
+                if (controller.settings.balancer.multiServiceEnabled) ...[
+                  const SizedBox(height: Space.sm),
+                  MultiServiceBalancerCard(controller: controller),
+                ],
                 const SizedBox(height: Space.sm),
                 _NetworkListsSummaryTile(
                   controller: controller,
@@ -3941,6 +3945,117 @@ Future<void> showBalancerSettingsSheet(
                             ),
                             const SizedBox(height: Space.md),
                           ],
+                          const SectionLabel('Мульти-URL балансировщик по сервисам'),
+                          HairlineCard(
+                            padding: const EdgeInsets.all(Space.md),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.hub_outlined,
+                                      size: 18,
+                                      color: current.multiServiceEnabled
+                                          ? tokens.accent
+                                          : tokens.muted,
+                                    ),
+                                    const SizedBox(width: Space.sm),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Мульти-URL тест и привязка сервисов',
+                                            style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            'Проверяет серверы по выбранным сервисам и закрепляет наилучший отдельный или общий сервер с минимальной задержкой',
+                                            style: TextStyle(fontSize: 11, color: tokens.faint),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    Switch(
+                                      value: current.multiServiceEnabled,
+                                      onChanged: (val) async {
+                                        await controller.setMultiServiceBalancerEnabled(val);
+                                        if (ctx.mounted) setStateModal(() {});
+                                      },
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: Space.sm),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final svc in BalancerSettings.multiServiceCatalog)
+                                      FilterChip(
+                                        avatar: Icon(
+                                          _multiServiceIcon(svc.id),
+                                          size: 14,
+                                          color: current.multiServices.contains(svc.id)
+                                              ? tokens.accent
+                                              : tokens.muted,
+                                        ),
+                                        label: Text(
+                                          svc.title,
+                                          style: const TextStyle(fontSize: 11.5),
+                                        ),
+                                        selected: current.multiServices.contains(svc.id),
+                                        onSelected: (_) async {
+                                          await controller.toggleMultiBalancerService(svc.id);
+                                          if (ctx.mounted) setStateModal(() {});
+                                        },
+                                      ),
+                                  ],
+                                ),
+                                if (current.multiServiceEnabled) ...[
+                                  const SizedBox(height: Space.sm),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: OutlinedButton.icon(
+                                      onPressed: controller.probingMultiServices
+                                          ? null
+                                          : () async {
+                                              await controller.runMultiServiceUrlTest();
+                                              if (ctx.mounted) setStateModal(() {});
+                                            },
+                                      icon: controller.probingMultiServices
+                                          ? SizedBox(
+                                              width: 14,
+                                              height: 14,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: tokens.accent,
+                                              ),
+                                            )
+                                          : const Icon(Icons.network_check_rounded, size: 16),
+                                      label: Text(
+                                        controller.probingMultiServices
+                                            ? 'Проверка отклика сервисов...'
+                                            : 'Проверить выбранные сервисы',
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: Space.sm),
+                                  MultiServiceBalancerCard(
+                                    controller: controller,
+                                    compactHeader: true,
+                                    onChanged: () {
+                                      if (ctx.mounted) setStateModal(() {});
+                                    },
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: Space.md),
                           const SectionLabel('Алгоритм выбора узла'),
                           for (final opt in BalancerSettings.modes) ...[
                             HairlineCard(
@@ -4874,6 +4989,548 @@ Future<void> showNetworkListsSheet(
                               ),
                               const SizedBox(height: 6),
                             ],
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      );
+    },
+  );
+}
+
+IconData _multiServiceIcon(String serviceId) {
+  return switch (serviceId) {
+    'youtube' => Icons.play_circle_fill_rounded,
+    'telegram' => Icons.send_rounded,
+    'discord' => Icons.headset_mic_rounded,
+    'instagram' => Icons.camera_alt_outlined,
+    'openai' => Icons.auto_awesome_rounded,
+    'https' => Icons.language_rounded,
+    _ => Icons.public_rounded,
+  };
+}
+
+String _formatMultiServiceLatency(int ms, {required bool probing}) {
+  if (probing && ms <= 0) return '...';
+  if (ms <= 0) return '—';
+  if (ms < 100) return '$ms мс';
+  final sec = (ms / 1000).toStringAsFixed(1).replaceAll('.', ',');
+  return '$sec с';
+}
+
+String _formatMultiServiceProtocolBadge(Profile? p) {
+  if (p == null) return '—';
+  final tr = p.transport.trim().toLowerCase();
+  final ty = p.type.trim().toLowerCase();
+  return switch (tr) {
+    'grpc' => 'gRPC',
+    'xhttp' || 'splithttp' => 'XHTTP',
+    'ws' => 'WS',
+    'httpupgrade' => 'HTTPUp',
+    'http' || 'h2' => 'H2',
+    'quic' => ty == 'naive' ? 'QUIC' : p.type.toUpperCase(),
+    _ => p.type.toUpperCase(),
+  };
+}
+
+/// Карточка мульти-сервисного URL-тест балансировщика (показывает привязанный сервер,
+/// задержку и транспорт для каждого выбранного сервиса: YouTube, Telegram, Discord, Instagram, ChatGPT, HTTPS).
+class MultiServiceBalancerCard extends StatelessWidget {
+  const MultiServiceBalancerCard({
+    super.key,
+    required this.controller,
+    this.compactHeader = false,
+    this.onChanged,
+  });
+
+  final AppController controller;
+  final bool compactHeader;
+  final VoidCallback? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final bal = controller.settings.balancer;
+    final services = bal.multiServices;
+    if (!bal.multiServiceEnabled || services.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final statusMap = controller.serviceBalancerStatus;
+    final cands = controller.currentBalancerCandidates();
+    final winnerCounts = <String, int>{};
+    for (final svcId in services) {
+      final st = statusMap[svcId];
+      final pid = st?.profile?.id;
+      if (pid != null && pid.isNotEmpty) {
+        winnerCounts[pid] = (winnerCounts[pid] ?? 0) + 1;
+      }
+    }
+
+    return HairlineCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!compactHeader) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Space.md, 10, Space.sm, 8),
+              child: Row(
+                children: [
+                  Icon(Icons.hub_outlined, size: 16, color: tokens.accent),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Мульти-URL автоподбор по сервисам',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: tokens.ink,
+                          ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    onPressed: controller.probingMultiServices
+                        ? null
+                        : () => controller.runMultiServiceUrlTest(),
+                    icon: controller.probingMultiServices
+                        ? SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.8,
+                              color: tokens.accent,
+                            ),
+                          )
+                        : Icon(Icons.refresh_rounded, size: 14, color: tokens.accent),
+                    label: Text(
+                      controller.probingMultiServices ? 'Тест...' : 'Проверить',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: tokens.accent,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                    tooltip: 'Настройки балансировщика',
+                    onPressed: () => showBalancerSettingsSheet(context, controller),
+                    icon: Icon(Icons.tune_rounded, size: 16, color: tokens.muted),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+          ],
+          for (var i = 0; i < services.length; i++) ...[
+            if (i > 0) const Divider(height: 1),
+            Builder(
+              builder: (context) {
+                final svcId = services[i];
+                final spec = BalancerSettings.multiServiceById(svcId);
+                final title = spec?.shortLabel ?? svcId.toUpperCase();
+                final st = statusMap[svcId];
+                final prof = st?.profile ?? (cands.isNotEmpty ? cands.first : null);
+                final int ms = st != null && st.latencyMs > 0
+                    ? st.latencyMs
+                    : ((prof != null ? controller.pingOf(prof.id) : null) ?? -1);
+                final isAlive = prof != null && ms > 0;
+                final isShared = prof != null && (winnerCounts[prof.id] ?? 0) > 1;
+                final String subtitleText;
+                if (prof == null) {
+                  subtitleText = 'Нет доступных серверов в пуле';
+                } else if (svcId == 'https') {
+                  subtitleText = isAlive ? 'HTTPS отвечает' : '$title · автовыбор пула';
+                } else if (st?.isPinned == true) {
+                  subtitleText = 'закреплён вручную · $title';
+                } else if (isAlive) {
+                  subtitleText = isShared
+                      ? 'найден · общий сервер ($title)'
+                      : 'найден · проверено ($title)';
+                } else {
+                  subtitleText = 'автовыбор · $title';
+                }
+
+                return InkWell(
+                  onTap: () async {
+                    await showMultiServiceServerPickerSheet(
+                      context,
+                      controller,
+                      svcId,
+                    );
+                    onChanged?.call();
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Space.md,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 52,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 7,
+                                    height: 7,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: isAlive
+                                          ? tokens.success
+                                          : (prof != null ? tokens.warning : tokens.muted),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Icon(
+                                    _multiServiceIcon(svcId),
+                                    size: 16,
+                                    color: tokens.ink,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                _formatMultiServiceLatency(
+                                  ms,
+                                  probing: controller.probingMultiServices,
+                                ),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  fontFeatures: const [FontFeature.tabularFigures()],
+                                  color: isAlive ? tokens.muted : tokens.faint,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: Space.sm),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                prof?.name ?? 'Ожидание проверки...',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 13.5,
+                                      color: tokens.ink,
+                                    ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                subtitleText,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w500,
+                                  color: isAlive
+                                      ? tokens.success
+                                      : (st?.isPinned == true ? tokens.accent : tokens.faint),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: Space.sm),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              'ПРОТОКОЛ',
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.5,
+                                color: tokens.faint,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _formatMultiServiceProtocolBadge(prof),
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700,
+                                fontFamily: 'monospace',
+                                color: tokens.ink,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.chevron_right_rounded,
+                          size: 18,
+                          color: tokens.muted,
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Панель выбора или ручного закрепления сервера для конкретного сервиса мульти-балансировщика.
+Future<void> showMultiServiceServerPickerSheet(
+  BuildContext context,
+  AppController controller,
+  String serviceId,
+) async {
+  final spec = BalancerSettings.multiServiceById(serviceId);
+  final serviceTitle = spec?.title ?? serviceId.toUpperCase();
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (sheetCtx) {
+      return StatefulBuilder(
+        builder: (ctx, setStateModal) {
+          final tokens = ctx.tokens;
+          final rawRoute = serviceId == 'https'
+              ? null
+              : controller.settings.serviceRoutes[serviceId];
+          final pinnedProfileId = (rawRoute != null && rawRoute.startsWith('profile:'))
+              ? rawRoute.substring('profile:'.length)
+              : null;
+          final candidates = [...controller.currentBalancerCandidates()];
+          candidates.sort((a, b) {
+            final pa = controller.serviceServerPing(serviceId, a.id) ?? -1;
+            final pb = controller.serviceServerPing(serviceId, b.id) ?? -1;
+            final aOk = pa > 0;
+            final bOk = pb > 0;
+            if (aOk != bOk) return aOk ? -1 : 1;
+            if (aOk && bOk) return pa.compareTo(pb);
+            return a.name.compareTo(b.name);
+          });
+
+          return DraggableScrollableSheet(
+            initialChildSize: 0.68,
+            minChildSize: 0.42,
+            maxChildSize: 0.92,
+            expand: false,
+            builder: (ctx, scrollCtrl) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: tokens.surface,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                  border: Border.all(color: tokens.line),
+                ),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: tokens.line,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(Space.lg, Space.md, Space.md, Space.sm),
+                      child: Row(
+                        children: [
+                          Icon(_multiServiceIcon(serviceId), color: tokens.accent, size: 20),
+                          const SizedBox(width: Space.sm),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Сервер для $serviceTitle',
+                                  style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                ),
+                                Text(
+                                  spec != null && spec.probeUrl.isNotEmpty
+                                      ? spec.probeUrl
+                                      : controller.settings.balancer.url,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontFamily: 'monospace',
+                                    color: tokens.faint,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: controller.probingMultiServices
+                                ? null
+                                : () async {
+                                    await controller.runMultiServiceUrlTest(
+                                      onlyServiceId: serviceId,
+                                    );
+                                    if (ctx.mounted) setStateModal(() {});
+                                  },
+                            icon: const Icon(Icons.refresh_rounded, size: 15),
+                            label: const Text('Тест', style: TextStyle(fontSize: 12)),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(sheetCtx).pop(),
+                            icon: const Icon(Icons.close, size: 20),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView(
+                        controller: scrollCtrl,
+                        padding: const EdgeInsets.fromLTRB(
+                          Space.lg,
+                          Space.md,
+                          Space.lg,
+                          Space.xxl,
+                        ),
+                        children: [
+                          HairlineCard(
+                            onTap: () async {
+                              await controller.pinServerForMultiService(serviceId, null);
+                              if (sheetCtx.mounted) Navigator.of(sheetCtx).pop();
+                            },
+                            padding: const EdgeInsets.all(Space.md),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  pinnedProfileId == null
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_unchecked,
+                                  size: 18,
+                                  color: pinnedProfileId == null ? tokens.accent : tokens.muted,
+                                ),
+                                const SizedBox(width: Space.sm),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Автовыбор лучшего сервера (рекомендуется)',
+                                        style: Theme.of(ctx).textTheme.titleSmall?.copyWith(
+                                              color: pinnedProfileId == null
+                                                  ? tokens.accent
+                                                  : tokens.ink,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        'Автоматически выбирает сервер с минимальной задержкой или нагрузкой для $serviceTitle',
+                                        style: TextStyle(fontSize: 11, color: tokens.faint),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: Space.md),
+                          const SectionLabel('Серверы пула (по отклику)'),
+                          for (final cand in candidates) ...[
+                            Builder(
+                              builder: (ctx) {
+                                final isSelected = pinnedProfileId == cand.id;
+                                final ms = controller.serviceServerPing(serviceId, cand.id) ?? -1;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 6),
+                                  child: HairlineCard(
+                                    onTap: () async {
+                                      await controller.pinServerForMultiService(
+                                        serviceId,
+                                        cand.id,
+                                      );
+                                      if (sheetCtx.mounted) Navigator.of(sheetCtx).pop();
+                                    },
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: Space.md,
+                                      vertical: 10,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          isSelected
+                                              ? Icons.radio_button_checked
+                                              : Icons.radio_button_unchecked,
+                                          size: 18,
+                                          color: isSelected ? tokens.accent : tokens.muted,
+                                        ),
+                                        const SizedBox(width: Space.sm),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                cand.name,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(ctx).textTheme.bodyMedium?.copyWith(
+                                                      fontWeight: FontWeight.w600,
+                                                      color: isSelected ? tokens.accent : tokens.ink,
+                                                    ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                '${_formatMultiServiceProtocolBadge(cand)} · ${cand.server}:${cand.port}',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontFamily: 'monospace',
+                                                  color: tokens.faint,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(width: Space.sm),
+                                        Text(
+                                          _formatMultiServiceLatency(ms, probing: false),
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                            fontFamily: 'monospace',
+                                            fontFeatures: const [FontFeature.tabularFigures()],
+                                            color: ms > 0 ? tokens.success : tokens.faint,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
                           ],
                         ],
                       ),

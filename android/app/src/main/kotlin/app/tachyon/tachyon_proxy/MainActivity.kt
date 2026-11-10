@@ -49,6 +49,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingQrResult: MethodChannel.Result? = null
     private var pendingFileResult: MethodChannel.Result? = null
     private var pendingWifiPermResult: MethodChannel.Result? = null
+    private var pendingInstallApkFileName: String? = null
 
     /** Выбор конфигурационного файла (.conf / .fptn / .json / .txt) через системный пикер. */
     private val filePickerLauncher =
@@ -176,6 +177,17 @@ class MainActivity : FlutterFragmentActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val pendingApk = pendingInstallApkFileName
+        if (!pendingApk.isNullOrEmpty() &&
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls())
+        ) {
+            pendingInstallApkFileName = null
+            launchApkInstallerIntent(pendingApk)
         }
     }
 
@@ -839,11 +851,21 @@ class MainActivity : FlutterFragmentActivity() {
         val fileName = call.argument<String>("fileName") ?: "tachyon-update.apk"
         try {
             val apkFile = File(File(filesDir, "update"), fileName)
-            if (!apkFile.exists()) {
-                result.success("error: APK не найден (${apkFile.absolutePath})")
+            if (!apkFile.exists() || apkFile.length() < 5_000_000L) {
+                result.success("error: APK не найден или скачан не полностью (${apkFile.length()} байт)")
                 return
             }
-            if (!packageManager.canRequestPackageInstalls()) {
+            @Suppress("DEPRECATION")
+            val archiveInfo = runCatching {
+                packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+            }.getOrNull()
+            if (archiveInfo == null) {
+                runCatching { apkFile.delete() }
+                result.success("error: скачанный APK повреждён или обрезан при загрузке — нажмите «APK» ещё раз")
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                pendingInstallApkFileName = fileName
                 val permIntent = Intent(
                     android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                     android.net.Uri.parse("package:$packageName"),
@@ -851,18 +873,25 @@ class MainActivity : FlutterFragmentActivity() {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 startActivity(permIntent)
+                result.success("ok")
+                return
             }
-            val uri = android.net.Uri.parse("content://${org.tachyon.vpn.ApkFileProvider.AUTHORITY}/$fileName")
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(installIntent)
+            pendingInstallApkFileName = null
+            launchApkInstallerIntent(fileName)
             result.success("ok")
         } catch (e: Throwable) {
             result.success("error: ${e.message}")
         }
+    }
+
+    private fun launchApkInstallerIntent(fileName: String) {
+        val uri = android.net.Uri.parse("content://${org.tachyon.vpn.ApkFileProvider.AUTHORITY}/$fileName")
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(installIntent)
     }
 
     /** Список установленных приложений — для правил по пакетам. */
@@ -914,7 +943,11 @@ class MainActivity : FlutterFragmentActivity() {
         }
         TunnelStateHolder.serverName = serverName
         TunnelStateHolder.update(TunnelStateHolder.State.Starting, null)
-        startForegroundService(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     /** Отложенный запуск: ждём разрешения VPN от системы. */

@@ -935,7 +935,7 @@ class TachyonVpnService : VpnService() {
         private const val TAG = "TachyonVpnService"
         private const val CHANNEL_ID = "tachyon_vpn"
         private const val NOTIFICATION_ID = 4711
-        private const val MTU = 9000
+        private const val MTU = 1400
         private const val TUN_ADDRESS = "172.19.0.1"
         private const val TUN_PREFIX = 30
         private const val DNS_SERVER = "1.1.1.1"

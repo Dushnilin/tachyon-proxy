@@ -123,6 +123,11 @@ class AppController extends ChangeNotifier {
   String _desyncTestStatus = '';
   List<DesyncScanEntry> _desyncScanResults = const [];
 
+  /// Состояние мульти-сервисного URL-тест балансировщика (`youtube`, `telegram`, `discord`, `instagram`, `openai`, `https`).
+  final Map<String, ServiceBalancerStatus> _serviceBalancerStatus = {};
+  final Map<String, Map<String, int>> _serviceServerPings = {};
+  bool _probingMultiServices = false;
+
   /// Счётчики для фонового Smart Failover и автосмены профиля DPI по типу сети.
   int _pollTickCount = 0;
   int _consecutiveWatchdogFails = 0;
@@ -139,7 +144,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.19';
+  static const String appVersion = '0.0.20';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -189,6 +194,10 @@ class AppController extends ChangeNotifier {
   bool get testingDesync => _testingDesync;
   String get desyncTestStatus => _desyncTestStatus;
   List<DesyncScanEntry> get desyncScanResults => _desyncScanResults;
+  Map<String, ServiceBalancerStatus> get serviceBalancerStatus => _serviceBalancerStatus;
+  bool get probingMultiServices => _probingMultiServices;
+  int? serviceServerPing(String serviceId, String profileId) =>
+      _serviceServerPings[serviceId]?[profileId] ?? _pings[profileId];
   String get activeNetworkType => _lastNetType;
   String get currentWifiSsid => _currentWifiSsid;
   bool get isWifiConnected => _isWifiConnected;
@@ -504,9 +513,14 @@ class AppController extends ChangeNotifier {
   Future<void> ensureRequiredListsDownloaded() async {
     if (filesDirPath.isEmpty) return;
     final requiredIds = <String>{};
+    final multiSet = _settings.balancer.multiServiceEnabled
+        ? _settings.balancer.multiServices.toSet()
+        : const <String>{};
     for (final service in BuiltInService.catalog) {
       final route = _settings.serviceRoutes[service.id];
-      if (route != null && route.isNotEmpty && route != 'off') {
+      final neededByRoute = route != null && route.isNotEmpty && route != 'off';
+      final neededByMulti = multiSet.contains(service.id);
+      if (neededByRoute || neededByMulti) {
         if (service.trsId.isNotEmpty) {
           requiredIds.add(service.trsId);
         }
@@ -758,7 +772,7 @@ class AppController extends ChangeNotifier {
       allowedApps: _allowedApps,
       disallowedApps: _disallowedApps,
       serverName: currentServer,
-      mtu: _settings.mtu,
+      mtu: config.effectiveTunMtu,
       proxyOnly: _settings.proxyOnly,
     );
     if (error != null) {
@@ -860,7 +874,7 @@ class AppController extends ChangeNotifier {
     // извлекаем https:// ссылку, если в тексте нет прямых URI серверов (vless://, hy2:// и т.д.).
     if (!payload.startsWith('http://') && !payload.startsWith('https://')) {
       final hasDirectProxyScheme = RegExp(
-        r'\b(vless|vmess|trojan|ss|shadowsocks|hy2|hysteria2?|tuic|wg|wireguard|amneziawg|awg|anytls|naive\+https|naive\+quic|snell|shadowtls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|socks5?|ssh|mtproto|tg)://',
+        r'\b(vless|vmess|trojan|ss|shadowsocks|hy2|hysteria2?|tuic|wg|wireguard|amneziawg|awg|anytls|naive(\+https|\+http2|\+h2|\+quic|\+h3)?|snell|shadowtls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|socks5?|ssh|mtproto|tg)://',
         caseSensitive: false,
       ).hasMatch(payload);
       if (!hasDirectProxyScheme) {
@@ -2238,7 +2252,7 @@ class AppController extends ChangeNotifier {
       allowedApps: _allowedApps,
       disallowedApps: _disallowedApps,
       serverName: currentServer,
-      mtu: _settings.mtu,
+      mtu: config.effectiveTunMtu,
       proxyOnly: _settings.proxyOnly,
     );
     if (error != null) {
@@ -2425,6 +2439,16 @@ class AppController extends ChangeNotifier {
       _traffic = next;
       final prevWinnerId = _activeBalancerWinner?.id;
       final changedWinner = _syncBalancerTelemetry(next?.balancer);
+      var changedMulti = false;
+      if (_settings.balancer.multiServiceEnabled) {
+        if (_tunnel.status.isActive &&
+            (_settings.selectedProfileId.startsWith('auto:') ||
+                selectedProfile?.type == 'urltest')) {
+          changedMulti = await _syncMultiServiceFromClashApi();
+        } else {
+          changedMulti = _refreshMultiServicePreview();
+        }
+      }
       _pollTickCount++;
 
       // Автоматическое переключение профиля/списка серверов и рецепта Desync при смене Wi-Fi <-> Мобильная сеть
@@ -2457,7 +2481,9 @@ class AppController extends ChangeNotifier {
       }
 
       trafficRevision.value++;
-      if (changedWinner || _activeBalancerWinner?.id != prevWinnerId) {
+      if (changedWinner ||
+          changedMulti ||
+          _activeBalancerWinner?.id != prevWinnerId) {
         notifyListeners();
       }
     } finally {
@@ -2518,6 +2544,329 @@ class AppController extends ChangeNotifier {
       }
     }
     return _activeBalancerWinner?.id != prevWinnerId;
+  }
+
+  /// Возвращает текущий пул кандидатов для активного балансировщика (или глобального пула).
+  List<Profile> currentBalancerCandidates() {
+    final sel = selectedProfile;
+    final target = (sel != null && (sel.id.startsWith('auto:') || sel.type == 'urltest'))
+        ? sel
+        : const Profile(
+            id: 'auto:all',
+            name: 'Автовыбор',
+            type: 'urltest',
+            server: 'auto',
+            port: 0,
+          );
+    return RuntimeConfig.resolveAutoCandidates(
+      target,
+      _settings.visibleProfiles,
+      activeNetworkType: _lastNetType,
+      subscriptions: _settings.visibleSubscriptions,
+      balancer: _settings.balancer,
+    );
+  }
+
+  bool _refreshMultiServicePreview([List<Profile>? candidates]) {
+    if (!_settings.balancer.multiServiceEnabled) {
+      if (_serviceBalancerStatus.isEmpty) return false;
+      _serviceBalancerStatus.clear();
+      return true;
+    }
+    final cands = candidates ?? currentBalancerCandidates();
+    var changed = false;
+
+    for (final svcId in _settings.balancer.multiServices) {
+      final rawRoute = svcId == 'https' ? null : _settings.serviceRoutes[svcId];
+      if (rawRoute != null && rawRoute.startsWith('profile:')) {
+        final profId = rawRoute.substring('profile:'.length);
+        final pinned = _settings.visibleProfiles.where((p) => p.id == profId).firstOrNull;
+        final lat = _serviceServerPings[svcId]?[profId] ?? _pings[profId] ?? -1;
+        final prev = _serviceBalancerStatus[svcId];
+        if (prev?.profile?.id != pinned?.id ||
+            prev?.latencyMs != lat ||
+            prev?.isPinned != true ||
+            prev?.probing != _probingMultiServices) {
+          _serviceBalancerStatus[svcId] = ServiceBalancerStatus(
+            serviceId: svcId,
+            profile: pinned,
+            latencyMs: lat,
+            isPinned: true,
+            probing: _probingMultiServices,
+          );
+          changed = true;
+        }
+        continue;
+      }
+
+      Profile? best;
+      var bestPing = -1;
+      final svcMap = _serviceServerPings[svcId];
+      if (svcMap != null && svcMap.isNotEmpty) {
+        for (final cand in cands) {
+          final p = svcMap[cand.id] ?? -1;
+          if (p > 0 && (bestPing < 0 || p < bestPing)) {
+            bestPing = p;
+            best = cand;
+          }
+        }
+      }
+      if (best == null) {
+        if (svcId == 'https' && _activeBalancerWinner != null) {
+          best = _activeBalancerWinner;
+          bestPing = _pings[best!.id] ?? _urlTestPing ?? -1;
+        } else {
+          for (final cand in cands) {
+            final p = _pings[cand.id] ?? -1;
+            if (p > 0 && (bestPing < 0 || p < bestPing)) {
+              bestPing = p;
+              best = cand;
+            }
+          }
+          if (best == null && _activeBalancerWinner != null) {
+            best = _activeBalancerWinner;
+            bestPing = _pings[best!.id] ?? -1;
+          }
+        }
+      }
+
+      final prev = _serviceBalancerStatus[svcId];
+      if (prev?.profile?.id != best?.id ||
+          prev?.latencyMs != bestPing ||
+          prev?.isPinned != false ||
+          prev?.probing != _probingMultiServices) {
+        _serviceBalancerStatus[svcId] = ServiceBalancerStatus(
+          serviceId: svcId,
+          profile: best,
+          latencyMs: bestPing,
+          isPinned: false,
+          probing: _probingMultiServices,
+        );
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  Future<bool> _syncMultiServiceFromClashApi() async {
+    final candidates = currentBalancerCandidates();
+    if (candidates.isEmpty) return _refreshMultiServicePreview(candidates);
+
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(milliseconds: 1000)
+      ..idleTimeout = const Duration(milliseconds: 1000);
+    try {
+      final req = await client
+          .getUrl(Uri.parse('http://127.0.0.1:19090/proxies'))
+          .timeout(const Duration(milliseconds: 1200));
+      final resp = await req.close().timeout(const Duration(milliseconds: 1200));
+      if (resp.statusCode != 200) {
+        await resp.drain<void>();
+        return _refreshMultiServicePreview(candidates);
+      }
+      final body = await resp.transform(utf8.decoder).join().timeout(
+            const Duration(milliseconds: 1200),
+          );
+      final decoded = jsonDecode(body);
+      if (decoded is! Map || decoded['proxies'] is! Map) {
+        return _refreshMultiServicePreview(candidates);
+      }
+      final proxies = decoded['proxies'] as Map;
+      var changed = false;
+
+      for (final svcId in _settings.balancer.multiServices) {
+        final groupTag = svcId == 'https' ? 'proxy' : 'urltest-svc-$svcId';
+        final groupObj = proxies[groupTag];
+        final svcMap = _serviceServerPings.putIfAbsent(svcId, () => <String, int>{});
+        Profile? groupWinner;
+        var groupWinnerRtt = -1;
+
+        if (groupObj is Map) {
+          final nowTag = (groupObj['now'] as String?) ?? '';
+          final rawTel = groupObj['telemetry'];
+          if (rawTel is Map) {
+            for (var i = 0; i < candidates.length; i++) {
+              final mTag = 'auto-srv-$i';
+              final cand = candidates[i];
+              final t = rawTel[mTag];
+              if (t is Map) {
+                final rtt = (t['rtt_ms'] as num?)?.toInt() ?? 0;
+                final quarantined = t['quarantined'] == true;
+                if (rtt > 0 && !quarantined) {
+                  svcMap[cand.id] = rtt;
+                  if ((_pings[cand.id] ?? -1) <= 0) {
+                    _pings[cand.id] = rtt;
+                    _bumpServerRevision(cand.id);
+                  }
+                }
+              }
+              if (nowTag == mTag) {
+                groupWinner = cand;
+                groupWinnerRtt = svcMap[cand.id] ?? _pings[cand.id] ?? -1;
+              }
+            }
+          }
+        }
+
+        final rawRoute = svcId == 'https' ? null : _settings.serviceRoutes[svcId];
+        if (rawRoute != null && rawRoute.startsWith('profile:')) {
+          final profId = rawRoute.substring('profile:'.length);
+          final pinned = _settings.visibleProfiles.where((p) => p.id == profId).firstOrNull;
+          final lat = svcMap[profId] ?? _pings[profId] ?? -1;
+          final prev = _serviceBalancerStatus[svcId];
+          if (prev?.profile?.id != pinned?.id ||
+              prev?.latencyMs != lat ||
+              prev?.isPinned != true ||
+              prev?.probing != _probingMultiServices) {
+            _serviceBalancerStatus[svcId] = ServiceBalancerStatus(
+              serviceId: svcId,
+              profile: pinned,
+              latencyMs: lat,
+              isPinned: true,
+              probing: _probingMultiServices,
+            );
+            changed = true;
+          }
+          continue;
+        }
+
+        if (groupWinner == null) {
+          for (final cand in candidates) {
+            final p = svcMap[cand.id] ?? _pings[cand.id] ?? -1;
+            if (p > 0 && (groupWinnerRtt < 0 || p < groupWinnerRtt)) {
+              groupWinnerRtt = p;
+              groupWinner = cand;
+            }
+          }
+        }
+
+        final prev = _serviceBalancerStatus[svcId];
+        if (prev?.profile?.id != groupWinner?.id ||
+            prev?.latencyMs != groupWinnerRtt ||
+            prev?.isPinned != false ||
+            prev?.probing != _probingMultiServices) {
+          _serviceBalancerStatus[svcId] = ServiceBalancerStatus(
+            serviceId: svcId,
+            profile: groupWinner,
+            latencyMs: groupWinnerRtt,
+            isPinned: false,
+            probing: _probingMultiServices,
+          );
+          changed = true;
+        }
+      }
+      return changed;
+    } catch (_) {
+      return _refreshMultiServicePreview(candidates);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Запускает мульти-URL проверку доступности и задержки выбранных сервисов
+  /// (`youtube`, `telegram`, `discord`, `instagram`, `openai`, `https`) по пулу серверов балансировщика.
+  Future<void> runMultiServiceUrlTest({String? onlyServiceId}) async {
+    if (_probingMultiServices) return;
+    _probingMultiServices = true;
+    _refreshMultiServicePreview();
+    notifyListeners();
+
+    try {
+      final isAutoActive = _tunnel.status.isActive &&
+          _settings.balancer.multiServiceEnabled &&
+          (_settings.selectedProfileId.startsWith('auto:') ||
+              selectedProfile?.type == 'urltest');
+      if (isAutoActive) {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 2)
+          ..idleTimeout = const Duration(seconds: 6);
+        try {
+          final req = await client
+              .postUrl(Uri.parse('http://127.0.0.1:19090/tachyon/failover'))
+              .timeout(const Duration(seconds: 3));
+          req.headers.set('Content-Type', 'application/json');
+          final payload = <String, dynamic>{
+            'probe': true,
+            if (onlyServiceId != null && onlyServiceId.isNotEmpty)
+              'group': onlyServiceId == 'https'
+                  ? 'proxy'
+                  : 'urltest-svc-$onlyServiceId',
+          };
+          req.add(utf8.encode(jsonEncode(payload)));
+          final resp = await req.close().timeout(const Duration(seconds: 8));
+          await resp.drain<void>();
+        } catch (_) {
+          // Откат к обычному опросу, если локальный контроллер ещё поднимается
+        } finally {
+          client.close(force: true);
+        }
+        await _syncMultiServiceFromClashApi();
+      } else {
+        final subId = _settings.selectedProfileId.startsWith('auto:')
+            ? _settings.selectedProfileId.substring('auto:'.length)
+            : 'all';
+        await pingAllProfiles(subscriptionId: subId == 'all' ? null : subId);
+        _refreshMultiServicePreview();
+      }
+    } finally {
+      _probingMultiServices = false;
+      _refreshMultiServicePreview();
+      notifyListeners();
+    }
+  }
+
+  /// Включает или выключает мульти-сервисный URL-тест балансировщика.
+  Future<void> setMultiServiceBalancerEnabled(bool enabled) async {
+    final nextBal = _settings.balancer.copyWith(multiServiceEnabled: enabled);
+    await setBalancer(nextBal);
+    if (enabled) {
+      unawaited(ensureRequiredListsDownloaded());
+      _refreshMultiServicePreview();
+      notifyListeners();
+      unawaited(runMultiServiceUrlTest());
+    } else {
+      _serviceBalancerStatus.clear();
+      notifyListeners();
+    }
+  }
+
+  /// Переключает участие сервиса (`youtube`, `telegram`, `discord`, `instagram`, `openai`, `https`)
+  /// в мульти-URL балансировщике.
+  Future<void> toggleMultiBalancerService(String serviceId) async {
+    final current = [..._settings.balancer.multiServices];
+    if (current.contains(serviceId)) {
+      if (current.length <= 1) return;
+      current.remove(serviceId);
+      _serviceBalancerStatus.remove(serviceId);
+    } else {
+      current.add(serviceId);
+    }
+    await setBalancer(_settings.balancer.copyWith(multiServices: current));
+    if (_settings.balancer.multiServiceEnabled) {
+      unawaited(ensureRequiredListsDownloaded());
+      _refreshMultiServicePreview();
+      notifyListeners();
+    }
+  }
+
+  /// Закрепляет за сервисом конкретный сервер (`profileId`) или возвращает автовыбор балансировщика (`null`).
+  Future<void> pinServerForMultiService(String serviceId, String? profileId) async {
+    if (serviceId == 'https') {
+      if (profileId != null && profileId.isNotEmpty) {
+        await selectProfile(profileId);
+      } else if (!_settings.selectedProfileId.startsWith('auto:')) {
+        await selectProfile('auto:all');
+      }
+      _refreshMultiServicePreview();
+      notifyListeners();
+      return;
+    }
+    final action = (profileId == null || profileId.isEmpty)
+        ? 'proxy'
+        : 'profile:$profileId';
+    await setServiceRoute(serviceId, action);
+    _refreshMultiServicePreview();
+    notifyListeners();
   }
 
   /// Выбирает целевой сервер или список серверов для указанной сети (`'wifi'` или `'cellular'`).
@@ -2906,6 +3255,20 @@ class AppController extends ChangeNotifier {
       if (result > 0) {
         if (_latencyHistory.length >= 24) _latencyHistory.removeAt(0);
         _latencyHistory.add(result);
+        final sel = selectedProfile;
+        if (sel != null) {
+          if (!sel.id.startsWith('auto:') && sel.type != 'urltest') {
+            _pings[sel.id] = result;
+            _bumpServerRevision(sel.id);
+          } else if (_activeBalancerWinner != null) {
+            final winnerId = _activeBalancerWinner!.id;
+            _pings[winnerId] = result;
+            _bumpServerRevision(winnerId);
+          }
+        }
+        if (_settings.balancer.multiServiceEnabled) {
+          _refreshMultiServicePreview();
+        }
       }
       _testingUrlPing = false;
       notifyListeners();
@@ -3722,9 +4085,7 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      if (isQuicProbe && resolvedIp != null) {
-        result = await _probeQuicLatency(resolvedIp, targetPort);
-      } else {
+      Future<int> probeTcpTls() async {
         final Object connectTarget = resolvedIp ?? targetHost;
         try {
           final sw = Stopwatch()..start();
@@ -3738,31 +4099,60 @@ class AppController extends ChangeNotifier {
 
           if (useTlsProbe) {
             final tlsSw = Stopwatch()..start();
-            socket.add(_buildTlsClientHello(probeSni));
-            final chunk = await socket.first.timeout(const Duration(milliseconds: 2200));
+            socket!.add(_buildTlsClientHello(probeSni));
+            final chunk = await socket!.first.timeout(const Duration(milliseconds: 2200));
             tlsSw.stop();
             if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
-              result = tcpMs;
-            } else {
-              result = -1;
+              return tcpMs;
             }
-          } else {
-            result = tcpMs;
+            return -1;
           }
+          return tcpMs;
         } catch (_) {
-          result = -1;
+          return -1;
         }
-        if (result < 0 && hopType == 'naive' && resolvedIp != null) {
-          result = await _probeQuicLatency(resolvedIp, targetPort);
+      }
+
+      if (isQuicProbe && resolvedIp != null) {
+        result = await _probeQuicLatency(resolvedIp, targetPort);
+        if (result < 0 && hopType == 'naive') {
+          result = await probeTcpTls();
         }
+      } else if (hopType == 'naive' && resolvedIp != null) {
+        // Для NaiveProxy запускаем QUIC (UDP) и TCP+TLS пробу параллельно:
+        // первый успешный ответ побеждает без ожидания таймаута второго стека.
+        final completer = Completer<int>();
+        var pending = 2;
+        void handleProbe(int r) {
+          pending--;
+          if (r > 0 && !completer.isCompleted) {
+            completer.complete(r);
+          } else if (pending == 0 && !completer.isCompleted) {
+            completer.complete(-1);
+          }
+        }
+
+        unawaited(_probeQuicLatency(resolvedIp, targetPort).then(handleProbe));
+        unawaited(probeTcpTls().then(handleProbe));
+        result = await completer.future;
+      } else {
+        result = await probeTcpTls();
       }
     } catch (_) {
       result = -1;
     } finally {
       socket?.destroy();
+      if (result < 0 && _tunnel.status.isActive && (_urlTestPing ?? -1) > 0) {
+        if (_settings.selectedProfileId == id || _activeBalancerWinner?.id == id) {
+          result = _urlTestPing!;
+        }
+      }
       _pings[id] = result;
       _pingingIds.remove(id);
       _bumpServerRevision(id);
+      if (_settings.balancer.multiServiceEnabled) {
+        _refreshMultiServicePreview();
+      }
       if (coalesce) {
         _schedulePingCoalescedNotify();
       } else if (_sortByPing) {
@@ -4195,13 +4585,23 @@ class AppController extends ChangeNotifier {
         await sink.flush();
         await sink.close();
         sink = null;
-        if (partFile.existsSync() && partFile.lengthSync() > 500000) {
+        if (total > 0 && received != total) {
+          try {
+            if (partFile.existsSync()) partFile.deleteSync();
+          } catch (_) {}
+          continue;
+        }
+        if (partFile.existsSync() &&
+            _verifyDownloadedBinary(partFile, targetFile.path)) {
           if (targetFile.existsSync()) {
             targetFile.deleteSync();
           }
           partFile.renameSync(targetFile.path);
           return true;
         }
+        try {
+          if (partFile.existsSync()) partFile.deleteSync();
+        } catch (_) {}
       } catch (_) {
         // Пробуем следующий режим/зеркало
       } finally {
@@ -4212,6 +4612,59 @@ class AppController extends ChangeNotifier {
       }
     }
     return false;
+  }
+
+  /// Проверяет целостность скачанного архива APK / IPA (ZIP-сигнатура + EOCD) или бинарника ядра `.so` (ELF).
+  static bool _verifyDownloadedBinary(File file, String targetPath) {
+    try {
+      final len = file.lengthSync();
+      final lower = targetPath.toLowerCase();
+      if (lower.endsWith('.apk') || lower.endsWith('.ipa')) {
+        if (len < 5 * 1024 * 1024) return false;
+        final raf = file.openSync(mode: FileMode.read);
+        try {
+          final head = raf.readSync(4);
+          if (head.length < 4 ||
+              head[0] != 0x50 ||
+              head[1] != 0x4B ||
+              head[2] != 0x03 ||
+              head[3] != 0x04) {
+            return false;
+          }
+          final tailSize = len < 65558 ? len : 65558;
+          raf.setPositionSync(len - tailSize);
+          final tail = raf.readSync(tailSize);
+          for (var i = tail.length - 22; i >= 0; i--) {
+            if (tail[i] == 0x50 &&
+                tail[i + 1] == 0x4B &&
+                tail[i + 2] == 0x05 &&
+                tail[i + 3] == 0x06) {
+              return true;
+            }
+          }
+          return false;
+        } finally {
+          raf.closeSync();
+        }
+      }
+      if (lower.endsWith('.so')) {
+        if (len < 1024 * 1024) return false;
+        final raf = file.openSync(mode: FileMode.read);
+        try {
+          final head = raf.readSync(4);
+          return head.length == 4 &&
+              head[0] == 0x7F &&
+              head[1] == 0x45 &&
+              head[2] == 0x4C &&
+              head[3] == 0x46;
+        } finally {
+          raf.closeSync();
+        }
+      }
+      return len > 500000;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Отдельное обновление ТОЛЬКО нативного ядра (`libtachyon.so`) через внутренний загрузчик.
@@ -4573,3 +5026,21 @@ class DesyncScanEntry {
 
   bool get ok => avgMs >= 0;
 }
+
+/// Состояние привязки и задержки сервера для отдельного сервиса в мульти-URL балансировщике.
+class ServiceBalancerStatus {
+  const ServiceBalancerStatus({
+    required this.serviceId,
+    this.profile,
+    this.latencyMs = -1,
+    this.isPinned = false,
+    this.probing = false,
+  });
+
+  final String serviceId;
+  final Profile? profile;
+  final int latencyMs;
+  final bool isPinned;
+  final bool probing;
+}
+

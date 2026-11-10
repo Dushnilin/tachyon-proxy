@@ -141,11 +141,26 @@ jobs:
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk dist-android/tachyon-proxy-x86_64.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-universal.apk
           cp build/app/outputs/flutter-apk/app-release.apk dist-android/tachyon-proxy-android-tv.apk
+          ZIPALIGN=$(find "$ANDROID_HOME/build-tools" -name zipalign | sort -V | tail -n 1)
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
           for apk in dist-android/*.apk; do
-            "$APKSIGNER" sign --ks android/app/tachyon.keystore --ks-pass pass:android --key-pass pass:android --ks-key-alias androiddebugkey "$apk"
-            "$APKSIGNER" verify --print-certs "$apk" | grep "SHA-256"
+            "$ZIPALIGN" -p -f 4 "$apk" "${apk}.aligned"
+            mv -f "${apk}.aligned" "$apk"
+            "$APKSIGNER" sign \
+              --min-sdk-version 21 \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --v4-signing-enabled false \
+              --ks android/app/tachyon.keystore \
+              --ks-pass pass:android \
+              --key-pass pass:android \
+              --ks-key-alias androiddebugkey \
+              "$apk"
+            "$APKSIGNER" verify --min-sdk-version 21 --verbose --print-certs "$apk" | grep -E "Verified using|SHA-256"
           done
+          rm -f dist-android/*.idsig
+          ls -lh dist-android/*.apk
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
@@ -290,7 +305,7 @@ jobs:
 
           | Платформа | Файл | Назначение |
           |:---|:---|:---|
-          | Android (\`arm64-v8a\`) | \`tachyon-proxy-arm64-v8a.apk\` | Основная сборка для смартфонов и планшетов Android 8.0+ |
+          | Android (\`arm64-v8a\`) | \`tachyon-proxy-arm64-v8a.apk\` | Основная сборка для смартфонов и планшетов Android 7.0+ |
           | iOS / iPadOS 15.0+ (\`arm64\`) | \`tachyon-proxy-ios.ipa\` | Сборка с \`NEPacketTunnelProvider\` (TrollStore / SideStore / AltStore / ESign / Feather) |
           | Android TV / Google TV | \`tachyon-proxy-android-tv.apk\` | Сборка для телевизоров и ТВ-приставок (\`Leanback\`, управление с пульта) |
           | Android (\`armeabi-v7a\`) | \`tachyon-proxy-armeabi-v7a.apk\` | Сборка для 32-битных ARM-устройств |

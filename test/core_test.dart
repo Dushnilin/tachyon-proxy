@@ -1270,6 +1270,188 @@ PersistentKeepalive = 15-30
         isTrue,
       );
     });
+
+    test('LinkParser распознаёт naive+h3://, naive+http2:// и Clash YAML type: naive с QUIC', () {
+      const parser = LinkParser();
+      final h3 = parser.parse(
+        'naive+h3://user:pass@edge.commonnet.work:12443?sni=edge.commonnet.work#%2B%D0%9B%D0%B0%D1%82%D0%B2%D0%B8%D1%8F',
+      );
+      expect(h3, isNotNull);
+      expect(h3!.type, 'naive');
+      expect(h3.transport, 'quic');
+      expect(h3.extra['quic'], isTrue);
+      expect(h3.toOutbound()['quic'], isTrue);
+
+      final h2 = parser.parse(
+        'naive+http2://user:pass@edge.commonnet.work:12443?sni=edge.commonnet.work#LatviaH2',
+      );
+      expect(h2, isNotNull);
+      expect(h2!.type, 'naive');
+      expect(h2.transport, 'tcp');
+      expect(h2.toOutbound()['quic'], isNot(isTrue));
+
+      final clashProfiles = parser.parseMany('''
+proxies:
+  - name: "+Латвия QUIC"
+    type: naive
+    server: edge.commonnet.work
+    port: 12443
+    username: u
+    password: p
+    quic: true
+''');
+      expect(clashProfiles, hasLength(1));
+      expect(clashProfiles.first.type, 'naive');
+      expect(clashProfiles.first.transport, 'quic');
+      expect(clashProfiles.first.toOutbound()['quic'], isTrue);
+    });
+
+    test('Мульти-URL балансировщик создаёт urltest-svc-* группы, правила маршрутизации по сервисам и включает Clash API', () {
+      const p1 = Profile(
+        id: 'srv1',
+        name: 'UAE #26',
+        type: 'vless',
+        server: 'uae.example.com',
+        port: 443,
+        uuid: '11111111-1111-1111-1111-111111111111',
+        transport: 'grpc',
+      );
+      const p2 = Profile(
+        id: 'srv2',
+        name: 'CH #15',
+        type: 'vless',
+        server: 'ch.example.com',
+        port: 443,
+        uuid: '22222222-2222-2222-2222-222222222222',
+        transport: 'xhttp',
+      );
+      const autoProfile = Profile(
+        id: 'auto:all',
+        name: 'Автовыбор',
+        type: 'balancer',
+        server: 'auto',
+        port: 0,
+      );
+
+      const balancer = BalancerSettings(
+        mode: 'stability',
+        multiServiceEnabled: true,
+        multiServices: ['youtube', 'telegram', 'instagram', 'https'],
+      );
+      final restoredBalancer = BalancerSettings.fromJson(balancer.toJson());
+      expect(restoredBalancer.multiServiceEnabled, isTrue);
+      expect(
+        restoredBalancer.multiServices,
+        ['youtube', 'telegram', 'instagram', 'https'],
+      );
+
+      final cfg = RuntimeConfig(
+        profile: autoProfile,
+        balancer: restoredBalancer,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        serviceRoutes: const {
+          'instagram': 'profile:srv1',
+        },
+        extraProfiles: const [p1, p2],
+      ).toJson();
+
+      final outbounds = (cfg['outbounds'] as List).cast<Map<String, dynamic>>();
+      final proxyPool = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      expect(proxyPool['type'], 'urltest');
+      expect(proxyPool['outbounds'], ['auto-srv-0', 'auto-srv-1']);
+
+      final ytPool = outbounds.firstWhere((o) => o['tag'] == 'urltest-svc-youtube');
+      expect(ytPool['type'], 'urltest');
+      expect(ytPool['url'], 'https://www.youtube.com/generate_204');
+      expect(ytPool['outbounds'], ['auto-srv-0', 'auto-srv-1']);
+
+      final tgPool = outbounds.firstWhere((o) => o['tag'] == 'urltest-svc-telegram');
+      expect(tgPool['type'], 'urltest');
+      expect(tgPool['url'], 'https://core.telegram.org/favicon.ico');
+
+      final igPool = outbounds.firstWhere((o) => o['tag'] == 'urltest-svc-instagram');
+      expect(igPool['type'], 'urltest');
+      expect(igPool['url'], 'https://www.instagram.com/robots.txt');
+
+      final rules = ((cfg['route'] as Map)['rules'] as List).cast<Map<String, dynamic>>();
+      // YouTube и Telegram маршрутизируются в свои urltest-svc-* пулы
+      expect(
+        rules.any((r) => r['outbound'] == 'urltest-svc-youtube'),
+        isTrue,
+      );
+      expect(
+        rules.any((r) => r['outbound'] == 'urltest-svc-telegram'),
+        isTrue,
+      );
+      // Instagram закреплён вручную на profile:srv1 -> srv-srv1
+      expect(
+        rules.any((r) => r['outbound'] == 'srv-srv1'),
+        isTrue,
+      );
+
+      final clashApi = (cfg['experimental'] as Map?)?['clash_api'] as Map?;
+      expect(clashApi?['external_controller'], '127.0.0.1:19090');
+    });
+
+    test('По умолчанию YouTube и Discord идут через прокси-сервер (WireGuard / VLESS), WireGuard получает MTU 1280, а VLESS — xudp', () {
+      const defaults = AppSettings();
+      expect(defaults.serviceRoutes, {'ru': 'direct'});
+      expect(defaults.mtu, 1400);
+
+      // Миграция старых дефолтов (youtube/discord -> desync, mtu -> 9000) при обновлении приложения
+      final migrated = AppSettings.fromJson({
+        'serviceRoutes': {
+          'youtube': 'desync',
+          'discord': 'desync',
+          'ru': 'direct',
+        },
+        'mtu': 9000,
+      });
+      expect(migrated.serviceRoutes, {'ru': 'direct'});
+      expect(migrated.mtu, 1400);
+
+      // Если пользователь явно сохранил настройки в v0.0.20+, его выбор сохраняется
+      final explicit = AppSettings.fromJson({
+        'serviceRoutes': {
+          'youtube': 'desync',
+          'discord': 'desync',
+          'ru': 'direct',
+        },
+        'serviceRoutesV20': true,
+        'mtu': 9000,
+      });
+      expect(explicit.serviceRoutes['youtube'], 'desync');
+      expect(explicit.mtu, 9000);
+
+      // Профиль WireGuard без явного MTU получает безопасный MTU 1280 и на endpoint, и на tun-in,
+      // а YouTube не перехватывается в desync мимо WireGuard
+      final wgProfile = const LinkParser().parse(
+        'wireguard://privKey123@198.51.100.10:51820?publickey=pubKey456&address=10.8.0.2/32#WG-Server',
+      )!;
+      final wgConfig = RuntimeConfig(
+        profile: wgProfile,
+        routingMode: RoutingMode.rules,
+        dns: defaults.dns,
+        ruleSets: const [],
+        mtu: defaults.mtu,
+        serviceRoutes: defaults.serviceRoutes,
+      );
+      expect(wgConfig.effectiveTunMtu, 1280);
+      final wgJson = wgConfig.toJson();
+      final endpoints = (wgJson['endpoints'] as List).cast<Map<String, dynamic>>();
+      expect(endpoints.single['mtu'], 1280);
+      final inbounds = (wgJson['inbounds'] as List).cast<Map<String, dynamic>>();
+      expect(inbounds.firstWhere((i) => i['tag'] == 'tun-in')['mtu'], 1280);
+      final wgRules = ((wgJson['route'] as Map)['rules'] as List).cast<Map<String, dynamic>>();
+      expect(wgRules.any((r) => r['outbound'] == 'desync'), isFalse);
+      expect((wgJson['route'] as Map)['final'], 'proxy');
+
+      // Профиль VLESS получает packet_encoding: xudp и MTU 1400
+      final vlessOut = _vlessProfile().toOutbound();
+      expect(vlessOut['packet_encoding'], 'xudp');
+    });
   });
 }
 

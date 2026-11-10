@@ -497,32 +497,48 @@ class _RulesTabState extends State<RulesTab> {
                     isExpanded: true,
                     initialValue: action,
                     decoration: const InputDecoration(labelText: 'Действие'),
-                    items: const [
-                      DropdownMenuItem(
+                    items: [
+                      const DropdownMenuItem(
                         value: 'proxy',
                         child: Text(
                           'Через прокси (VPN)',
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      DropdownMenuItem(
+                      const DropdownMenuItem(
                         value: 'desync',
                         child: Text(
                           'Десинхронизация (Desync)',
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      DropdownMenuItem(
+                      const DropdownMenuItem(
                         value: 'direct',
                         child: Text(
                           'Напрямую (в обход VPN)',
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      DropdownMenuItem(
+                      const DropdownMenuItem(
                         value: 'block',
                         child: Text('Блокировать'),
                       ),
+                      for (final sub in controller.settings.subscriptions)
+                        DropdownMenuItem(
+                          value: 'sub:${sub.id}',
+                          child: Text(
+                            'Подписка: ${sub.name.isNotEmpty ? sub.name : sub.url}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      for (final p in controller.sortProfiles(controller.settings.profiles))
+                        DropdownMenuItem(
+                          value: 'profile:${p.id}',
+                          child: Text(
+                            'Сервер: ${p.name}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
                     ],
                     onChanged: (v) => setStateLocal(() => action = v ?? action),
                   ),
@@ -573,7 +589,6 @@ class _CustomRulesSection extends StatelessWidget {
   final List<CustomRule> rules;
   final VoidCallback onAdd;
 
-  static const _actions = ['proxy', 'direct', 'desync', 'block'];
   static const _labels = {
     'proxy': 'Туннель',
     'direct': 'Напрямую',
@@ -590,28 +605,87 @@ class _CustomRulesSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
-
-    if (rules.isEmpty) {
-      return HairlineCard(
-        onTap: onAdd,
-        padding: const EdgeInsets.all(Space.md),
-        child: Row(
-          children: [
-            Icon(Icons.add_circle_outline, size: 18, color: tokens.accent),
-            const SizedBox(width: Space.md),
-            Expanded(
-              child: Text(
-                'Добавьте свои домены или IP-адреса для точечной маршрутизации',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+    final lanDirect = (controller.settings.serviceRoutes['lan'] ?? 'off') == 'direct';
 
     return Column(
       children: [
+        HairlineCard(
+          onTap: () => controller.setServiceRoute('lan', lanDirect ? 'off' : 'direct'),
+          padding: const EdgeInsets.symmetric(horizontal: Space.md, vertical: Space.xs),
+          child: Row(
+            children: [
+              Icon(
+                Icons.router_outlined,
+                size: 18,
+                color: lanDirect ? tokens.success : tokens.muted,
+              ),
+              const SizedBox(width: Space.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Локальная сеть (LAN / Роутер / NAS)',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: tokens.ink,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, .local, .lan',
+                      style: TextStyle(fontSize: 11, color: tokens.faint),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: tokens.success.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(Radii.tag),
+                  border: Border.all(
+                    color: tokens.success.withValues(alpha: 0.35),
+                  ),
+                ),
+                child: Text(
+                  'Напрямую',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                    color: tokens.success,
+                  ),
+                ),
+              ),
+              ExcludeFocus(
+                child: Switch(
+                  value: lanDirect,
+                  onChanged: (v) =>
+                      controller.setServiceRoute('lan', v ? 'direct' : 'off'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        if (rules.isEmpty)
+          HairlineCard(
+            onTap: onAdd,
+            padding: const EdgeInsets.all(Space.md),
+            child: Row(
+              children: [
+                Icon(Icons.add_circle_outline, size: 18, color: tokens.accent),
+                const SizedBox(width: Space.md),
+                Expanded(
+                  child: Text(
+                    'Добавьте свои домены или IP-адреса для точечной маршрутизации',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
         for (final r in rules) ...[
           HairlineCard(
             onTap: () => controller.toggleCustomRule(r.id),
@@ -642,11 +716,13 @@ class _CustomRulesSection extends StatelessWidget {
                 FocusableTap(
                   borderRadius: BorderRadius.circular(Radii.tag),
                   focusBorderColor: _colorFor(tokens, r.action),
-                  onTap: () {
-                    final idx = _actions.indexOf(r.action);
-                    final next = _actions[(idx + 1) % _actions.length];
-                    controller.setCustomRuleAction(r.id, next);
-                  },
+                  onTap: () => _showRouteTargetPickerSheet(
+                    context,
+                    controller: controller,
+                    title: r.value,
+                    currentAction: r.action,
+                    onSelected: (next) => controller.setCustomRuleAction(r.id, next),
+                  ),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                     decoration: BoxDecoration(
@@ -656,12 +732,19 @@ class _CustomRulesSection extends StatelessWidget {
                         color: _colorFor(tokens, r.action).withValues(alpha: 0.35),
                       ),
                     ),
-                    child: Text(
-                      _labels[r.action] ?? 'Туннель',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                        color: _colorFor(tokens, r.action),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 130),
+                      child: Text(
+                        _resolvePinnedTargetLabel(controller, r.action) ??
+                            _labels[r.action] ??
+                            'Туннель',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: _colorFor(tokens, r.action),
+                        ),
                       ),
                     ),
                   ),
@@ -713,7 +796,8 @@ class _ServiceRoutesSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = context.tokens;
     final routes = controller.settings.serviceRoutes;
-    final profiles = controller.settings.profiles;
+    final hasTargets = controller.settings.profiles.isNotEmpty ||
+        controller.settings.subscriptions.isNotEmpty;
 
     return Column(
       children: [
@@ -721,12 +805,8 @@ class _ServiceRoutesSection extends StatelessWidget {
           Builder(
             builder: (context) {
               final currentRoute = routes[service.id] ?? 'off';
-              final isCustomServer = currentRoute.startsWith('profile:');
-              final pinnedProfileId =
-                  isCustomServer ? currentRoute.substring('profile:'.length) : '';
-              final pinnedProfile = isCustomServer
-                  ? profiles.where((p) => p.id == pinnedProfileId).firstOrNull
-                  : null;
+              final pinnedLabel = _resolvePinnedTargetLabel(controller, currentRoute);
+              final isCustomTarget = pinnedLabel != null;
 
               return HairlineCard(
                 padding: const EdgeInsets.all(Space.md),
@@ -743,13 +823,16 @@ class _ServiceRoutesSection extends StatelessWidget {
                                 ),
                           ),
                         ),
-                        if (profiles.isNotEmpty && service.id != 'ru')
+                        if (hasTargets && service.id != 'ru' && service.id != 'lan')
                           FocusableTap(
                             borderRadius: BorderRadius.circular(6),
-                            onTap: () => _pickServerForService(
+                            onTap: () => _showRouteTargetPickerSheet(
                               context,
-                              service,
-                              pinnedProfileId,
+                              controller: controller,
+                              title: service.title,
+                              currentAction: currentRoute,
+                              onSelected: (next) =>
+                                  controller.setServiceRoute(service.id, next),
                             ),
                             child: Container(
                               padding: const EdgeInsets.symmetric(
@@ -757,12 +840,12 @@ class _ServiceRoutesSection extends StatelessWidget {
                                 vertical: 4,
                               ),
                               decoration: BoxDecoration(
-                                color: isCustomServer
+                                color: isCustomTarget
                                     ? tokens.accent.withValues(alpha: 0.16)
                                     : tokens.raised,
                                 borderRadius: BorderRadius.circular(6),
                                 border: Border.all(
-                                  color: isCustomServer ? tokens.accent : tokens.line,
+                                  color: isCustomTarget ? tokens.accent : tokens.line,
                                 ),
                               ),
                               child: Row(
@@ -771,22 +854,22 @@ class _ServiceRoutesSection extends StatelessWidget {
                                   Icon(
                                     Icons.dns_outlined,
                                     size: 12,
-                                    color: isCustomServer ? tokens.accent : tokens.muted,
+                                    color: isCustomTarget ? tokens.accent : tokens.muted,
                                   ),
                                   const SizedBox(width: 4),
                                   ConstrainedBox(
-                                    constraints: const BoxConstraints(maxWidth: 130),
+                                    constraints: const BoxConstraints(maxWidth: 145),
                                     child: Text(
-                                      pinnedProfile?.name ?? 'Свой сервер...',
+                                      pinnedLabel ?? 'Подписка / сервер...',
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
                                         fontSize: 11,
-                                        fontWeight: isCustomServer
+                                        fontWeight: isCustomTarget
                                             ? FontWeight.w600
                                             : FontWeight.w400,
                                         color:
-                                            isCustomServer ? tokens.accent : tokens.muted,
+                                            isCustomTarget ? tokens.accent : tokens.muted,
                                       ),
                                     ),
                                   ),
@@ -827,63 +910,6 @@ class _ServiceRoutesSection extends StatelessWidget {
           const SizedBox(height: Space.sm),
         ],
       ],
-    );
-  }
-
-  Future<void> _pickServerForService(
-    BuildContext context,
-    BuiltInService service,
-    String currentProfileId,
-  ) async {
-    final profiles = controller.sortProfiles(controller.settings.profiles);
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.fromLTRB(Space.lg, 0, Space.lg, Space.lg),
-          children: [
-            Text(
-              'Выделенный сервер для ${service.title}',
-              style: Theme.of(ctx).textTheme.titleMedium,
-            ),
-            const SizedBox(height: Space.xs),
-            Text(
-              'Трафик ${service.title} пойдёт через выбранный сервер независимо от основного профиля.',
-              style: Theme.of(ctx).textTheme.bodySmall,
-            ),
-            const SizedBox(height: Space.md),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.layers_clear_outlined),
-              title: const Text('Использовать общий прокси (по умолчанию)'),
-              selected: currentProfileId.isEmpty,
-              onTap: () {
-                Navigator.pop(ctx);
-                controller.setServiceRoute(service.id, 'proxy');
-              },
-            ),
-            const Hairline(),
-            for (final p in profiles)
-              ListTile(
-                dense: true,
-                leading: Icon(
-                  p.id == currentProfileId
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_off,
-                ),
-                title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text('${p.fullTransportLabel} · ${p.server}:${p.port}'),
-                selected: p.id == currentProfileId,
-                onTap: () {
-                  Navigator.pop(ctx);
-                  controller.setServiceRoute(service.id, 'profile:${p.id}');
-                },
-              ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -1026,10 +1052,19 @@ class _RuleSetTile extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodyLarge,
                 ),
                 const SizedBox(height: 3),
-                Row(
+                Wrap(
+                  spacing: Space.sm,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     _ActionPill(controller: controller, set: set),
-                    const SizedBox(width: Space.sm),
+                    if (controller.settings.subscriptions.isNotEmpty ||
+                        controller.settings.profiles.isNotEmpty)
+                      _RuleSetTargetChip(
+                        controller: controller,
+                        set: set,
+                        shortTitle: _shortTitle(set.title),
+                      ),
                     if (downloaded)
                       Text(
                         '${(set.sizeBytes / 1024).toStringAsFixed(0)} КБ',
@@ -1040,13 +1075,11 @@ class _RuleSetTile extends StatelessWidget {
                         'не скачан',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    if (downloaded && set.updatedAt > 0) ...[
-                      const SizedBox(width: Space.sm),
+                    if (downloaded && set.updatedAt > 0)
                       Text(
                         _updatedLabel(set.updatedAt),
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    ],
                   ],
                 ),
               ],
@@ -1433,6 +1466,274 @@ class _DetourChainCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Кнопка выбора конкретной подписки (группы) или сервера для списка `.trs`.
+class _RuleSetTargetChip extends StatelessWidget {
+  const _RuleSetTargetChip({
+    required this.controller,
+    required this.set,
+    required this.shortTitle,
+  });
+
+  final AppController controller;
+  final RuleSetEntry set;
+  final String shortTitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final current = set.action.isEmpty ? 'proxy' : set.action;
+    final pinnedLabel = _resolvePinnedTargetLabel(controller, current);
+    final isPinned = pinnedLabel != null;
+
+    return FocusableTap(
+      borderRadius: BorderRadius.circular(Radii.tag),
+      focusBorderColor: isPinned ? tokens.accent : tokens.muted,
+      onTap: () => _showRouteTargetPickerSheet(
+        context,
+        controller: controller,
+        title: shortTitle,
+        currentAction: current,
+        onSelected: (next) => controller.setRuleSetAction(set.id, next),
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          color: isPinned
+              ? tokens.accent.withValues(alpha: 0.14)
+              : tokens.raised,
+          borderRadius: BorderRadius.circular(Radii.tag),
+          border: Border.all(
+            color: isPinned ? tokens.accent : tokens.line,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.dns_outlined,
+              size: 11,
+              color: isPinned ? tokens.accent : tokens.muted,
+            ),
+            const SizedBox(width: 4),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 135),
+              child: Text(
+                pinnedLabel ?? 'Подписка / сервер...',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: isPinned ? FontWeight.w600 : FontWeight.w400,
+                  color: isPinned ? tokens.accent : tokens.muted,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String? _resolvePinnedTargetLabel(AppController controller, String action) {
+  if (action.startsWith('sub:')) {
+    final subId = action.substring('sub:'.length).trim();
+    final sub = controller.settings.subscriptions
+        .where((s) => s.id == subId)
+        .firstOrNull;
+    if (sub != null) {
+      return sub.name.isNotEmpty ? sub.name : sub.url;
+    }
+    return 'Подписка';
+  }
+  if (action.startsWith('profile:')) {
+    final profId = action.substring('profile:'.length).trim();
+    final prof = controller.settings.profiles
+        .where((p) => p.id == profId)
+        .firstOrNull;
+    if (prof != null) {
+      return prof.name.isNotEmpty ? prof.name : '${prof.server}:${prof.port}';
+    }
+    return 'Сервер';
+  }
+  return null;
+}
+
+Future<void> _showRouteTargetPickerSheet(
+  BuildContext context, {
+  required AppController controller,
+  required String title,
+  required String currentAction,
+  required ValueChanged<String> onSelected,
+}) async {
+  final subs = controller.settings.subscriptions;
+  final profiles = controller.sortProfiles(controller.settings.profiles);
+  final tokens = context.tokens;
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (ctx) => SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(ctx).height * 0.78,
+        ),
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(Space.lg, 0, Space.lg, Space.lg),
+          children: [
+            Text(
+              'Маршрут: $title',
+              style: Theme.of(ctx).textTheme.titleMedium,
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              'Выберите режим маршрутизации, подписку (автовыбор внутри группы) или конкретный сервер.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+            const SizedBox(height: Space.md),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                currentAction == 'proxy' || currentAction.isEmpty
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: tokens.accent,
+              ),
+              title: const Text('Через общий туннель (по умолчанию)'),
+              selected: currentAction == 'proxy' || currentAction.isEmpty,
+              onTap: () {
+                Navigator.pop(ctx);
+                onSelected('proxy');
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                currentAction == 'direct'
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: tokens.success,
+              ),
+              title: const Text('Напрямую (мимо туннеля)'),
+              selected: currentAction == 'direct',
+              onTap: () {
+                Navigator.pop(ctx);
+                onSelected('direct');
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                currentAction == 'desync'
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: tokens.warning,
+              ),
+              title: const Text('Пакетная десинхронизация (Desync)'),
+              selected: currentAction == 'desync',
+              onTap: () {
+                Navigator.pop(ctx);
+                onSelected('desync');
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: Icon(
+                currentAction == 'block'
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_off,
+                color: tokens.danger,
+              ),
+              title: const Text('Блокировать'),
+              selected: currentAction == 'block',
+              onTap: () {
+                Navigator.pop(ctx);
+                onSelected('block');
+              },
+            ),
+            if (subs.isNotEmpty) ...[
+              const Hairline(),
+              Padding(
+                padding: const EdgeInsets.only(top: Space.sm, bottom: Space.xs),
+                child: Text(
+                  'Подписки и группы (автовыбор внутри подписки)',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: tokens.muted,
+                  ),
+                ),
+              ),
+              for (final sub in subs)
+                Builder(
+                  builder: (_) {
+                    final targetVal = 'sub:${sub.id}';
+                    final count =
+                        controller.settings.profilesForSubscription(sub.id).length;
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(
+                        currentAction == targetVal
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_off,
+                        color: currentAction == targetVal ? tokens.accent : null,
+                      ),
+                      title: Text(
+                        sub.name.isNotEmpty ? sub.name : sub.url,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text('$count серверов · Автовыбор (URLTest)'),
+                      selected: currentAction == targetVal,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        onSelected(targetVal);
+                      },
+                    );
+                  },
+                ),
+            ],
+            if (profiles.isNotEmpty) ...[
+              const Hairline(),
+              Padding(
+                padding: const EdgeInsets.only(top: Space.sm, bottom: Space.xs),
+                child: Text(
+                  'Отдельные серверы',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: tokens.muted,
+                  ),
+                ),
+              ),
+              for (final p in profiles)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    currentAction == 'profile:${p.id}'
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    color:
+                        currentAction == 'profile:${p.id}' ? tokens.accent : null,
+                  ),
+                  title: Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text('${p.fullTransportLabel} · ${p.server}:${p.port}'),
+                  selected: currentAction == 'profile:${p.id}',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onSelected('profile:${p.id}');
+                  },
+                ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 /// Циклический переключатель действия для списка правил: тап = следующий режим.

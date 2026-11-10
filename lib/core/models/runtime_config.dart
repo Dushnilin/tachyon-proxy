@@ -543,6 +543,7 @@ class Profile {
           'server': server,
           'server_port': port,
           if (password.isNotEmpty) 'password': password,
+          if (transport == 'quic' || cleanExtra['quic'] == true) 'quic': true,
           'tls': buildTlsObject(forceEnabled: true, allowInsecureFlag: false),
         }..addAll(cleanExtra);
 
@@ -743,18 +744,33 @@ class Profile {
           .map((h) => normalizeOutboundNode(Map<String, dynamic>.from(h)))
           .toList(growable: false);
     }
+    final profType = ((json['type'] as String?) ?? 'vless').toLowerCase();
     final savedTransport = (json['transport'] as String?) ?? '';
     final trFromExtra = (rawExtra['transport'] is Map)
         ? ((rawExtra['transport'] as Map)['type']?.toString() ?? '')
         : '';
-    final effectiveTransport = (savedTransport.isNotEmpty && savedTransport != 'tcp')
+    var effectiveTransport = (savedTransport.isNotEmpty && savedTransport != 'tcp')
         ? savedTransport
         : (trFromExtra.isNotEmpty ? trFromExtra : 'tcp');
+    if (effectiveTransport == 'tcp') {
+      if (profType == 'naive' &&
+          (rawExtra['quic'] == true ||
+              rawExtra['network']?.toString().toLowerCase() == 'udp')) {
+        effectiveTransport = 'quic';
+      } else if (profType == 'hysteria2' ||
+          profType == 'hysteria' ||
+          profType == 'tuic' ||
+          profType == 'masque') {
+        effectiveTransport = 'quic';
+      } else if (profType == 'wireguard') {
+        effectiveTransport = 'udp';
+      }
+    }
 
     return Profile(
       id: (json['id'] as String?) ?? '',
       name: (json['name'] as String?) ?? '',
-      type: (json['type'] as String?) ?? 'vless',
+      type: profType,
       server: (json['server'] as String?) ?? '',
       port: (json['port'] as num?)?.toInt() ?? 443,
       uuid: (json['uuid'] as String?) ?? '',
@@ -1002,7 +1018,9 @@ class Profile {
         return 'anytls://${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
 
       case 'naive':
-        final scheme = extra['quic'] == true ? 'naive+quic' : 'naive+https';
+        final scheme = (extra['quic'] == true || transport == 'quic')
+            ? 'naive+quic'
+            : 'naive+https';
         final user = (extra['username'] ?? '').toString();
         return '$scheme://${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@$hostFmt:$port#$encodedName';
 
@@ -1188,6 +1206,7 @@ class BuiltInService {
     required this.subtitle,
     required this.domains,
     this.packages = const [],
+    this.ipCidrs = const [],
   });
 
   final String id;
@@ -1198,6 +1217,7 @@ class BuiltInService {
   final String subtitle;
   final List<String> domains;
   final List<String> packages;
+  final List<String> ipCidrs;
 
   static const List<BuiltInService> catalog = [
     BuiltInService(
@@ -1396,6 +1416,32 @@ class BuiltInService {
         'ru.dublgis.dgismobile',
         'ru.pochta.onenew',
         'ru.rzd.pass',
+      ],
+    ),
+    BuiltInService(
+      id: 'lan',
+      trsId: '',
+      title: 'Локальная сеть (LAN / Роутер / NAS)',
+      subtitle: '192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10 и домены (.local, .lan, .home.arpa)',
+      domains: [
+        'local',
+        'lan',
+        'home',
+        'internal',
+        'intranet',
+        'home.arpa',
+        'localdomain',
+        'router',
+      ],
+      ipCidrs: [
+        '10.0.0.0/8',
+        '172.16.0.0/12',
+        '192.168.0.0/16',
+        '100.64.0.0/10',
+        '169.254.0.0/16',
+        '127.0.0.0/8',
+        'fc00::/7',
+        'fe80::/10',
       ],
     ),
   ];
@@ -2535,6 +2581,47 @@ class RuntimeConfig {
     final dedicatedOutbounds = <String, Map<String, dynamic>>{};
     final dedicatedEndpoints = <String, Map<String, dynamic>>{};
 
+    void registerDedicatedProfile(Profile p, String tag) {
+      if (p.type == 'wireguard') {
+        dedicatedEndpoints.putIfAbsent(tag, () => p.toWireGuardEndpoint(tag: tag));
+        return;
+      }
+      if (dedicatedOutbounds.containsKey(tag)) return;
+      final node = p.toOutbound(tag: tag);
+      if (p.extra['chain_outbounds'] is List &&
+          (p.extra['chain_outbounds'] as List).isNotEmpty) {
+        final rawHops = p.extra['chain_outbounds'] as List;
+        final tagMap = <String, String>{};
+        for (var h = 0; h < rawHops.length; h++) {
+          final hopMap = rawHops[h];
+          if (hopMap is Map && hopMap['tag'] != null) {
+            tagMap[hopMap['tag'].toString()] = '$tag-hop-$h';
+          }
+        }
+        if (node['detour'] != null &&
+            tagMap.containsKey(node['detour'].toString())) {
+          node['detour'] = tagMap[node['detour'].toString()];
+        }
+        dedicatedOutbounds[tag] = node;
+        for (var h = 0; h < rawHops.length; h++) {
+          final rawHop = rawHops[h];
+          if (rawHop is! Map) continue;
+          final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
+          if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') continue;
+          final oldTag = hop['tag']?.toString() ?? '';
+          final hopTag = tagMap[oldTag] ?? '$tag-hop-$h';
+          hop['tag'] = hopTag;
+          if (hop['detour'] != null &&
+              tagMap.containsKey(hop['detour'].toString())) {
+            hop['detour'] = tagMap[hop['detour'].toString()];
+          }
+          dedicatedOutbounds.putIfAbsent(hopTag, () => hop);
+        }
+      } else {
+        dedicatedOutbounds[tag] = node;
+      }
+    }
+
     String resolveOutbound(String raw) {
       final target = raw.isEmpty ? 'proxy' : raw;
       if (target.startsWith('profile:')) {
@@ -2542,12 +2629,46 @@ class RuntimeConfig {
         for (final p in extraProfiles) {
           if (p.id == profId && p.server.isNotEmpty) {
             final tag = 'srv-${p.id}';
-            if (p.type == 'wireguard') {
-              dedicatedEndpoints.putIfAbsent(tag, () => p.toWireGuardEndpoint(tag: tag));
-            } else {
-              dedicatedOutbounds.putIfAbsent(tag, () => p.toOutbound(tag: tag));
-            }
+            registerDedicatedProfile(p, tag);
             return tag;
+          }
+        }
+        return hasProxy ? 'proxy' : 'direct';
+      }
+      if (target.startsWith('sub:')) {
+        final subId = target.substring('sub:'.length).trim();
+        if (subId.isNotEmpty) {
+          final allSubs = allSubscriptions.isNotEmpty ? allSubscriptions : subscriptions;
+          final sub = allSubs.where((s) => s.id == subId).firstOrNull;
+          final subCandidates = resolveAutoCandidates(
+            Profile(
+              id: 'auto:$subId',
+              name: sub?.name ?? subId,
+              type: 'urltest',
+              server: 'auto',
+              port: 0,
+              subscriptionId: subId,
+            ),
+            extraProfiles,
+            activeNetworkType: activeNetworkType,
+            subscriptions: allSubs,
+            balancer: balancer,
+          );
+          if (subCandidates.isNotEmpty) {
+            final grpTag = 'sub-grp-$subId';
+            if (!dedicatedOutbounds.containsKey(grpTag)) {
+              final memberTags = [
+                for (final cand in subCandidates) 'srv-${cand.id}',
+              ];
+              dedicatedOutbounds[grpTag] = balancer.toUrltestOutbound(
+                tag: grpTag,
+                outbounds: memberTags,
+              );
+              for (final cand in subCandidates) {
+                registerDedicatedProfile(cand, 'srv-${cand.id}');
+              }
+            }
+            return grpTag;
           }
         }
         return hasProxy ? 'proxy' : 'direct';
@@ -2681,7 +2802,10 @@ class RuntimeConfig {
       if (rawAction == null || rawAction.isEmpty || rawAction == 'off') continue;
       if (routingMode == RoutingMode.desync &&
           rawAction != 'desync' &&
-          rawAction != 'block') {
+          rawAction != 'block' &&
+          rawAction != 'direct' &&
+          !rawAction.startsWith('profile:') &&
+          !rawAction.startsWith('sub:')) {
         continue;
       }
       final action = resolveOutbound(rawAction);
@@ -2699,7 +2823,7 @@ class RuntimeConfig {
       }
 
       final trsIds = <String>[
-        service.trsId,
+        if (service.trsId.isNotEmpty) service.trsId,
         if (service.id == 'ru') ...['ru_only_inside', 'ru_whitelist'],
       ];
       final activeTrsIds = <String>[];
@@ -2740,6 +2864,13 @@ class RuntimeConfig {
       if (service.domains.isNotEmpty) {
         routeRules.add({
           'domain_suffix': service.domains,
+          'action': 'route',
+          'outbound': action,
+        });
+      }
+      if (service.ipCidrs.isNotEmpty) {
+        routeRules.add({
+          'ip_cidr': service.ipCidrs,
           'action': 'route',
           'outbound': action,
         });

@@ -139,7 +139,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.18';
+  static const String appVersion = '0.0.19';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -507,7 +507,9 @@ class AppController extends ChangeNotifier {
     for (final service in BuiltInService.catalog) {
       final route = _settings.serviceRoutes[service.id];
       if (route != null && route.isNotEmpty && route != 'off') {
-        requiredIds.add(service.trsId);
+        if (service.trsId.isNotEmpty) {
+          requiredIds.add(service.trsId);
+        }
         if (service.id == 'ru') {
           requiredIds.add('ru_only_inside');
         }
@@ -2049,13 +2051,25 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Меняет действие списка: в туннель, напрямую или блокировать.
+  /// Меняет действие списка: в туннель, напрямую, блокировать или через конкретную подписку / сервер.
   Future<void> setRuleSetAction(String id, String action) async {
+    var autoEnabled = false;
+    final isPinnedTarget = action.startsWith('sub:') || action.startsWith('profile:');
     final sets = _settings.ruleSets.map((set) {
       if (set.id != id) return set;
+      if (isPinnedTarget && !set.enabled) {
+        autoEnabled = true;
+        return set.copyWith(action: action, enabled: true);
+      }
       return set.copyWith(action: action);
     }).toList();
     await _update(_settings.copyWith(ruleSets: sets));
+    if (autoEnabled) {
+      final path = lists.pathFor(id);
+      if (path.isNotEmpty && !File(path).existsSync()) {
+        await downloadList(id);
+      }
+    }
     if (_tunnel.status.isActive) {
       await _restartActiveTunnel();
     }
@@ -3649,12 +3663,16 @@ class AppController extends ChangeNotifier {
       // Если профиль использует цепочку прокси (detour), проверяем первый входной узел цепочки
       var targetHost = profile.server.trim();
       var targetPort = profile.port;
+      var hopType = profile.type.toLowerCase();
+      var hopTransport = profile.transport.toLowerCase();
+      var hopQuic = profile.extra['quic'] == true ||
+          profile.extra['network']?.toString().toLowerCase() == 'udp';
       var useTlsProbe = profile.hasTls &&
-          profile.type != 'hysteria2' &&
-          profile.type != 'hysteria' &&
-          profile.type != 'tuic' &&
-          profile.type != 'masque' &&
-          profile.type != 'wireguard';
+          hopType != 'hysteria2' &&
+          hopType != 'hysteria' &&
+          hopType != 'tuic' &&
+          hopType != 'masque' &&
+          hopType != 'wireguard';
       var probeSni = profile.sni.trim().isNotEmpty ? profile.sni.trim() : targetHost;
 
       final chain = profile.extra['chain_outbounds'];
@@ -3665,9 +3683,20 @@ class AppController extends ChangeNotifier {
         if (h.isNotEmpty && p > 0) {
           targetHost = h;
           targetPort = p;
+          hopType = (entryHop['type'] ?? '').toString().toLowerCase();
+          final hopTr = entryHop['transport'];
+          hopTransport = hopTr is Map
+              ? (hopTr['type'] ?? 'tcp').toString().toLowerCase()
+              : (hopTr is String ? hopTr.toLowerCase() : 'tcp');
+          hopQuic = entryHop['quic'] == true ||
+              entryHop['network']?.toString().toLowerCase() == 'udp';
           final hopTls = entryHop['tls'];
           if (hopTls is Map && hopTls['enabled'] == true) {
-            useTlsProbe = true;
+            useTlsProbe = hopType != 'hysteria2' &&
+                hopType != 'hysteria' &&
+                hopType != 'tuic' &&
+                hopType != 'masque' &&
+                hopType != 'wireguard';
             final hopSni = (hopTls['server_name'] ?? '').toString().trim();
             probeSni = hopSni.isNotEmpty ? hopSni : targetHost;
           } else {
@@ -3676,40 +3705,56 @@ class AppController extends ChangeNotifier {
         }
       }
 
+      final isQuicProbe = hopType == 'hysteria2' ||
+          hopType == 'hysteria' ||
+          hopType == 'tuic' ||
+          hopType == 'masque' ||
+          hopTransport == 'quic' ||
+          (hopType == 'naive' && hopQuic);
+
       // Резолвим IP заранее вне замера RTT
-      Object connectTarget = targetHost;
-      final parsedIp = InternetAddress.tryParse(targetHost);
-      if (parsedIp != null) {
-        connectTarget = parsedIp;
-      } else {
+      InternetAddress? resolvedIp = InternetAddress.tryParse(targetHost);
+      if (resolvedIp == null) {
         final resolved = await InternetAddress.lookup(targetHost)
             .timeout(const Duration(milliseconds: 2000));
         if (resolved.isNotEmpty) {
-          connectTarget = resolved.first;
+          resolvedIp = resolved.first;
         }
       }
 
-      final sw = Stopwatch()..start();
-      socket = await Socket.connect(
-        connectTarget,
-        targetPort,
-        timeout: const Duration(milliseconds: 2200),
-      );
-      sw.stop();
-      final tcpMs = sw.elapsedMilliseconds.clamp(1, 9999);
+      if (isQuicProbe && resolvedIp != null) {
+        result = await _probeQuicLatency(resolvedIp, targetPort);
+      } else {
+        final Object connectTarget = resolvedIp ?? targetHost;
+        try {
+          final sw = Stopwatch()..start();
+          socket = await Socket.connect(
+            connectTarget,
+            targetPort,
+            timeout: const Duration(milliseconds: 2200),
+          );
+          sw.stop();
+          final tcpMs = sw.elapsedMilliseconds.clamp(1, 9999);
 
-      if (useTlsProbe) {
-        final tlsSw = Stopwatch()..start();
-        socket.add(_buildTlsClientHello(probeSni));
-        final chunk = await socket.first.timeout(const Duration(milliseconds: 2200));
-        tlsSw.stop();
-        if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
-          result = tcpMs;
-        } else {
+          if (useTlsProbe) {
+            final tlsSw = Stopwatch()..start();
+            socket.add(_buildTlsClientHello(probeSni));
+            final chunk = await socket.first.timeout(const Duration(milliseconds: 2200));
+            tlsSw.stop();
+            if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
+              result = tcpMs;
+            } else {
+              result = -1;
+            }
+          } else {
+            result = tcpMs;
+          }
+        } catch (_) {
           result = -1;
         }
-      } else {
-        result = tcpMs;
+        if (result < 0 && hopType == 'naive' && resolvedIp != null) {
+          result = await _probeQuicLatency(resolvedIp, targetPort);
+        }
       }
     } catch (_) {
       result = -1;
@@ -3725,6 +3770,75 @@ class AppController extends ChangeNotifier {
       }
     }
     return result;
+  }
+
+  /// Проверяет доступность и RTT до QUIC-сервера (NaiveProxy QUIC, Hysteria2, TUIC, MASQUE)
+  /// путём отправки 1200-байтного пакета QUIC Long Header (RFC 9000 Version Negotiation Probe)
+  /// и замера времени прихода ответного пакета от сервера по UDP.
+  Future<int> _probeQuicLatency(InternetAddress target, int port) async {
+    RawDatagramSocket? udp;
+    Timer? retryTimer;
+    Timer? timeoutTimer;
+    try {
+      final bindAddr = target.type == InternetAddressType.IPv6
+          ? InternetAddress.anyIPv6
+          : InternetAddress.anyIPv4;
+      udp = await RawDatagramSocket.bind(bindAddr, 0);
+
+      // RFC 9000 Section 6 & 14.1: 1200-byte Long Header packet with reserved version 0x0a0a0a0a
+      final pkt = Uint8List(1200);
+      pkt[0] = 0xc0; // Header Form = 1 (Long), Fixed Bit = 1
+      pkt[1] = 0x0a;
+      pkt[2] = 0x0a;
+      pkt[3] = 0x0a;
+      pkt[4] = 0x0a;
+      pkt[5] = 0x08; // DCID len = 8
+      for (var i = 0; i < 8; i++) {
+        pkt[6 + i] = 0x10 + i;
+      }
+      pkt[14] = 0x08; // SCID len = 8
+      for (var i = 0; i < 8; i++) {
+        pkt[15 + i] = 0x20 + i;
+      }
+
+      final completer = Completer<int>();
+      var sw = Stopwatch()..start();
+
+      udp.listen(
+        (event) {
+          if (event != RawSocketEvent.read || completer.isCompleted) return;
+          final dg = udp?.receive();
+          if (dg == null || dg.data.isEmpty) return;
+          // Ответ QUIC Long Header (Version Negotiation / Initial / Retry) имеет старший бит 0x80
+          if ((dg.data[0] & 0x80) != 0) {
+            sw.stop();
+            completer.complete(sw.elapsedMilliseconds.clamp(1, 9999));
+          }
+        },
+        onError: (_) {
+          if (!completer.isCompleted) completer.complete(-1);
+        },
+      );
+
+      udp.send(pkt, target, port);
+      retryTimer = Timer(const Duration(milliseconds: 900), () {
+        if (!completer.isCompleted && udp != null) {
+          sw = Stopwatch()..start();
+          udp.send(pkt, target, port);
+        }
+      });
+      timeoutTimer = Timer(const Duration(milliseconds: 2200), () {
+        if (!completer.isCompleted) completer.complete(-1);
+      });
+
+      return await completer.future;
+    } catch (_) {
+      return -1;
+    } finally {
+      retryTimer?.cancel();
+      timeoutTimer?.cancel();
+      udp?.close();
+    }
   }
 
   /// Пингует все серверы (или серверы конкретной подписки) пулом из 8 параллельных
@@ -4331,7 +4445,9 @@ class AppController extends ChangeNotifier {
       }
       if (idsToUpdate.isEmpty) {
         for (final svc in BuiltInService.catalog) {
-          idsToUpdate.add(svc.trsId);
+          if (svc.trsId.isNotEmpty) {
+            idsToUpdate.add(svc.trsId);
+          }
         }
       }
 

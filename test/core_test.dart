@@ -1183,6 +1183,93 @@ PersistentKeepalive = 15-30
       );
       expect(regexCandidates.map((p) => p.id).toList(), ['p4']);
     });
+
+    test('NaiveProxy QUIC сохраняет транспорт quic при парсинге из ядра и JSON, а правила Списков и LAN маршрутизируются через подписку или напрямую', () {
+      const parser = LinkParser();
+      final parsedNodes = parser.parseEngineNodes([
+        {
+          'type': 'naive',
+          'tag': '+Латвия',
+          'server': 'edge.commonnet.work',
+          'server_port': 12443,
+          'username': 'u',
+          'password': 'p',
+          'quic': true,
+          'tls': {'enabled': true, 'server_name': 'edge.commonnet.work'},
+        },
+      ], [
+        '+Латвия',
+      ], subscriptionId: 'sub_naive');
+
+      expect(parsedNodes, hasLength(1));
+      final naiveProf = parsedNodes.first;
+      expect(naiveProf.type, 'naive');
+      expect(naiveProf.transport, 'quic');
+      expect(naiveProf.fullTransportLabel, 'NAIVE · TLS · QUIC');
+      expect(naiveProf.toOutbound()['quic'], isTrue);
+
+      // Даже если сохранённый профиль имел transport: tcp при extra.quic == true, Profile.fromJson восстанавливает quic
+      final restored = Profile.fromJson({
+        ...naiveProf.toJson(),
+        'transport': 'tcp',
+      });
+      expect(restored.transport, 'quic');
+      expect(restored.fullTransportLabel, 'NAIVE · TLS · QUIC');
+
+      const mainProfile = Profile(
+        id: 'main_vless',
+        name: 'Main VLESS',
+        type: 'vless',
+        server: 'main.example.com',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+      );
+      const subs = [
+        SubscriptionEntry(
+          id: 'sub_naive',
+          url: 'https://example.com/naive',
+          name: 'Commonnet · Naive',
+        ),
+      ];
+      final cfg = RuntimeConfig(
+        profile: mainProfile,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [
+          RuleSetEntry(
+            id: 'ai_all',
+            title: 'AI Services',
+            path: '/tmp/ai_all.trs',
+            action: 'sub:sub_naive',
+            enabled: true,
+          ),
+        ],
+        serviceRoutes: const {'lan': 'direct'},
+        subscriptions: subs,
+        allSubscriptions: subs,
+        extraProfiles: [mainProfile, naiveProf],
+      ).toJson();
+
+      final outbounds = (cfg['outbounds'] as List).cast<Map<String, dynamic>>();
+      final subGrp = outbounds.firstWhere((o) => o['tag'] == 'sub-grp-sub_naive');
+      expect(subGrp['type'], 'urltest');
+      expect(subGrp['outbounds'], ['srv-${naiveProf.id}']);
+      expect(outbounds.any((o) => o['tag'] == 'srv-${naiveProf.id}' && o['type'] == 'naive'), isTrue);
+
+      final rules = ((cfg['route'] as Map)['rules'] as List).cast<Map<String, dynamic>>();
+      expect(
+        rules.any((r) =>
+            (r['rule_set'] as List?)?.contains('ai_all') == true &&
+            r['outbound'] == 'sub-grp-sub_naive'),
+        isTrue,
+      );
+      expect(
+        rules.any((r) =>
+            (r['ip_cidr'] as List?)?.contains('192.168.0.0/16') == true &&
+            r['outbound'] == 'direct'),
+        isTrue,
+      );
+    });
   });
 }
 

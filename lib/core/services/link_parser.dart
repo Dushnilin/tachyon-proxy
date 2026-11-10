@@ -1150,18 +1150,18 @@ class LinkParser {
 
   Profile? _parseNaive(String link, {String subscriptionId = ''}) {
     final lower = link.toLowerCase();
-    final isQuic = lower.startsWith('naive+quic://');
     final normalized = link.replaceFirst(RegExp(r'^naive(\+https|\+quic)?://', caseSensitive: false), 'https://');
     final uri = Uri.tryParse(normalized);
     if (uri == null || uri.host.isEmpty) return null;
     final query = uri.queryParameters;
+    final isQuic = lower.startsWith('naive+quic://') || _isTruthy(query['quic']);
     final server = _cleanHost(uri.host);
     final port = uri.port == 0 ? 443 : uri.port;
     final (username, password) = _splitUserPass(uri.userInfo);
 
     final extra = <String, dynamic>{
       if (username.isNotEmpty) 'username': username,
-      if (isQuic || _isTruthy(query['quic'])) 'quic': true,
+      if (isQuic) 'quic': true,
       if ((query['quic_congestion_control'] ?? '').isNotEmpty)
         'quic_congestion_control': query['quic_congestion_control'],
       if (_toInt(query['insecure-concurrency'] ?? query['insecure_concurrency']) != null)
@@ -2813,6 +2813,20 @@ class LinkParser {
         rest['tewfai_transport'] = [rawTr];
         if (rawTr == 'quic') transportType = 'quic';
       }
+    } else if (type == 'naive') {
+      final isQuic = rest['quic'] == true ||
+          rest['network']?.toString().toLowerCase() == 'udp';
+      if (isQuic) {
+        rest['quic'] = true;
+        transportType = 'quic';
+      }
+    } else if (type == 'hysteria2' ||
+        type == 'hysteria' ||
+        type == 'tuic' ||
+        type == 'masque') {
+      transportType = 'quic';
+    } else if (type == 'wireguard') {
+      transportType = 'udp';
     } else if (type == 'mieru') {
       final rawTr = rest.remove('transport');
       if (rawTr is String && rawTr.isNotEmpty) {

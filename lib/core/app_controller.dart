@@ -144,7 +144,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.0';
+  static const String appVersion = '0.1.1';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -363,14 +363,16 @@ class AppController extends ChangeNotifier {
     bridge.listen();
 
     unawaited(() async {
-      final launchCmd = await bridge.consumeLaunchCommand();
-      if (launchCmd != null && launchCmd.trim().isNotEmpty) {
-        await _handleExternalCommand(launchCmd);
-      }
-      final launchLink = await bridge.consumeLaunchLink();
-      if (launchLink != null && launchLink.trim().isNotEmpty) {
-        await _handleIncomingDeepLink(launchLink);
-      }
+      try {
+        final launchCmd = await bridge.consumeLaunchCommand();
+        if (launchCmd != null && launchCmd.trim().isNotEmpty) {
+          await _handleExternalCommand(launchCmd);
+        }
+        final launchLink = await bridge.consumeLaunchLink();
+        if (launchLink != null && launchLink.trim().isNotEmpty) {
+          await _handleIncomingDeepLink(launchLink);
+        }
+      } catch (_) {}
     }());
 
     // Фоновое обновление: подписки без серверов, список устарел или резолверы ещё не проверены.
@@ -483,7 +485,9 @@ class AppController extends ChangeNotifier {
             !sub.isFptnToken &&
             (sub.updatedAt == 0 || (nowMs - sub.updatedAt) >= intervalMs);
         if (!hasServers || isOld) {
-          await fetchSubscription(sub.id);
+          try {
+            await fetchSubscription(sub.id);
+          } catch (_) {}
         }
       }
     }
@@ -494,16 +498,22 @@ class AppController extends ChangeNotifier {
         .toList(growable: false);
 
     if (stale.isNotEmpty) {
-      await refreshLists();
-      for (final id in stale) {
-        await downloadList(id);
-      }
+      try {
+        await refreshLists();
+        for (final id in stale) {
+          await downloadList(id);
+        }
+      } catch (_) {}
     }
 
-    await ensureRequiredListsDownloaded();
+    try {
+      await ensureRequiredListsDownloaded();
+    } catch (_) {}
 
     if (needsDnsCheck) {
-      await runDnsBenchmark();
+      try {
+        await runDnsBenchmark();
+      } catch (_) {}
     }
   }
 
@@ -536,23 +546,25 @@ class AppController extends ChangeNotifier {
     }
     var downloadedAny = false;
     for (final id in requiredIds) {
-      final file = File(lists.pathFor(id));
-      if (!file.existsSync() || file.lengthSync() < 8) {
-        final res = await lists.download(id);
-        if (res.startsWith('/') || res.contains(RegExp(r'^[A-Z]:'))) {
-          downloadedAny = true;
-          final size = await lists.sizeOf(id);
-          final sets = _settings.ruleSets.map((set) {
-            if (set.id != id) return set;
-            return set.copyWith(
-              path: res,
-              sizeBytes: size,
-              updatedAt: DateTime.now().millisecondsSinceEpoch,
-            );
-          }).toList();
-          await _update(_settings.copyWith(ruleSets: sets));
+      try {
+        final file = File(lists.pathFor(id));
+        if (!file.existsSync() || file.lengthSync() < 8) {
+          final res = await lists.download(id);
+          if (res.startsWith('/') || res.contains(RegExp(r'^[A-Z]:'))) {
+            downloadedAny = true;
+            final size = await lists.sizeOf(id);
+            final sets = _settings.ruleSets.map((set) {
+              if (set.id != id) return set;
+              return set.copyWith(
+                path: res,
+                sizeBytes: size,
+                updatedAt: DateTime.now().millisecondsSinceEpoch,
+              );
+            }).toList();
+            await _update(_settings.copyWith(ruleSets: sets));
+          }
         }
-      }
+      } catch (_) {}
     }
     if (downloadedAny && _tunnel.status.isActive) {
       await _restartActiveTunnel();
@@ -1363,27 +1375,40 @@ class AppController extends ChangeNotifier {
     );
   }
 
+  static int _parseIntOr(Object? raw, int fallback) {
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    if (raw is String) return int.tryParse(raw.trim()) ?? fallback;
+    return fallback;
+  }
+
   /// Загружает содержимое подписки по сети, парсит серверы и кладёт в профили.
   Future<int> fetchSubscription(String subId) async {
     final sub = _settings.subscriptions.where((s) => s.id == subId).firstOrNull;
     if (sub == null || sub.url.isEmpty) return 0;
     if (sub.isCombinedGroup) {
-      var total = 0;
-      for (final memberId in sub.mergedSubscriptionIds) {
-        if (memberId == '__standalone__' || memberId == subId) continue;
-        total += await fetchSubscription(memberId);
+      try {
+        var total = 0;
+        for (final memberId in sub.mergedSubscriptionIds) {
+          if (memberId == '__standalone__' || memberId == subId) continue;
+          total += await fetchSubscription(memberId);
+        }
+        final allGroupProfiles = _settings.profilesForSubscription(subId);
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        await _update(
+          _settings.copyWith(
+            subscriptions: [
+              for (final s in _settings.subscriptions)
+                if (s.id == subId) s.copyWith(updatedAt: nowMs) else s,
+            ],
+          ),
+        );
+        return total > 0 ? total : allGroupProfiles.length;
+      } catch (e) {
+        _lastError = 'Сбой обновления группы: $e';
+        notifyListeners();
+        return 0;
       }
-      final allGroupProfiles = _settings.profilesForSubscription(subId);
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      await _update(
-        _settings.copyWith(
-          subscriptions: [
-            for (final s in _settings.subscriptions)
-              if (s.id == subId) s.copyWith(updatedAt: nowMs) else s,
-          ],
-        ),
-      );
-      return total > 0 ? total : allGroupProfiles.length;
     }
     if (sub.isFptnToken) {
       _loadingSubscription = true;
@@ -1399,6 +1424,9 @@ class AppController extends ChangeNotifier {
           targetSubId: sub.id,
           selectBalancer: false,
         );
+      } catch (e) {
+        _lastError = 'Сбой разбора токена FPTN: $e';
+        return 0;
       } finally {
         _loadingSubscription = false;
         notifyListeners();
@@ -1432,6 +1460,7 @@ class AppController extends ChangeNotifier {
       var targetSubUrl = sub.url.trim();
       Map<String, dynamic>? nativeUserInfo;
       Map<String, dynamic>? nativeRes;
+      String? nativeParseErr;
 
       Future<void> tryNativeFetch() async {
         if (fresh.isNotEmpty) return;
@@ -1444,11 +1473,13 @@ class AppController extends ChangeNotifier {
         if (nativeRes != null &&
             nativeRes!['ok'] == true &&
             nativeRes!['nodes'] is List) {
-          fresh = await _parseEngineNodesIsolated(
-            nativeRes!['nodes'] as List,
-            (nativeRes!['primary_tags'] as List?) ?? const [],
-            subId,
-          );
+          try {
+            fresh = await _parseEngineNodesIsolated(
+              nativeRes!['nodes'] as List,
+              (nativeRes!['primary_tags'] as List?) ?? const [],
+              subId,
+            );
+          } catch (_) {}
           if (nativeRes!['user_info'] is Map) {
             nativeUserInfo = Map<String, dynamic>.from(nativeRes!['user_info'] as Map);
           }
@@ -1603,11 +1634,16 @@ class AppController extends ChangeNotifier {
               if (nativeBodyParsed != null &&
                   nativeBodyParsed['ok'] == true &&
                   nativeBodyParsed['nodes'] is List) {
-                parsed = await _parseEngineNodesIsolated(
-                  nativeBodyParsed['nodes'] as List,
-                  (nativeBodyParsed['primary_tags'] as List?) ?? const [],
-                  subId,
-                );
+                try {
+                  parsed = await _parseEngineNodesIsolated(
+                    nativeBodyParsed['nodes'] as List,
+                    (nativeBodyParsed['primary_tags'] as List?) ?? const [],
+                    subId,
+                  );
+                } catch (_) {}
+              } else if (nativeBodyParsed != null &&
+                  nativeBodyParsed['error'] != null) {
+                nativeParseErr = nativeBodyParsed['error'].toString();
               }
               if (parsed.isEmpty) {
                 parsed = await _parseSubTextIsolated(body, subId);
@@ -1654,7 +1690,7 @@ class AppController extends ChangeNotifier {
         } else if (gotHtml) {
           _lastError = 'Сервер вернул HTML-страницу вместо серверов (Cloudflare/капча/ошибка хостинга)';
         } else {
-          final nativeErr = nativeRes?['error']?.toString() ?? '';
+          final nativeErr = nativeRes?['error']?.toString() ?? nativeParseErr ?? '';
           _lastError = nativeErr.isNotEmpty
               ? 'Не удалось загрузить подписку ($nativeErr)'
               : 'В ответе подписки не найдено распознаваемых серверов';
@@ -1728,10 +1764,10 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      int uploadBytes = (nativeUserInfo?['upload'] as num?)?.toInt() ?? sub.uploadBytes;
-      int downloadBytes = (nativeUserInfo?['download'] as num?)?.toInt() ?? sub.downloadBytes;
-      int totalBytes = (nativeUserInfo?['total'] as num?)?.toInt() ?? sub.totalBytes;
-      int expireUnix = (nativeUserInfo?['expire'] as num?)?.toInt() ?? sub.expireUnix;
+      int uploadBytes = _parseIntOr(nativeUserInfo?['upload'], sub.uploadBytes);
+      int downloadBytes = _parseIntOr(nativeUserInfo?['download'], sub.downloadBytes);
+      int totalBytes = _parseIntOr(nativeUserInfo?['total'], sub.totalBytes);
+      int expireUnix = _parseIntOr(nativeUserInfo?['expire'], sub.expireUnix);
       final userInfo = response?.headers.value('subscription-userinfo') ??
           response?.headers.value('Subscription-Userinfo') ??
           bodyUserInfo ??
@@ -1835,9 +1871,11 @@ class AppController extends ChangeNotifier {
 
       // Сохраняем файл кэша для ядра в виде готового списка outbounds (sing-box JSON)
       try {
-        final cacheFile = File('$filesDirPath/subs/$subId.txt');
-        await cacheFile.parent.create(recursive: true);
-        await cacheFile.writeAsString(nextSubOutboundsJson);
+        if (filesDirPath.isNotEmpty) {
+          final cacheFile = File('$filesDirPath/subs/$subId.txt');
+          await cacheFile.parent.create(recursive: true);
+          await cacheFile.writeAsString(nextSubOutboundsJson);
+        }
       } catch (_) {}
 
       final otherProfiles = _settings.profiles.where((p) => p.subscriptionId != subId).toList();
@@ -2468,16 +2506,20 @@ class AppController extends ChangeNotifier {
     _dnsResults.clear();
     notifyListeners();
 
-    final benchmark = DnsBenchmark();
-    await benchmark.run(
-      onResult: (result) {
-        _dnsResults.add(result);
-        notifyListeners();
-      },
-    );
-
-    _dnsBenchmarkRunning = false;
-    notifyListeners();
+    try {
+      final benchmark = DnsBenchmark();
+      await benchmark.run(
+        onResult: (result) {
+          _dnsResults.add(result);
+          notifyListeners();
+        },
+      );
+    } catch (_) {
+      // Сбой проверки резолверов не должен прерывать старт приложения.
+    } finally {
+      _dnsBenchmarkRunning = false;
+      notifyListeners();
+    }
   }
 
   /// Применяет лучшие найденные резолверы.
@@ -3084,44 +3126,46 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _checkNetworkDesyncProfile({bool forceCheck = false}) async {
-    var net = await bridge.networkType();
-    if (net == 'ethernet') net = 'wifi';
-    if (net != 'wifi' && net != 'cellular') return;
-    final netChanged = net != _lastNetType;
-    if (!forceCheck && !netChanged) return;
-    _lastNetType = net;
+    try {
+      var net = await bridge.networkType();
+      if (net == 'ethernet') net = 'wifi';
+      if (net != 'wifi' && net != 'cellular') return;
+      final netChanged = net != _lastNetType;
+      if (!forceCheck && !netChanged) return;
+      _lastNetType = net;
 
-    if (_settings.perNetworkDesync) {
-      final targetPreset = net == 'wifi'
-          ? _settings.desync.wifiPreset
-          : _settings.desync.cellularPreset;
-      if (targetPreset.isNotEmpty && targetPreset != _settings.desync.preset) {
-        await setDesync(_settings.desync.copyWith(preset: targetPreset));
+      if (_settings.perNetworkDesync) {
+        final targetPreset = net == 'wifi'
+            ? _settings.desync.wifiPreset
+            : _settings.desync.cellularPreset;
+        if (targetPreset.isNotEmpty && targetPreset != _settings.desync.preset) {
+          await setDesync(_settings.desync.copyWith(preset: targetPreset));
+        }
       }
-    }
 
-    final targetProfileId = _resolveAutoSwitchTargetForNetwork(net);
-    if (_isValidSelectableProfileId(targetProfileId) &&
-        targetProfileId != _settings.selectedProfileId) {
-      await selectProfile(targetProfileId);
-      return;
-    }
-
-    final tunnelNetMismatch =
-        _lastTunnelNetType.isNotEmpty && _lastTunnelNetType != net;
-    if ((netChanged || tunnelNetMismatch) &&
-        _settings.selectedProfileId.startsWith('auto:') &&
-        _hasNetworkScopedNodes) {
-      _activeBalancerWinner = null;
-      _nodeTelemetry.clear();
-      if (_tunnel.status.isActive &&
-          _settings.routingMode != RoutingMode.desync) {
-        await _restartActiveTunnel();
+      final targetProfileId = _resolveAutoSwitchTargetForNetwork(net);
+      if (_isValidSelectableProfileId(targetProfileId) &&
+          targetProfileId != _settings.selectedProfileId) {
+        await selectProfile(targetProfileId);
         return;
       }
-    }
 
-    notifyListeners();
+      final tunnelNetMismatch =
+          _lastTunnelNetType.isNotEmpty && _lastTunnelNetType != net;
+      if ((netChanged || tunnelNetMismatch) &&
+          _settings.selectedProfileId.startsWith('auto:') &&
+          _hasNetworkScopedNodes) {
+        _activeBalancerWinner = null;
+        _nodeTelemetry.clear();
+        if (_tunnel.status.isActive &&
+            _settings.routingMode != RoutingMode.desync) {
+          await _restartActiveTunnel();
+          return;
+        }
+      }
+
+      notifyListeners();
+    } catch (_) {}
   }
 
   bool _reconnectingFailover = false;
@@ -3889,38 +3933,40 @@ class AppController extends ChangeNotifier {
 
   /// Обновляет данные о текущем Wi-Fi SSID, разрешениях и списке сетей вокруг.
   Future<void> refreshWifiInfo({bool requestPermission = false}) async {
-    if (requestPermission) {
-      await bridge.requestWifiPermission();
-    }
-    final info = await bridge.wifiInfo();
-    final ssidOrNetChanged =
-        _currentWifiSsid != info.ssid || _isWifiConnected != info.isWifi;
-    final changed = ssidOrNetChanged ||
-        _hasWifiPermission != info.hasPermission ||
-        _wifiLocationEnabled != info.locationEnabled ||
-        _nearbyWifiSsids.length != info.nearbySsids.length ||
-        _tunnel.pausedWifiSsid != info.pausedWifiSsid;
-    _currentWifiSsid = info.ssid;
-    _isWifiConnected = info.isWifi;
-    _hasWifiPermission = info.hasPermission;
-    _wifiLocationEnabled = info.locationEnabled;
-    _nearbyWifiSsids = info.nearbySsids;
-    if (_tunnel.pausedWifiSsid != info.pausedWifiSsid) {
-      _tunnel = _tunnel.copyWith(pausedWifiSsid: info.pausedWifiSsid);
-    }
-    if (ssidOrNetChanged && _settings.homeWifiMode) {
-      unawaited(bridge.recheckHomeWifi());
-    }
-    if (ssidOrNetChanged &&
-        (_settings.wifiProfileId.isNotEmpty ||
-            _settings.cellularProfileId.isNotEmpty ||
-            _hasNetworkScopedNodes ||
-            _settings.perNetworkDesync)) {
-      unawaited(_checkNetworkDesyncProfile());
-    }
-    if (changed || requestPermission) {
-      notifyListeners();
-    }
+    try {
+      if (requestPermission) {
+        await bridge.requestWifiPermission();
+      }
+      final info = await bridge.wifiInfo();
+      final ssidOrNetChanged =
+          _currentWifiSsid != info.ssid || _isWifiConnected != info.isWifi;
+      final changed = ssidOrNetChanged ||
+          _hasWifiPermission != info.hasPermission ||
+          _wifiLocationEnabled != info.locationEnabled ||
+          _nearbyWifiSsids.length != info.nearbySsids.length ||
+          _tunnel.pausedWifiSsid != info.pausedWifiSsid;
+      _currentWifiSsid = info.ssid;
+      _isWifiConnected = info.isWifi;
+      _hasWifiPermission = info.hasPermission;
+      _wifiLocationEnabled = info.locationEnabled;
+      _nearbyWifiSsids = info.nearbySsids;
+      if (_tunnel.pausedWifiSsid != info.pausedWifiSsid) {
+        _tunnel = _tunnel.copyWith(pausedWifiSsid: info.pausedWifiSsid);
+      }
+      if (ssidOrNetChanged && _settings.homeWifiMode) {
+        unawaited(bridge.recheckHomeWifi());
+      }
+      if (ssidOrNetChanged &&
+          (_settings.wifiProfileId.isNotEmpty ||
+              _settings.cellularProfileId.isNotEmpty ||
+              _hasNetworkScopedNodes ||
+              _settings.perNetworkDesync)) {
+        unawaited(_checkNetworkDesyncProfile());
+      }
+      if (changed || requestPermission) {
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   /// Открывает системные настройки геолокации (требуется Android для чтения SSID).

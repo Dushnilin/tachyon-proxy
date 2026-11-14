@@ -383,37 +383,56 @@ class DnsBenchmark {
     final port = int.tryParse(address.split(':').last) ?? 53;
     final host = address.split(':').first;
 
-    final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-    final stopwatch = Stopwatch()..start();
+    RawDatagramSocket? socket;
+    StreamSubscription<RawSocketEvent>? subscription;
+    final stopwatch = Stopwatch();
     try {
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      stopwatch.start();
       final completer = Completer<bool>();
-      late final StreamSubscription<RawSocketEvent> subscription;
-      subscription = socket.listen((event) {
-        if (event != RawSocketEvent.read) return;
-        final datagram = socket.receive();
-        if (datagram == null) return;
-        if (!completer.isCompleted) completer.complete(true);
-      });
+      subscription = socket.listen(
+        (event) {
+          if (event != RawSocketEvent.read) return;
+          final datagram = socket?.receive();
+          if (datagram == null) return;
+          if (!completer.isCompleted) completer.complete(true);
+        },
+        onError: (_) {
+          if (!completer.isCompleted) completer.complete(false);
+        },
+        onDone: () {
+          if (!completer.isCompleted) completer.complete(false);
+        },
+        cancelOnError: true,
+      );
 
-      socket.send(
+      final sent = socket.send(
         _query(domain),
         InternetAddress(host),
         port,
       );
+      if (sent <= 0) {
+        stopwatch.stop();
+        return -1;
+      }
 
       final answered = await completer.future.timeout(
         timeout,
         onTimeout: () => false,
       );
       stopwatch.stop();
-      await subscription.cancel();
       if (!answered) return -1;
       return stopwatch.elapsedMilliseconds;
     } catch (_) {
       stopwatch.stop();
       return -1;
     } finally {
-      socket.close();
+      try {
+        await subscription?.cancel();
+      } catch (_) {}
+      try {
+        socket?.close();
+      } catch (_) {}
     }
   }
 

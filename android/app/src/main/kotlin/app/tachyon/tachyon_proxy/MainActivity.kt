@@ -150,16 +150,7 @@ class MainActivity : FlutterFragmentActivity() {
     private val iconCache = LruCache<String, ByteArray>(256)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        runCatching {
-            @Suppress("DEPRECATION")
-            val pkgInfo = packageManager.getPackageInfo(packageName, 0)
-            val customSo = File(TachyonCore.CUSTOM_SO_PATH)
-            if (customSo.exists() && customSo.lastModified() < pkgInfo.lastUpdateTime) {
-                customSo.setWritable(true, true)
-                customSo.delete()
-                File(TachyonCore.CUSTOM_STAMP_PATH).delete()
-            }
-        }
+        TachyonCore.ensureInitialized(applicationContext)
         super.onCreate(savedInstanceState)
         WifiSsidHelper.ensureRegistered(applicationContext)
         intent?.getStringExtra("cmd")?.let { cmd ->
@@ -444,9 +435,14 @@ class MainActivity : FlutterFragmentActivity() {
 
         // Проверяем конфигурацию до запроса разрешения: если она невалидна,
         // пользователю незачем показывать диалог VPN.
+        if (!TachyonCore.isAvailable && !TachyonCore.ensureInitialized(applicationContext)) {
+            result.success("движок недоступен: ${TachyonCore.loadError ?: "библиотека не загружена"}")
+            return
+        }
         val check = runCatching { TachyonCore.check(config) }.getOrNull()
         if (check == null) {
-            result.success("движок недоступен: ${TachyonCore.lastError()}")
+            val detail = runCatching { TachyonCore.lastError() }.getOrNull() ?: TachyonCore.loadError
+            result.success("движок недоступен: $detail")
             return
         }
         val verdict = runCatching { JSONObject(check) }.getOrNull()
@@ -778,9 +774,9 @@ class MainActivity : FlutterFragmentActivity() {
                     runOnUiThread { result.success("error: файл ядра повреждён или не найден") }
                     return@Thread
                 }
-                val engineDir = File(codeCacheDir, "engine")
+                val engineDir = TachyonCore.engineDir(this)
                 engineDir.mkdirs()
-                val targetSo = File(engineDir, "libtachyon.so")
+                val targetSo = TachyonCore.customSoFile(this)
                 if (targetSo.exists()) {
                     targetSo.setWritable(true, true)
                     targetSo.delete()
@@ -792,7 +788,7 @@ class MainActivity : FlutterFragmentActivity() {
                 targetSo.setExecutable(true, false)
 
                 // Проверяем, разрешает ли SELinux прошивки dlopen из code_cache
-                val probeSo = File(engineDir, "libtachyon_probe.so")
+                val probeSo = TachyonCore.probeSoFile(this)
                 if (probeSo.exists()) {
                     probeSo.setWritable(true, true)
                     probeSo.delete()
@@ -819,18 +815,12 @@ class MainActivity : FlutterFragmentActivity() {
                 }
 
                 if (!dlopenAllowed) {
-                    runCatching {
-                        targetSo.setWritable(true, true)
-                        targetSo.delete()
-                        File(TachyonCore.CUSTOM_STAMP_PATH).delete()
-                    }
+                    TachyonCore.clearCustomEngine(this)
                     runOnUiThread { result.success("requires_apk") }
                     return@Thread
                 }
 
-                runCatching {
-                    File(TachyonCore.CUSTOM_STAMP_PATH).writeText(System.currentTimeMillis().toString())
-                }
+                TachyonCore.writeCustomStamp(this)
 
                 runOnUiThread {
                     result.success("ok")

@@ -110,6 +110,8 @@ class CoreBridge {
       return ConfigCheck.fromJson(raw);
     } on PlatformException catch (error) {
       return ConfigCheck(ok: false, error: error.message ?? error.code);
+    } catch (error) {
+      return ConfigCheck(ok: false, error: error.toString());
     }
   }
 

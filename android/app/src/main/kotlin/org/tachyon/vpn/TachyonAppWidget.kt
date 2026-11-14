@@ -51,6 +51,7 @@ class TachyonAppWidget : AppWidgetProvider() {
                 val sessionFile = File(context.filesDir, "last-session.json")
                 if (sessionFile.exists()) {
                     try {
+                        TachyonCore.ensureInitialized(context.applicationContext ?: context)
                         val obj = JSONObject(sessionFile.readText())
                         val start = Intent(context, TachyonVpnService::class.java).apply {
                             action = TachyonVpnService.ACTION_START

@@ -31,6 +31,8 @@ class BootReceiver : BroadcastReceiver() {
         if (!autoStart) return
         if (VpnService.prepare(context) != null) return
 
+        TachyonCore.ensureInitialized(context.applicationContext ?: context)
+
         val startIntent = Intent(context, TachyonVpnService::class.java).setAction(
             TachyonVpnService.ACTION_START,
         )

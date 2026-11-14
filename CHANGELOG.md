@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.1]
+
+- **Инициализация нативного движка и очистка кэшированной библиотеки (`TachyonCore.ensureInitialized`, `MainActivity`, `TachyonVpnService`, `TachyonTileService`, `BootReceiver`, `TachyonAppWidget`):** загрузка `libtachyon.so` перенесена из статического блока `init {}` в `TachyonCore.ensureInitialized(context)` с вызовом во всех точках старта процесса Android. Перед `System.load` проверяется совпадение `versionCode` и `lastUpdateTime` установленного APK со штампом в `code_cache/engine`, при несовпадении устаревший кэшированный `.so` удаляется с переходом на встроенную библиотеку из APK; в `MainActivity.handleStart` и `TachyonVpnService.startTunnel` добавлены проверки `TachyonCore.isAvailable`.
+- **Устойчивость стартапа, подписок и проверки DNS (`AppController`, `CoreBridge`, `DnsBenchmark`):** фоновые шаги `_refreshStale()`, `ensureRequiredListsDownloaded()`, `runDnsBenchmark()`, `refreshWifiInfo()`, `_checkNetworkDesyncProfile()` и ветки `fetchSubscription()` изолированы от необработанных исключений; в `DnsBenchmark._probeUdp` создание `RawDatagramSocket` перенесено в `try`, добавлены `onError`/`onDone` (`cancelOnError: true`) на подписку потока сокета и безопасная отмена/закрытие в `finally`, чтобы сетевые ограничения режима Doze (`EPERM`) не утекали в корневую Zone.
+- **Нативное ядро `tachyon-core` (`0.5.5`):** исправлена обработка строк с кириллицей и многобайтным UTF-8 при разборе и обновлении подписок без аварийного завершения процесса.
+
 ## [0.1.0]
 
 - **Совместимость сериализации `outbound` и `TUN MTU` с валидатором `tachyon-core` (`Profile.toOutbound`, `RuntimeConfig.effectiveTunMtu`):** для `naive` из объекта `tls` удаляются поля `insecure` и `disable_sni` при выключенном `allowInsecure`; для `snell` поддержаны версии `4`, `5` (по умолчанию `5`) и `6` со структурированным `obfs` (`obfs_mode`, `obfs_host`) и `udp_over_tcp` на v4/v5; добавлена сериализация и экспорт в URI для `wdtt` (без блока `tls` и с поддержкой `srtp_mode` / `vk_token`); длительности `hop_interval` (`hysteria2`) и `heartbeat` (`tuic`) нормализуются в формат Go (`"Xs"`); в `effectiveTunMtu` учтены `detourProfile.extra['mtu']` и `wireguard`-кандидаты внутри `urltest` / `auto:`-групп.

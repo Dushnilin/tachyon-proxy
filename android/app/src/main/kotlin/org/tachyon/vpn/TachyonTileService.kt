@@ -20,6 +20,11 @@ class TachyonTileService : TileService() {
         updateTileState()
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        TachyonCore.ensureInitialized(applicationContext)
+    }
+
     override fun onStartListening() {
         super.onStartListening()
         TunnelStateHolder.addListener(listener)

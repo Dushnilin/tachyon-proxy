@@ -1,13 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tachyon_proxy/core/app_controller.dart';
 import 'package:tachyon_proxy/core/models/app_rules.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/models/tunnel_state.dart';
+import 'package:tachyon_proxy/core/services/core_bridge.dart';
 import 'package:tachyon_proxy/core/services/dns_benchmark.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
+import 'package:tachyon_proxy/core/services/lists_repository.dart';
 import 'package:tachyon_proxy/core/services/settings_store.dart';
 
 Profile _vlessProfile() => const Profile(
@@ -1729,6 +1734,161 @@ proxies:
             (i) => i['tag'] == 'tun-in',
           );
       expect(tun['mtu'], 1340);
+    });
+  });
+
+  group('устойчивость подписок и стартапа', () {
+    test('CoreBridge безопасно обрабатывает {"ok":false,"error":...} и невалидный JSON', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      const channel = MethodChannel('app.tachyon.proxy/vpn');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        return switch (call.method) {
+          'fetchSubscription' => '{"ok":false,"error":"ошибка разбора UTF-8"}',
+          'parseSubscription' => '{not-json',
+          'check' => '{"ok":false,"error":"некорректный конфиг"}',
+          _ => null,
+        };
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      final fetchRes = await CoreBridge.instance.fetchSubscription('https://example.com/sub');
+      expect(fetchRes, isNotNull);
+      expect(fetchRes!['ok'], isFalse);
+      expect(fetchRes['error'], 'ошибка разбора UTF-8');
+
+      final parseRes = await CoreBridge.instance.parseSubscription('broken');
+      expect(parseRes, isNull);
+
+      final checkRes = await CoreBridge.instance.check('{}');
+      expect(checkRes.ok, isFalse);
+      expect(checkRes.error, 'некорректный конфиг');
+    });
+
+    test('fetchSubscription переходит на Dart-парсер при {"ok":false} от ядра и сохраняет ошибку при пустом ответе', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tmpDir = await Directory.systemTemp.createTemp('tachyon_sub_test_');
+      addTearDown(() async {
+        if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+      });
+
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var returnEmpty = false;
+      server.listen((req) async {
+        req.response.statusCode = 200;
+        if (returnEmpty) {
+          req.response.write('invalid-payload');
+        } else {
+          req.response.write(
+            'vless://11111111-2222-3333-4444-555555555555@example.com:443#Привет%20Мир',
+          );
+        }
+        await req.response.close();
+      });
+
+      const vpnChannel = MethodChannel('app.tachyon.proxy/vpn');
+      const eventsChannel = MethodChannel('app.tachyon.proxy/events');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(vpnChannel, (call) async {
+        return switch (call.method) {
+          'status' => <String, dynamic>{'status': 'disconnected', 'error': '', 'server': ''},
+          'filesDir' => tmpDir.path,
+          'networkInfo' => 'wifi',
+          'wifiInfo' => <String, dynamic>{'ssid': '', 'isWifi': false},
+          'fetchSubscription' => '{"ok":false,"error":"native fetch failed"}',
+          'parseSubscription' => '{"ok":false,"error":"native parse failed"}',
+          _ => null,
+        };
+      });
+      messenger.setMockMethodCallHandler(eventsChannel, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(vpnChannel, null);
+        messenger.setMockMethodCallHandler(eventsChannel, null);
+      });
+
+      final store = SettingsStore(directory: tmpDir.path);
+      final subUrl = 'http://127.0.0.1:${server.port}/sub';
+      await store.save(
+        AppSettings(
+          dns: DnsSettings(checkedAt: DateTime.now().millisecondsSinceEpoch),
+          serviceRoutes: const {},
+          subscriptions: [
+            SubscriptionEntry(
+              id: 'sub1',
+              name: 'Тест',
+              url: subUrl,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          ],
+        ),
+      );
+
+      final controller = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      addTearDown(controller.dispose);
+
+      // При старте _refreshStale() запускается асинхронно и не должен бросать необработанных исключений.
+      final prevOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = prevOverrides);
+
+      await runZonedGuarded(() async {
+        await controller.bootstrap();
+        final deadline = DateTime.now().add(const Duration(seconds: 5));
+        while (DateTime.now().isBefore(deadline) &&
+            (controller.loadingSubscription || controller.settings.profiles.isEmpty)) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      }, (error, stack) {
+        fail('Неожиданное необработанное исключение при старте: $error\n$stack');
+      });
+
+      expect(controller.settings.profiles, hasLength(1));
+      expect(controller.settings.profiles.first.name, 'Привет Мир');
+      expect(controller.lastError, isEmpty);
+
+      // Если и fallback-парсинг ничего не нашёл, отображается понятная ошибка без падения.
+      returnEmpty = true;
+      final count = await controller.fetchSubscription('sub1');
+      expect(count, 0);
+      expect(controller.lastError, contains('native fetch failed'));
+    });
+
+    test('DnsBenchmark._probeUdp не пропускает ошибки сокета в корневую Zone', () async {
+      final tmpSocket = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final closedPort = tmpSocket.port;
+      tmpSocket.close();
+
+      final benchmark = DnsBenchmark(timeout: const Duration(milliseconds: 120));
+      await runZonedGuarded(() async {
+        final closedRes = await benchmark.test(
+          DnsCandidate(
+            id: 'closed_udp',
+            provider: 'Closed',
+            type: 'udp',
+            address: '127.0.0.1:$closedPort',
+            ip: '127.0.0.1:$closedPort',
+          ),
+        );
+        expect(closedRes.ok, isFalse);
+
+        final invalidRes = await benchmark.test(
+          const DnsCandidate(
+            id: 'invalid_udp',
+            provider: 'Invalid',
+            type: 'udp',
+            address: 'not-an-ip',
+            ip: 'not-an-ip',
+          ),
+        );
+        expect(invalidRes.ok, isFalse);
+      }, (error, stack) {
+        fail('Неожиданное необработанное исключение в DnsBenchmark: $error\n$stack');
+      });
     });
   });
 }

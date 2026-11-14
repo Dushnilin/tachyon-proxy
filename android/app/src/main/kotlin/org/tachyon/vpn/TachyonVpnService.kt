@@ -87,6 +87,7 @@ class TachyonVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        TachyonCore.ensureInitialized(applicationContext)
         createNotificationChannel()
         WifiSsidHelper.ensureRegistered(applicationContext)
         WifiSsidHelper.setOnWifiEventListener {
@@ -411,6 +412,16 @@ class TachyonVpnService : VpnService() {
         // даёт несколько секунд на foreground-состояние.
         startVpnForeground(buildNotification())
         currentConfig = config
+
+        if (!TachyonCore.isAvailable && !TachyonCore.ensureInitialized(applicationContext)) {
+            val loadErr = TachyonCore.loadError ?: "ядро недоступно"
+            Log.e(TAG, loadErr)
+            TunnelStateHolder.update(TunnelStateHolder.State.Failed, loadErr, pausedWifi = "")
+            runCatching { TachyonAppWidget.updateAll(this) }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
 
         val coreTunFd: Int
         val activeProtectPath: String

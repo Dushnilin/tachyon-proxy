@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show ZLibCodec, gzip, zlib;
 
 import '../models/runtime_config.dart';
 
@@ -50,11 +51,19 @@ class LinkParser {
       if (clashProfiles.isNotEmpty) return clashProfiles;
     }
 
-    // 5. Построчный разбор URI и одиночных JSON-строк
+    // 5. Построчный разбор URI, Surge/Quantumult X и одиночных JSON-строк
     final profiles = <Profile>[];
     for (final raw in trimmed.split(RegExp(r'[\r\n]+'))) {
       final line = raw.trim();
-      if (line.isEmpty || line.startsWith('#') || line.startsWith('//')) {
+      if (line.isEmpty ||
+          line.startsWith('#') ||
+          line.startsWith('//') ||
+          line.startsWith(';') ||
+          line.startsWith('[')) {
+        continue;
+      }
+      if (line.toLowerCase().startsWith('vpn://')) {
+        profiles.addAll(_parseAmneziaVpnContainer(line, subscriptionId: subscriptionId));
         continue;
       }
       if (_isFptnToken(line)) {
@@ -227,12 +236,24 @@ class LinkParser {
     if (lower.startsWith('openconnect://') || lower.startsWith('anyconnect://')) {
       return _parseOpenConnect(value, subscriptionId: subscriptionId);
     }
+    if (lower.startsWith('wdtt://') ||
+        lower.startsWith('qwdtt://') ||
+        lower.startsWith('csqtt://')) {
+      return _parseWdtt(value, subscriptionId: subscriptionId);
+    }
+    if (lower.startsWith('sudoku://')) {
+      return _parseSudoku(value, subscriptionId: subscriptionId);
+    }
+    if (lower.startsWith('vpn://')) {
+      final list = _parseAmneziaVpnContainer(value, subscriptionId: subscriptionId);
+      return list.isNotEmpty ? list.first : null;
+    }
 
     if (value.startsWith('{') || value.startsWith('[')) {
       final list = _parseJsonPayload(value, subscriptionId: subscriptionId);
       return list.isNotEmpty ? list.first : null;
     }
-    return null;
+    return _parseSurgeOrQxLine(value, subscriptionId: subscriptionId);
   }
 
   // ---------------------------------------------------------------------------
@@ -558,19 +579,72 @@ class LinkParser {
     final password = Uri.decodeComponent(uri.userInfo.isNotEmpty ? uri.userInfo : (query['auth'] ?? ''));
 
     final extra = <String, dynamic>{};
-    final obfs = query['obfs'] ?? '';
-    if (obfs.isNotEmpty && obfs.toLowerCase() != 'none') {
+    final rawObfs = (query['obfs'] ?? query['obfs_type'] ?? query['obfs-type'] ?? '').trim();
+    var isGecko = rawObfs.toLowerCase() == 'gecko';
+    var obfsPw = query['obfs-password'] ?? query['obfs_password'] ?? query['obfspassword'] ?? '';
+    int? minPkt = _toInt(
+      query['min_packet_size'] ?? query['min-packet-size'] ?? query['minpacketsize'],
+    );
+    int? maxPkt = _toInt(
+      query['max_packet_size'] ?? query['max-packet-size'] ?? query['maxpacketsize'],
+    );
+
+    final psRaw = query['packetsize'] ?? query['packet-size'] ?? query['packet_size'] ?? '';
+    if (psRaw.isNotEmpty) {
+      final parsedRange = _parsePacketSizeRange(psRaw);
+      if (parsedRange != null) {
+        minPkt ??= parsedRange.$1;
+        maxPkt ??= parsedRange.$2;
+      }
+    }
+
+    final fmRaw = query['fm'] ?? query['finalmask'] ?? '';
+    if (fmRaw.isNotEmpty) {
+      try {
+        final fm = jsonDecode(fmRaw);
+        if (fm is Map && fm['udp'] is List) {
+          for (final item in fm['udp'] as List) {
+            if (item is! Map) continue;
+            final s = item['settings'] is Map ? item['settings'] as Map : const {};
+            final itemTy = (item['type'] ?? '').toString().toLowerCase();
+            if (itemTy == 'gecko') isGecko = true;
+            if (obfsPw.isEmpty && s['password'] != null) {
+              obfsPw = s['password'].toString();
+            }
+            final fmPs = s['packetSize'] ?? s['packet_size'];
+            if (fmPs != null) {
+              final r = _parsePacketSizeRange(fmPs.toString());
+              if (r != null) {
+                isGecko = true;
+                minPkt ??= r.$1;
+                maxPkt ??= r.$2;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (isGecko || (minPkt != null && minPkt > 0) || (maxPkt != null && maxPkt > 0)) {
       extra['obfs'] = {
-        'type': obfs,
-        'password': query['obfs-password'] ?? query['obfs_password'] ?? '',
+        'type': 'gecko',
+        if (obfsPw.isNotEmpty) 'password': obfsPw,
+        if (minPkt != null && minPkt > 0) 'min_packet_size': minPkt,
+        if (maxPkt != null && maxPkt > 0) 'max_packet_size': maxPkt,
+      };
+    } else if (rawObfs.isNotEmpty && rawObfs.toLowerCase() != 'none') {
+      extra['obfs'] = {
+        'type': rawObfs,
+        'password': obfsPw,
       };
     }
-    final up = _toInt(query['upmbps'] ?? query['up']);
+
+    final up = _parseMbps(query['upmbps'] ?? query['up_mbps'] ?? query['up']);
     if (up != null && up > 0) extra['up_mbps'] = up;
-    final down = _toInt(query['downmbps'] ?? query['down']);
+    final down = _parseMbps(query['downmbps'] ?? query['down_mbps'] ?? query['down']);
     if (down != null && down > 0) extra['down_mbps'] = down;
 
-    final mport = query['mport'] ?? query['ports'] ?? '';
+    final mport = query['mport'] ?? query['ports'] ?? query['server_ports'] ?? '';
     if (mport.isNotEmpty) {
       final ports = mport
           .split(',')
@@ -579,8 +653,11 @@ class LinkParser {
           .toList();
       if (ports.isNotEmpty) extra['server_ports'] = ports;
     }
-    if ((query['hop_interval'] ?? '').isNotEmpty) {
-      extra['hop_interval'] = query['hop_interval'];
+    final hopInt = _normalizeDurationString(
+      query['hop_interval'] ?? query['hop-interval'] ?? query['mporthopint'],
+    );
+    if (hopInt != null) {
+      extra['hop_interval'] = hopInt;
     }
     _extractCertPin(extra, query['pinSHA256'] ?? query['pcs']);
 
@@ -644,13 +721,28 @@ class LinkParser {
     final uuid = Uri.decodeComponent(separator < 0 ? userInfo : userInfo.substring(0, separator));
     final password = Uri.decodeComponent(separator < 0 ? (query['password'] ?? '') : userInfo.substring(separator + 1));
 
+    final cc = query['congestion_control'] ??
+        query['congestion-control'] ??
+        query['congestion-controller'] ??
+        'bbr';
+    final hbRaw = query['heartbeat'] ?? query['heartbeat-interval'] ?? query['heartbeat_interval'];
+    final hb = _normalizeDurationString(hbRaw, treatLargeIntsAsMillis: query.containsKey('heartbeat-interval'));
     final extra = <String, dynamic>{
-      'congestion_control':
-          query['congestion_control'] ?? query['congestion-control'] ?? 'bbr',
+      'congestion_control': cc,
       if ((query['udp_relay_mode'] ?? query['udp-relay-mode'] ?? '').isNotEmpty)
         'udp_relay_mode': query['udp_relay_mode'] ?? query['udp-relay-mode'],
-      if (_isTruthy(query['zero_rtt_handshake'] ?? query['reduce_rtt']))
+      if (_isTruthy(
+        query['zero_rtt_handshake'] ??
+            query['zero-rtt-handshake'] ??
+            query['reduce_rtt'] ??
+            query['reduce-rtt'] ??
+            query['fast-open'] ??
+            query['fast_open'],
+      ))
         'zero_rtt_handshake': true,
+      if (_isTruthy(query['udp_over_stream'] ?? query['udp-over-stream'] ?? query['uos']))
+        'udp_over_stream': true,
+      'heartbeat': ?hb,
     };
     _extractCertPin(extra, query['pcs'] ?? query['pinSHA256']);
 
@@ -1187,7 +1279,8 @@ class LinkParser {
       password: password,
       transport: isQuic ? 'quic' : 'tcp',
       sni: query['sni'] ?? server,
-      allowInsecure: _isTruthy(query['insecure'] ?? query['allowInsecure']),
+      alpn: _splitCsv(query['alpn']),
+      allowInsecure: false,
       subscriptionId: subscriptionId,
       extra: extra,
     );
@@ -1201,10 +1294,30 @@ class LinkParser {
     final port = uri.port == 0 ? 443 : uri.port;
     final psk = Uri.decodeComponent(uri.userInfo.isNotEmpty ? uri.userInfo : (query['psk'] ?? ''));
     if (psk.isEmpty) return null;
-    final rawVer = _toInt(query['version']) ?? 4;
-    final version = (rawVer == 4 || rawVer == 6) ? rawVer : 4;
-    final obfs = query['obfs'] ?? query['obfs_mode'] ?? '';
-    final obfsHost = query['obfs-host'] ?? query['obfs_host'] ?? query['host'] ?? '';
+    final rawVer = _toInt(query['version'] ?? query['v']) ?? 5;
+    final version = (rawVer == 4 || rawVer == 5 || rawVer == 6) ? rawVer : 5;
+    final obfs = (query['obfs'] ?? query['obfs_mode'] ?? query['plugin'] ?? '').trim().toLowerCase();
+    final obfsHost = (query['obfs-host'] ?? query['obfs_host'] ?? query['host'] ?? '').trim();
+
+    final extra = <String, dynamic>{
+      'psk': psk,
+      'version': version,
+    };
+    if (version == 4 || version == 5) {
+      if (obfs == 'http' || obfs == 'tls') {
+        extra['obfs'] = {
+          'mode': obfs,
+          if (obfsHost.isNotEmpty) 'host': obfsHost,
+        };
+      }
+      if (_isTruthy(query['uot'] ?? query['udp_over_tcp'] ?? query['udp-over-tcp'])) {
+        extra['udp_over_tcp'] = true;
+      }
+      if (_isTruthy(query['reuse'])) extra['reuse'] = true;
+    } else {
+      if ((query['mode'] ?? '').isNotEmpty) extra['mode'] = query['mode'];
+      if (_isTruthy(query['reuse'])) extra['reuse'] = true;
+    }
 
     return Profile(
       id: _id('snell', '$server:$port:$psk:$version'),
@@ -1214,13 +1327,7 @@ class LinkParser {
       port: port,
       password: psk,
       subscriptionId: subscriptionId,
-      extra: {
-        'psk': psk,
-        'version': version,
-        if (version == 4 && obfs.isNotEmpty) 'obfs_mode': obfs,
-        if (version == 4 && obfsHost.isNotEmpty) 'obfs_host': obfsHost,
-        if (version == 6 && (query['mode'] ?? '').isNotEmpty) 'mode': query['mode'],
-      },
+      extra: extra,
     );
   }
 
@@ -1488,8 +1595,28 @@ class LinkParser {
 
     final normSecret = secret.toLowerCase();
     var paddedPrefix = false;
+    var faketlsDomain = '';
     if (normSecret.length >= 34 && RegExp(r'^(ee|dd)[0-9a-f]{32}').hasMatch(normSecret)) {
       paddedPrefix = normSecret.startsWith('dd');
+      if (normSecret.startsWith('ee') && normSecret.length > 34 && (normSecret.length - 34).isEven) {
+        final domHex = normSecret.substring(34);
+        final bytes = <int>[];
+        var hexOk = true;
+        for (var i = 0; i < domHex.length; i += 2) {
+          final b = int.tryParse(domHex.substring(i, i + 2), radix: 16);
+          if (b == null) {
+            hexOk = false;
+            break;
+          }
+          bytes.add(b);
+        }
+        if (hexOk) {
+          try {
+            final dom = utf8.decode(bytes).trim();
+            if (dom.isNotEmpty) faketlsDomain = dom;
+          } catch (_) {}
+        }
+      }
       secret = normSecret.substring(2, 34);
     } else if (normSecret.length == 32 && RegExp(r'^[0-9a-f]{32}$').hasMatch(normSecret)) {
       secret = normSecret;
@@ -1506,7 +1633,8 @@ class LinkParser {
     if (mode == 'mtproto' || mode == 'mtproxy') {
       extra['mode'] = mode;
     }
-    final sni = query['sni'] ?? query['faketls'] ?? '';
+    final rawSni = (query['sni'] ?? query['faketls'] ?? '').trim();
+    final sni = rawSni.isNotEmpty ? rawSni : faketlsDomain;
 
     return Profile(
       id: _id('mtproto', '$server:$port:$secret'),
@@ -1795,6 +1923,573 @@ class LinkParser {
     );
   }
 
+  Profile? _parseSudoku(String link, {String subscriptionId = ''}) {
+    final uri = Uri.tryParse(link);
+    if (uri == null || uri.host.isEmpty) return null;
+    final query = uri.queryParameters;
+    final server = _cleanHost(uri.host);
+    final port = uri.port == 0 ? 443 : uri.port;
+    final userInfoKey = uri.userInfo.isNotEmpty ? Uri.decodeComponent(uri.userInfo) : '';
+    final uuid = userInfoKey.isNotEmpty
+        ? userInfoKey
+        : (query['uuid'] ?? query['key'] ?? query['password'] ?? '');
+    final password = query['password'] ?? '';
+
+    final extra = <String, dynamic>{
+      if ((query['table_type'] ?? query['table-type'] ?? '').isNotEmpty)
+        'table_type': query['table_type'] ?? query['table-type'],
+      if ((query['custom_table'] ?? query['custom-table'] ?? '').isNotEmpty)
+        'custom_table': query['custom_table'] ?? query['custom-table'],
+      if ((query['custom_tables'] ?? query['custom-tables'] ?? '').isNotEmpty)
+        'custom_tables': _splitCsv(query['custom_tables'] ?? query['custom-tables']),
+      if (query.containsKey('enable_pure_downlink'))
+        'enable_pure_downlink': _isTruthy(query['enable_pure_downlink']),
+      if (query.containsKey('disable_http_mask'))
+        'disable_http_mask': _isTruthy(query['disable_http_mask']),
+      for (final s in [
+        'http_mask_mode',
+        'http_mask_host',
+        'http_mask_path_root',
+        'http_mask_multiplex',
+      ])
+        if ((query[s] ?? '').isNotEmpty) s: query[s],
+      if ((query['fp'] ?? query['fingerprint'] ?? '').isNotEmpty)
+        'fp': normalizeUtlsFingerprint(query['fp'] ?? query['fingerprint'] ?? ''),
+      if ((query['security'] ?? '').isNotEmpty) 'security': query['security'],
+    };
+    _extractCertPin(extra, query['pcs'] ?? query['pinSHA256']);
+
+    return Profile(
+      id: _id('sudoku', '$server:$port:$uuid:$password'),
+      name: _name(query, uri.fragment, '$server:$port'),
+      type: 'sudoku',
+      server: server,
+      port: port,
+      uuid: uuid,
+      password: password,
+      sni: query['sni'] ?? '',
+      alpn: _splitCsv(query['alpn']),
+      allowInsecure: _isTruthy(query['insecure'] ?? query['allowInsecure']),
+      subscriptionId: subscriptionId,
+      extra: extra,
+    );
+  }
+
+  Profile? _parseWdtt(String link, {String subscriptionId = ''}) {
+    final trimmed = link.trim();
+    final schemeSep = trimmed.indexOf('://');
+    if (schemeSep <= 0) return null;
+    final scheme = trimmed.substring(0, schemeSep).toLowerCase();
+    final afterScheme = trimmed.substring(schemeSep + 3);
+    final fragIdx = afterScheme.indexOf('#');
+    final body = (fragIdx >= 0 ? afterScheme.substring(0, fragIdx) : afterScheme).trim();
+    var fragTag = '';
+    if (fragIdx >= 0) {
+      final rawFrag = afterScheme.substring(fragIdx + 1).trim();
+      try {
+        fragTag = Uri.decodeComponent(rawFrag);
+      } catch (_) {
+        fragTag = rawFrag;
+      }
+    }
+
+    Profile? buildWdtt({
+      required String server,
+      required int port,
+      required String pass,
+      required String mode,
+      required String name,
+      int? rawPort,
+      int? wgPort,
+      int? localPort,
+      String? obfs,
+      String? did,
+      List<String>? hashes,
+      int? workers,
+      int? mtu,
+      String? vkToken,
+      String? srtpMode,
+      String? turnTransport,
+    }) {
+      final cleanSrv = _cleanHost(server);
+      if (cleanSrv.isEmpty || pass.isEmpty) return null;
+      final extra = <String, dynamic>{
+        if (mode != 'wg') 'mode': mode,
+        if (rawPort != null && rawPort > 0) 'raw_port': rawPort,
+        if (wgPort != null && wgPort > 0) 'wg_port': wgPort,
+        if (localPort != null && localPort > 0) 'local_port': localPort,
+        if (obfs != null && const {'audio', 'video', 'unified'}.contains(obfs.toLowerCase()))
+          'obfs': obfs.toLowerCase(),
+        if (did != null && did.isNotEmpty) 'device_id': did,
+        if (hashes != null && hashes.isNotEmpty) 'hashes': hashes,
+        if (workers != null && workers >= 1 && workers <= 126) 'workers': workers,
+        if (mtu != null && mtu >= 576 && mtu <= 9000) 'mtu': mtu,
+        if (vkToken != null && vkToken.isNotEmpty) 'vk_token': vkToken,
+        if (srtpMode != null && srtpMode.isNotEmpty) 'srtp_mode': srtpMode,
+        if (turnTransport != null && turnTransport.isNotEmpty) 'turn_transport': turnTransport,
+      };
+      return Profile(
+        id: _id('wdtt', '$cleanSrv:$port:$pass:$mode'),
+        name: name.isNotEmpty ? name : 'wdtt-$cleanSrv:$port',
+        type: 'wdtt',
+        server: cleanSrv,
+        port: port,
+        password: pass,
+        transport: 'udp',
+        subscriptionId: subscriptionId,
+        extra: extra,
+      );
+    }
+
+    // 1. csqtt://connect?...
+    if (scheme == 'csqtt' && body.toLowerCase().startsWith('connect?')) {
+      final params = _parseQuerySafe(body.substring(8));
+      final server = params['host'] ?? params['ip'] ?? params['server'] ?? '';
+      final pass = params['password'] ?? params['pass'] ?? params['id'] ?? '';
+      final port = _toInt(params['peer'] ?? params['port'] ?? params['dtls']) ?? 46000;
+      final rawMode = (params['vpn'] ?? params['mode'] ?? '').trim().toLowerCase();
+      final mode = const {'csqtt', 'csqtt_v1', 'wg', 'raw'}.contains(rawMode)
+          ? rawMode
+          : (params['v'] == '1' ? 'csqtt_v1' : 'csqtt');
+      final tag = fragTag.isNotEmpty ? fragTag : (params['name'] ?? '').trim();
+      return buildWdtt(
+        server: server,
+        port: port,
+        pass: pass,
+        mode: mode,
+        name: tag,
+        obfs: params['obfs'],
+        did: params['did'] ?? params['device_id'],
+        hashes: _splitWdttHashes(params['hashes'] ?? params['hash']),
+        workers: _toInt(params['workers'] ?? params['streams']),
+        vkToken: params['token'] ?? params['vk_token'],
+        srtpMode: params['srtp_mode'] ?? params['srtp'],
+        turnTransport: params['turn_transport'],
+      );
+    }
+
+    // 2. qwdtt://config?ip=...&dtls=...&hashes=...&pass=<tail>
+    if (scheme == 'qwdtt') {
+      final qIdx = body.indexOf('?');
+      final qRaw = qIdx >= 0 ? body.substring(qIdx + 1) : body;
+      final passIdx = qRaw.indexOf('&pass=');
+      String headQ;
+      String? rawTailPass;
+      if (passIdx >= 0) {
+        headQ = qRaw.substring(0, passIdx);
+        rawTailPass = qRaw.substring(passIdx + 6);
+      } else if (qRaw.startsWith('pass=')) {
+        headQ = '';
+        rawTailPass = qRaw.substring(5);
+      } else {
+        headQ = qRaw;
+      }
+      final params = _parseQuerySafe(headQ).map((k, v) => MapEntry(k.toLowerCase(), v));
+      if (rawTailPass != null) {
+        try {
+          params['pass'] = Uri.decodeComponent(rawTailPass);
+        } catch (_) {
+          params['pass'] = rawTailPass;
+        }
+      }
+      final rawMode = (params['mode'] ?? params['vpn'] ?? '').trim().toLowerCase();
+      final mode = const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg';
+      final dtlsPort = _toInt(params['dtls'] ?? params['port']) ??
+          (mode == 'csqtt' || mode == 'csqtt_v1' ? 46000 : 56000);
+      final rawPort = _toInt(params['raw']);
+      final serverPort = mode == 'raw' ? (rawPort ?? dtlsPort) : dtlsPort;
+      return buildWdtt(
+        server: params['ip'] ?? params['server'] ?? params['host'] ?? '',
+        port: serverPort,
+        pass: params['pass'] ?? params['password'] ?? '',
+        mode: mode,
+        name: fragTag.isNotEmpty ? fragTag : (params['name'] ?? '').trim(),
+        rawPort: rawPort,
+        obfs: params['obfs'],
+        hashes: _splitWdttHashes(params['hashes'] ?? params['hash']),
+        workers: _toInt(params['streams'] ?? params['workers']),
+        srtpMode: params['srtp_mode'] ?? params['srtp'],
+      );
+    }
+
+    // 3. Base64 JSON format: wdtt://eyJ... / csqtt://eyJ...
+    final b64Candidate = body.replaceAll(RegExp(r'/+$'), '');
+    if (!b64Candidate.contains(':') && !b64Candidate.contains('?') && !b64Candidate.contains('@')) {
+      final norm = _normalizeBase64(b64Candidate);
+      if (norm.isNotEmpty) {
+        try {
+          final decoded = utf8.decode(base64.decode(norm));
+          final obj = jsonDecode(decoded);
+          if (obj is Map) {
+            final jmap = Map<String, dynamic>.from(obj);
+            final rawMode = (jmap['vpn'] ?? jmap['mode'] ?? '').toString().trim().toLowerCase();
+            final mode = scheme == 'csqtt'
+                ? (rawMode == 'csqtt_v1' ? 'csqtt_v1' : 'csqtt')
+                : (const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg');
+            final dtlsPort = _toInt(jmap['dtls'] ?? jmap['port']) ??
+                (mode == 'csqtt' || mode == 'csqtt_v1' ? 46000 : 56000);
+            final rawPort = _toInt(jmap['raw']);
+            final serverPort = mode == 'raw' ? (rawPort ?? (dtlsPort + 3)) : dtlsPort;
+            final hRaw = jmap['hash'] ?? jmap['hashes'];
+            final hashes = hRaw is List
+                ? hRaw.expand((e) => _splitWdttHashes(e.toString())).toList()
+                : _splitWdttHashes(hRaw?.toString());
+            final p = buildWdtt(
+              server: (jmap['ip'] ?? jmap['add'] ?? jmap['server'] ?? '').toString(),
+              port: serverPort,
+              pass: (jmap['pass'] ?? jmap['id'] ?? jmap['password'] ?? '').toString(),
+              mode: mode,
+              name: fragTag.isNotEmpty
+                  ? fragTag
+                  : (jmap['name'] ?? jmap['ps'] ?? '').toString().trim(),
+              rawPort: rawPort,
+              obfs: jmap['obfs']?.toString(),
+              did: (jmap['did'] ?? jmap['device_id'])?.toString(),
+              hashes: hashes,
+              workers: _toInt(jmap['workers'] ?? jmap['streams']),
+              srtpMode: (jmap['srtp_mode'] ?? jmap['srtp'])?.toString(),
+            );
+            if (p != null) return p;
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 4. Colon format: wdtt://host:dtls_port:wg_port:local_port:pass:hash1,hash2#remark
+    if (!body.contains('?') && !body.contains('@')) {
+      String hostPart = body;
+      String? tail;
+      if (body.startsWith('[')) {
+        final close = body.indexOf(']:');
+        if (close > 1) {
+          hostPart = body.substring(1, close).trim();
+          tail = body.substring(close + 2);
+        }
+      } else {
+        final colon = body.indexOf(':');
+        if (colon > 0) {
+          hostPart = body.substring(0, colon).trim();
+          tail = body.substring(colon + 1);
+        }
+      }
+      if (tail != null) {
+        final parts = _splitFirstN(tail, ':', 5);
+        if (parts.length == 5) {
+          final dtlsPort = _toInt(parts[0]);
+          if (dtlsPort != null && dtlsPort > 0) {
+            final passRaw = parts[3].trim();
+            final pass = Uri.decodeComponent(passRaw);
+            final hashesRaw = Uri.decodeComponent(parts[4].trim());
+            return buildWdtt(
+              server: hostPart,
+              port: dtlsPort,
+              pass: pass,
+              mode: scheme == 'csqtt' ? 'csqtt' : 'wg',
+              name: fragTag,
+              wgPort: _toInt(parts[1]),
+              localPort: _toInt(parts[2]),
+              hashes: _splitWdttHashes(hashesRaw),
+            );
+          }
+        }
+      }
+    }
+
+    // 5. Standard URI: wdtt://[pass@]host[:port]?pass=...&hashes=...&mode=...#remark
+    final normalized = trimmed.replaceFirst(RegExp(r'^(wdtt|csqtt)://', caseSensitive: false), 'https://');
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || uri.host.isEmpty) return null;
+    final query = uri.queryParameters;
+    final defaultPort = scheme == 'csqtt' ? 46000 : 56000;
+    final port = uri.port == 0 ? defaultPort : uri.port;
+    final pass = uri.userInfo.isNotEmpty
+        ? Uri.decodeComponent(uri.userInfo)
+        : (query['pass'] ?? query['password'] ?? query['id'] ?? '');
+    final rawMode = (query['mode'] ?? query['vpn'] ?? '').trim().toLowerCase();
+    final mode = scheme == 'csqtt'
+        ? (rawMode == 'csqtt_v1' ? 'csqtt_v1' : 'csqtt')
+        : (const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg');
+    return buildWdtt(
+      server: uri.host,
+      port: port,
+      pass: pass,
+      mode: mode,
+      name: _name(query, uri.fragment, ''),
+      rawPort: _toInt(query['raw_port'] ?? query['raw']),
+      obfs: query['obfs'],
+      did: query['did'] ?? query['device_id'],
+      hashes: _splitWdttHashes(query['hashes'] ?? query['hash']),
+      workers: _toInt(query['workers'] ?? query['streams']),
+      vkToken: query['token'] ?? query['vk_token'],
+      srtpMode: query['srtp_mode'] ?? query['srtp'],
+    );
+  }
+
+  List<Profile> _parseAmneziaVpnContainer(String raw, {String subscriptionId = ''}) {
+    var clean = raw.trim().replaceFirst(
+      RegExp(r'^(vpn|awg|amneziawg|wg|wireguard)://', caseSensitive: false),
+      '',
+    );
+    var frag = '';
+    final hashIdx = clean.indexOf('#');
+    if (hashIdx >= 0) {
+      try {
+        frag = Uri.decodeComponent(clean.substring(hashIdx + 1).trim());
+      } catch (_) {
+        frag = clean.substring(hashIdx + 1).trim();
+      }
+      clean = clean.substring(0, hashIdx).trim();
+    }
+    final norm = _normalizeBase64(clean);
+    if (norm.isEmpty) return const [];
+    List<int> bytes;
+    try {
+      bytes = base64.decode(norm);
+    } catch (_) {
+      return const [];
+    }
+    if (bytes.isEmpty) return const [];
+
+    String? decoded;
+    try {
+      final s = utf8.decode(bytes).trim();
+      if (s.startsWith('{') || s.startsWith('[') || looksLikeWireGuardConf(s)) {
+        decoded = s;
+      }
+    } catch (_) {}
+
+    String? tryDecodeBytes(List<int> rawBytes, List<int> Function(List<int>) decoder) {
+      try {
+        return utf8.decode(decoder(rawBytes));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // Qt qCompress (4-byte big-endian size header + zlib) -> zlib -> gzip -> raw deflate
+    decoded ??= (bytes.length > 6 ? tryDecodeBytes(bytes.sublist(4), zlib.decode) : null);
+    decoded ??= tryDecodeBytes(bytes, zlib.decode);
+    decoded ??= tryDecodeBytes(bytes, gzip.decode);
+    decoded ??= tryDecodeBytes(bytes, ZLibCodec(raw: true).decode);
+    decoded ??= (bytes.length > 4
+        ? tryDecodeBytes(bytes.sublist(4), ZLibCodec(raw: true).decode)
+        : null);
+    if (decoded == null || decoded.trim().isEmpty) return const [];
+
+    final parsed = parseMany(decoded, subscriptionId: subscriptionId);
+    if (parsed.isEmpty) return const [];
+    if (frag.isNotEmpty && parsed.length == 1) {
+      final p = parsed.first;
+      if (p.name == '${p.server}:${p.port}' || p.name.startsWith('amnezia') || p.name == 'proxy') {
+        return [
+          Profile.fromJson({...p.toJson(), 'name': frag}),
+        ];
+      }
+    }
+    return parsed;
+  }
+
+  Profile? _parseSurgeOrQxLine(String line, {String subscriptionId = ''}) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty ||
+        trimmed.startsWith('#') ||
+        trimmed.startsWith(';') ||
+        trimmed.startsWith('[') ||
+        trimmed.contains('://')) {
+      return null;
+    }
+    final eqIdx = trimmed.indexOf('=');
+    if (eqIdx <= 0) return null;
+    final lhs = trimmed.substring(0, eqIdx).trim();
+    final rhs = trimmed.substring(eqIdx + 1).trim();
+    if (lhs.isEmpty || rhs.isEmpty) return null;
+
+    final parts = rhs.split(',').map((s) => s.trim()).toList();
+    if (parts.isEmpty) return null;
+    final lhsLower = lhs.toLowerCase();
+    final isQx = const {'shadowsocks', 'ss', 'vmess', 'trojan', 'vless', 'http', 'socks5'}
+            .contains(lhsLower) &&
+        parts[0].contains(':');
+
+    final clashMap = <String, dynamic>{};
+    late final String protoType;
+    late final List<String> kvSlice;
+
+    if (isQx) {
+      final hp = _splitHostPort(parts[0], 0);
+      if (hp == null || hp.$1.isEmpty || hp.$2 <= 0) return null;
+      protoType = lhsLower == 'shadowsocks' ? 'ss' : lhsLower;
+      clashMap['type'] = protoType;
+      clashMap['server'] = hp.$1;
+      clashMap['port'] = hp.$2;
+      kvSlice = parts.sublist(1);
+    } else {
+      if (parts.length < 3) return null;
+      final rawProto = parts[0].toLowerCase();
+      final mappedProto = switch (rawProto) {
+        'ss' || 'shadowsocks' || 'custom' => 'ss',
+        'vmess' => 'vmess',
+        'vless' => 'vless',
+        'trojan' => 'trojan',
+        'hysteria2' || 'hy2' => 'hysteria2',
+        'tuic' || 'tuic-v5' => 'tuic',
+        'socks5' || 'socks5-tls' => 'socks5',
+        'http' || 'https' => 'http',
+        'anytls' => 'anytls',
+        _ => '',
+      };
+      if (mappedProto.isEmpty) return null;
+      final host = _cleanHost(parts[1]);
+      final port = _toInt(parts[2]);
+      if (host.isEmpty || port == null || port <= 0) return null;
+      protoType = mappedProto;
+      clashMap['name'] = lhs;
+      clashMap['type'] = mappedProto;
+      clashMap['server'] = host;
+      clashMap['port'] = port;
+      if (rawProto == 'https' || rawProto == 'socks5-tls') {
+        clashMap['tls'] = true;
+      }
+      var startIdx = 3;
+      if ((mappedProto == 'socks5' || mappedProto == 'http') &&
+          parts.length >= 5 &&
+          !parts[3].contains('=') &&
+          !parts[4].contains('=')) {
+        clashMap['username'] = parts[3];
+        clashMap['password'] = parts[4];
+        startIdx = 5;
+      }
+      kvSlice = parts.sublist(startIdx);
+    }
+
+    final wsOpts = <String, dynamic>{};
+    final wsHeaders = <String, String>{};
+    String? ssObfsMode;
+    String? ssObfsHost;
+    String? ssObfsPath;
+    var ssObfsTls = false;
+
+    for (final item in kvSlice) {
+      final sep = item.indexOf('=');
+      if (sep <= 0) continue;
+      final k = item.substring(0, sep).trim().toLowerCase();
+      final v = _unquoteYaml(item.substring(sep + 1).trim());
+      switch (k) {
+        case 'tag':
+          clashMap['name'] = v;
+        case 'encrypt-method':
+        case 'method':
+        case 'cipher':
+          if (protoType == 'ss' || (protoType == 'vmess' && !clashMap.containsKey('cipher'))) {
+            clashMap['cipher'] = v;
+          }
+        case 'password':
+        case 'passwd':
+          if (protoType == 'vmess' || protoType == 'vless') {
+            clashMap['uuid'] = v;
+          } else {
+            clashMap['password'] = v;
+          }
+        case 'username':
+        case 'user':
+          if (protoType == 'vmess' || protoType == 'vless') {
+            clashMap['uuid'] = v;
+          } else {
+            clashMap['username'] = v;
+          }
+        case 'uuid':
+        case 'id':
+          clashMap['uuid'] = v;
+        case 'ws':
+          if (_isTruthy(v)) {
+            if (protoType == 'ss') {
+              ssObfsMode = 'ws';
+            } else {
+              clashMap['network'] = 'ws';
+            }
+          }
+        case 'obfs':
+          final vl = v.toLowerCase();
+          if (protoType == 'ss') {
+            if (const {'http', 'tls', 'ws', 'wss'}.contains(vl)) {
+              if (vl == 'wss') ssObfsTls = true;
+              ssObfsMode = vl;
+            }
+          } else if (vl == 'ws' || vl == 'wss') {
+            clashMap['network'] = 'ws';
+            if (vl == 'wss') clashMap['tls'] = true;
+          } else if (vl == 'over-tls') {
+            clashMap['tls'] = true;
+          }
+        case 'ws-path':
+        case 'obfs-uri':
+        case 'path':
+          wsOpts['path'] = v;
+          ssObfsPath = v;
+        case 'obfs-host':
+          wsHeaders['Host'] = v;
+          ssObfsHost = v;
+          clashMap.putIfAbsent('sni', () => v);
+        case 'ws-headers':
+          for (final pair in v.split('|')) {
+            final c = pair.indexOf(':');
+            if (c > 0) {
+              wsHeaders[pair.substring(0, c).trim()] = pair.substring(c + 1).trim();
+            }
+          }
+        case 'tls':
+        case 'over-tls':
+          final enabled = _isTruthy(v);
+          if (protoType == 'ss' && enabled) ssObfsTls = true;
+          clashMap['tls'] = enabled;
+        case 'sni':
+        case 'tls-host':
+        case 'servername':
+          clashMap['sni'] = v;
+        case 'skip-cert-verify':
+        case 'tls-verification':
+          clashMap['skip-cert-verify'] =
+              k == 'tls-verification' ? (v == 'false' || v == '0' || v == 'no') : _isTruthy(v);
+        case 'alpn':
+          final arr = v
+              .split(RegExp(r'[,|]'))
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .toList();
+          if (arr.isNotEmpty) clashMap['alpn'] = arr;
+        case 'token':
+          clashMap['token'] = v;
+        case 'flow':
+          clashMap['flow'] = v;
+      }
+    }
+
+    if (protoType == 'ss' && ssObfsMode != null) {
+      if (ssObfsMode == 'http' || ssObfsMode == 'tls') {
+        clashMap['plugin'] = 'obfs-local';
+        clashMap['plugin-opts'] = {
+          'mode': ssObfsMode,
+          'host': ?ssObfsHost,
+        };
+      } else {
+        clashMap['plugin'] = 'v2ray-plugin';
+        clashMap['plugin-opts'] = {
+          'mode': 'websocket',
+          if (ssObfsTls) 'tls': true,
+          'host': ?ssObfsHost,
+          'path': ?ssObfsPath,
+        };
+      }
+    }
+    if (wsHeaders.isNotEmpty) wsOpts['headers'] = wsHeaders;
+    if (wsOpts.isNotEmpty) clashMap['ws-opts'] = wsOpts;
+    clashMap.putIfAbsent('name', () => '${clashMap['server']}:${clashMap['port']}');
+
+    final outbound = _convertClashProxy(0, clashMap);
+    if (outbound == null) return null;
+    return _outboundMapToProfile(outbound, subscriptionId: subscriptionId);
+  }
+
   // ---------------------------------------------------------------------------
   // Мультиформатный JSON: sing-box, Xray/V2Ray, SIP008
   // ---------------------------------------------------------------------------
@@ -1808,13 +2503,43 @@ class LinkParser {
         final p = _outboundMapToProfile(item, subscriptionId: subscriptionId);
         if (p != null) profiles.add(p);
       }
+      if (profiles.isNotEmpty) return profiles;
+      if (decoded is Map) {
+        const strKeys = [
+          'data',
+          'result',
+          'response',
+          'payload',
+          'subscription',
+          'config',
+          'awg_config',
+          'wg_config',
+          'links',
+          'url',
+        ];
+        for (final k in strKeys) {
+          final v = decoded[k];
+          if (v is String && v.trim().isNotEmpty) {
+            final nested = parseSubscription(v, subscriptionId: subscriptionId);
+            if (nested.isNotEmpty) return nested;
+          } else if (v is List) {
+            for (final item in v) {
+              if (item is String && item.trim().isNotEmpty) {
+                profiles.addAll(parseSubscription(item, subscriptionId: subscriptionId));
+              }
+            }
+            if (profiles.isNotEmpty) return profiles;
+          }
+        }
+      }
       return profiles;
     } catch (_) {
       return const [];
     }
   }
 
-  List<Map<String, dynamic>> _extractOutboundsFromJson(Object? val) {
+  List<Map<String, dynamic>> _extractOutboundsFromJson(Object? val, {int depth = 0}) {
+    if (depth > 4) return const [];
     if (val is List) {
       final res = <Map<String, dynamic>>[];
       for (var i = 0; i < val.length; i++) {
@@ -1823,6 +2548,12 @@ class LinkParser {
         final map = Map<String, dynamic>.from(item);
         if (map.containsKey('protocol')) {
           res.addAll(_convertXrayOutbound(i, map));
+        } else if (map['type'] is String &&
+            !map.containsKey('server_port') &&
+            map.containsKey('port') &&
+            map['server'] is String) {
+          final converted = _convertClashProxy(i, map);
+          if (converted != null) res.add(converted);
         } else if (map['type'] is String) {
           final ty = (map['type'] as String).toLowerCase();
           if (!const {'direct', 'block', 'dns', 'selector', 'urltest'}.contains(ty)) {
@@ -1830,6 +2561,9 @@ class LinkParser {
           }
         } else if (map['outbounds'] is List || map['endpoints'] is List) {
           res.addAll(_extractFromFullConfigObject(i, map));
+        } else {
+          final nested = _extractOutboundsFromJson(map, depth: depth + 1);
+          if (nested.isNotEmpty) res.addAll(nested);
         }
       }
       return res;
@@ -1865,7 +2599,26 @@ class LinkParser {
         return _extractFromFullConfigObject(0, map);
       }
       if (map.containsKey('type') || map.containsKey('protocol')) {
-        return _extractOutboundsFromJson([map]);
+        return _extractOutboundsFromJson([map], depth: depth + 1);
+      }
+      const wrapperKeys = [
+        'data',
+        'result',
+        'response',
+        'payload',
+        'configs',
+        'nodes',
+        'proxies',
+        'items',
+        'subscription',
+        'config',
+      ];
+      for (final k in wrapperKeys) {
+        final v = map[k];
+        if (v is Map || v is List) {
+          final res = _extractOutboundsFromJson(v, depth: depth + 1);
+          if (res.isNotEmpty) return res;
+        }
       }
     }
     return const [];
@@ -1953,7 +2706,12 @@ class LinkParser {
         if (chainOutbounds.isNotEmpty) {
           mainNode['detour'] = 'chain-${cfgIdx + 1}-$firstHopTag';
           mainNode['chain_outbounds'] = chainOutbounds;
+        } else {
+          mainNode.remove('detour');
         }
+      } else if (firstHopTag.isNotEmpty) {
+        // Не оставляем висячий detour на отфильтрованный direct/freedom или отсутствующий узел.
+        mainNode.remove('detour');
       }
 
       if (cfgRemarks.isNotEmpty) {
@@ -2165,7 +2923,7 @@ class LinkParser {
           if (s is! Map) continue;
           final addr = (s['address'] ?? '').toString();
           final port = _toInt(s['port']) ?? 443;
-          final pass = (s['password'] ?? settings['password'] ?? '').toString();
+          final pass = (s['password'] ?? settings['password'] ?? settings['auth'] ?? '').toString();
           if (addr.isEmpty) continue;
           final node = <String, dynamic>{
             'type': 'hysteria2',
@@ -2174,6 +2932,29 @@ class LinkParser {
             'server_port': port,
             'password': pass,
           };
+          final fm = stream?['finalmask'];
+          if (fm is Map && fm['udp'] is List) {
+            for (final u in fm['udp'] as List) {
+              if (u is! Map) continue;
+              final uTy = (u['type'] ?? '').toString().toLowerCase();
+              final us = u['settings'] is Map ? u['settings'] as Map : const {};
+              final obfsPw = (us['password'] ?? '').toString();
+              final ps = us['packetSize'] ?? us['packet_size'];
+              final r = ps != null ? _parsePacketSizeRange(ps.toString()) : null;
+              if (uTy == 'gecko' || r != null) {
+                node['obfs'] = {
+                  'type': 'gecko',
+                  if (obfsPw.isNotEmpty) 'password': obfsPw,
+                  if (r != null) ...{
+                    'min_packet_size': r.$1,
+                    'max_packet_size': r.$2,
+                  },
+                };
+              } else if (uTy == 'salamander' && obfsPw.isNotEmpty) {
+                node['obfs'] = {'type': 'salamander', 'password': obfsPw};
+              }
+            }
+          }
           attachStream(node, addr);
           out.add(node);
         }
@@ -2345,13 +3126,49 @@ class LinkParser {
     }
     flushBlock();
 
-    final out = <Profile>[];
+    final convertedNodes = <Map<String, dynamic>>[];
     for (var i = 0; i < entries.length; i++) {
       final outbound = _convertClashProxy(i, entries[i]);
-      if (outbound != null) {
-        final profile = _outboundMapToProfile(outbound, subscriptionId: subscriptionId);
-        if (profile != null) out.add(profile);
+      if (outbound != null) convertedNodes.add(outbound);
+    }
+    final byTag = <String, Map<String, dynamic>>{
+      for (final n in convertedNodes)
+        if ((n['tag'] ?? '').toString().trim().isNotEmpty) (n['tag'] as String).trim(): n,
+    };
+    final out = <Profile>[];
+    for (var i = 0; i < convertedNodes.length; i++) {
+      final node = Map<String, dynamic>.from(convertedNodes[i]);
+      final firstHop = (node['detour'] ?? '').toString().trim();
+      if (firstHop.isNotEmpty) {
+        if (byTag.containsKey(firstHop)) {
+          final chain = <Map<String, dynamic>>[];
+          final visited = <String>{};
+          var curr = firstHop;
+          while (curr.isNotEmpty && byTag.containsKey(curr) && visited.add(curr)) {
+            final hop = Map<String, dynamic>.from(byTag[curr]!);
+            hop['tag'] = 'clash-chain-${i + 1}-$curr';
+            final nextHop = (hop['detour'] ?? '').toString().trim();
+            if (nextHop.isNotEmpty && byTag.containsKey(nextHop)) {
+              hop['detour'] = 'clash-chain-${i + 1}-$nextHop';
+              curr = nextHop;
+            } else {
+              hop.remove('detour');
+              curr = '';
+            }
+            chain.add(hop);
+          }
+          if (chain.isNotEmpty) {
+            node['detour'] = 'clash-chain-${i + 1}-$firstHop';
+            node['chain_outbounds'] = chain;
+          } else {
+            node.remove('detour');
+          }
+        } else {
+          node.remove('detour');
+        }
       }
+      final profile = _outboundMapToProfile(node, subscriptionId: subscriptionId);
+      if (profile != null) out.add(profile);
     }
     return out;
   }
@@ -2588,10 +3405,11 @@ class LinkParser {
     }
 
     final tr = buildTransport();
+    Map<String, dynamic>? out;
     switch (ty) {
       case 'vless':
         final tls = buildTls(false);
-        return {
+        out = {
           'type': 'vless',
           'tag': tag,
           'server': server,
@@ -2603,7 +3421,7 @@ class LinkParser {
         };
       case 'vmess':
         final tls = buildTls(false);
-        return {
+        out = {
           'type': 'vmess',
           'tag': tag,
           'server': server,
@@ -2615,7 +3433,7 @@ class LinkParser {
         };
       case 'trojan':
         final tls = buildTls(true);
-        return {
+        out = {
           'type': 'trojan',
           'tag': tag,
           'server': server,
@@ -2626,47 +3444,137 @@ class LinkParser {
         };
       case 'ss':
       case 'shadowsocks':
-        return {
+        String? ssPlugin = p['plugin']?.toString().trim();
+        String? ssPluginOpts;
+        final rawPluginOpts = p['plugin-opts'] ?? p['plugin_opts'];
+        if (ssPlugin == 'obfs') ssPlugin = 'obfs-local';
+        if (rawPluginOpts is Map) {
+          final optsMap = Map<String, dynamic>.from(rawPluginOpts);
+          if (ssPlugin == 'obfs-local' || ssPlugin == 'simple-obfs') {
+            final parts = <String>[
+              if (optsMap['mode'] != null) 'obfs=${optsMap['mode']}',
+              if (optsMap['host'] != null) 'obfs-host=${optsMap['host']}',
+            ];
+            ssPluginOpts = parts.join(';');
+          } else {
+            final parts = <String>[
+              if (optsMap['mode'] != null) 'mode=${optsMap['mode']}',
+              if (optsMap['tls'] == true) 'tls',
+              if (optsMap['host'] != null) 'host=${optsMap['host']}',
+              if (optsMap['path'] != null) 'path=${optsMap['path']}',
+            ];
+            ssPluginOpts = parts.join(';');
+          }
+        } else if (rawPluginOpts is String && rawPluginOpts.isNotEmpty) {
+          ssPluginOpts = rawPluginOpts;
+        }
+        out = {
           'type': 'shadowsocks',
           'tag': tag,
           'server': server,
           'server_port': port,
           'method': (p['cipher'] ?? p['method'] ?? 'aes-256-gcm').toString(),
           'password': (p['password'] ?? '').toString(),
-          if (p['udp-over-tcp'] == true) 'udp_over_tcp': true,
+          if (ssPlugin != null && ssPlugin.isNotEmpty) 'plugin': ssPlugin,
+          if (ssPluginOpts != null && ssPluginOpts.isNotEmpty) 'plugin_opts': ssPluginOpts,
+          if (p['udp-over-tcp'] == true || p['uot'] == true) 'udp_over_tcp': true,
         };
       case 'hysteria2':
       case 'hy2':
         final tls = buildTls(true);
-        return {
+        final rawHy2Obfs = (p['obfs'] ?? '').toString().trim().toLowerCase();
+        final hy2ObfsPw = (p['obfs-password'] ?? p['obfs_password'] ?? '').toString();
+        var minPkt = _toInt(p['min-packet-size'] ?? p['min_packet_size']);
+        var maxPkt = _toInt(p['max-packet-size'] ?? p['max_packet-size']);
+        final psVal = p['packet-size'] ?? p['packet_size'];
+        if (psVal != null) {
+          final r = _parsePacketSizeRange(psVal.toString());
+          if (r != null) {
+            minPkt ??= r.$1;
+            maxPkt ??= r.$2;
+          }
+        }
+        Map<String, dynamic>? hy2Obfs;
+        if (rawHy2Obfs == 'gecko' || minPkt != null || maxPkt != null) {
+          hy2Obfs = {
+            'type': 'gecko',
+            if (hy2ObfsPw.isNotEmpty) 'password': hy2ObfsPw,
+            if (minPkt != null && minPkt > 0) 'min_packet_size': minPkt,
+            if (maxPkt != null && maxPkt > 0) 'max_packet_size': maxPkt,
+          };
+        } else if (rawHy2Obfs == 'salamander') {
+          hy2Obfs = {'type': 'salamander', 'password': hy2ObfsPw};
+        }
+        final hy2PortsRaw = (p['ports'] ?? p['mport'] ?? '').toString().trim();
+        final hy2Ports = hy2PortsRaw.isEmpty
+            ? const <String>[]
+            : hy2PortsRaw
+                .split(',')
+                .map((s) => s.trim().replaceAll('-', ':'))
+                .where((s) => s.isNotEmpty)
+                .toList();
+        final hy2Hop = _normalizeDurationString(p['hop-interval'] ?? p['hop_interval']);
+        final hy2Up = _parseMbps(p['up']);
+        final hy2Down = _parseMbps(p['down']);
+        out = {
           'type': 'hysteria2',
           'tag': tag,
           'server': server,
           'server_port': port,
           'password': (p['password'] ?? '').toString(),
-          if ((p['obfs'] ?? '').toString().toLowerCase() == 'salamander')
-            'obfs': {
-              'type': 'salamander',
-              'password': (p['obfs-password'] ?? '').toString(),
-            },
+          'obfs': ?hy2Obfs,
+          if (hy2Ports.isNotEmpty) 'server_ports': hy2Ports,
+          'hop_interval': ?hy2Hop,
+          if (hy2Up != null && hy2Up > 0) 'up_mbps': hy2Up,
+          if (hy2Down != null && hy2Down > 0) 'down_mbps': hy2Down,
+          'tls': ?tls,
+        };
+      case 'hysteria':
+      case 'hy':
+        final tls = buildTls(true);
+        final hyUp = _parseMbps(p['up']);
+        final hyDown = _parseMbps(p['down']);
+        out = {
+          'type': 'hysteria',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if ((p['auth-str'] ?? p['auth_str'] ?? p['auth'] ?? '').toString().isNotEmpty)
+            'auth_str': (p['auth-str'] ?? p['auth_str'] ?? p['auth']).toString(),
+          if ((p['obfs'] ?? '').toString().isNotEmpty) 'obfs': p['obfs'].toString(),
+          if (hyUp != null && hyUp > 0) 'up_mbps': hyUp,
+          if (hyDown != null && hyDown > 0) 'down_mbps': hyDown,
           'tls': ?tls,
         };
       case 'tuic':
         final tls = buildTls(true);
-        return {
+        final token = p['token']?.toString();
+        final uuid = (p['uuid'] ?? token ?? '').toString();
+        final pw = (p['password'] ?? token ?? '').toString();
+        final tuicHb = _normalizeDurationString(
+          p['heartbeat-interval'] ?? p['heartbeat_interval'] ?? p['heartbeat'],
+          treatLargeIntsAsMillis: p.containsKey('heartbeat-interval'),
+        );
+        out = {
           'type': 'tuic',
           'tag': tag,
           'server': server,
           'server_port': port,
-          'uuid': (p['uuid'] ?? '').toString(),
-          'password': (p['password'] ?? '').toString(),
-          if (p['congestion-controller'] != null)
-            'congestion_control': p['congestion-controller'].toString(),
-          if (p['udp-relay-mode'] != null)
-            'udp_relay_mode': p['udp-relay-mode'].toString(),
+          'uuid': uuid,
+          'password': pw,
+          if ((p['congestion-controller'] ?? p['congestion_control'] ?? '').toString().isNotEmpty)
+            'congestion_control': (p['congestion-controller'] ?? p['congestion_control']).toString(),
+          if (p['udp-relay-mode'] != null) 'udp_relay_mode': p['udp-relay-mode'].toString(),
+          if (p['reduce-rtt'] == true || p['fast-open'] == true || p['zero-rtt-handshake'] == true)
+            'zero_rtt_handshake': true,
+          if (p['udp-over-stream'] == true || p['udp_over_stream'] == true)
+            'udp_over_stream': true,
+          'heartbeat': ?tuicHb,
           'tls': ?tls,
         };
       case 'wireguard':
+      case 'amneziawg':
+      case 'awg':
         final addrs = <String>[];
         if ((p['ip'] ?? '').toString().isNotEmpty) {
           addrs.add(_formatWgCidr(p['ip'].toString()));
@@ -2679,19 +3587,25 @@ class LinkParser {
           'tag': tag,
           'server': server,
           'server_port': port,
-          'private_key': (p['private-key'] ?? '').toString(),
-          'peer_public_key': (p['public-key'] ?? '').toString(),
+          'private_key': (p['private-key'] ?? p['private_key'] ?? '').toString(),
+          'peer_public_key': (p['public-key'] ?? p['public_key'] ?? '').toString(),
           'local_address': addrs.isEmpty ? ['10.0.0.2/32'] : addrs,
           if (_toInt(p['mtu']) != null) 'mtu': _toInt(p['mtu']),
+          if ((p['pre-shared-key'] ?? p['preshared-key'] ?? p['pre_shared_key'] ?? '')
+              .toString()
+              .isNotEmpty)
+            'pre_shared_key':
+                (p['pre-shared-key'] ?? p['preshared-key'] ?? p['pre_shared_key']).toString(),
+          if (p['reserved'] != null) 'reserved': p['reserved'],
         };
         if (p['amnezia-wg-option'] is Map) {
           _extractAwgParams(Map<String, dynamic>.from(p['amnezia-wg-option'] as Map), node);
         }
         _extractAwgParams(p, node);
-        return node;
+        out = node;
       case 'anytls':
         final tls = buildTls(true);
-        return {
+        out = {
           'type': 'anytls',
           'tag': tag,
           'server': server,
@@ -2701,41 +3615,195 @@ class LinkParser {
         };
       case 'socks5':
       case 'socks':
-        return {
+        final tls = buildTls(false);
+        out = {
           'type': 'socks',
           'tag': tag,
           'server': server,
           'server_port': port,
           if (p['username'] != null) 'username': p['username'].toString(),
           if (p['password'] != null) 'password': p['password'].toString(),
+          'tls': ?tls,
         };
       case 'http':
-        return {
+      case 'https':
+        final tls = buildTls(ty == 'https');
+        out = {
           'type': 'http',
           'tag': tag,
           'server': server,
           'server_port': port,
           if (p['username'] != null) 'username': p['username'].toString(),
           if (p['password'] != null) 'password': p['password'].toString(),
-          if (p['tls'] == true) 'tls': buildTls(true),
+          'tls': ?tls,
+        };
+      case 'shadow-tls':
+      case 'shadowtls':
+        final tls = buildTls(true);
+        out = {
+          'type': 'shadowtls',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'version': _toInt(p['version']) ?? 3,
+          if (p['password'] != null) 'password': p['password'].toString(),
+          'tls': ?tls,
+        };
+      case 'mieru':
+        final mTr = (p['transport'] ?? 'TCP').toString().toUpperCase();
+        final pr = (p['port-range'] ?? '').toString().trim();
+        out = {
+          'type': 'mieru',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'username': (p['username'] ?? '').toString(),
+          'password': (p['password'] ?? '').toString(),
+          'transport': mTr == 'UDP' ? 'UDP' : 'TCP',
+          if (pr.isNotEmpty) 'server_ports': [pr.replaceAll('-', ':')],
+        };
+      case 'tg':
+      case 'mtproto':
+      case 'telegram':
+        out = {
+          'type': 'mtproto',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'secret': (p['secret'] ?? '').toString(),
+        };
+      case 'tewfai':
+        final tls = buildTls(true);
+        out = {
+          'type': 'tewfai',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'uuid': (p['uuid'] ?? '').toString(),
+          if (p['password'] != null) 'password': p['password'].toString(),
+          if (p['pqc'] == true) 'pqc': true,
+          if (p['fec'] == true) 'fec': true,
+          if (p['desync'] == true) 'desync': true,
+          'tls': ?tls,
+        };
+      case 'masque':
+        final tls = buildTls(true);
+        out = {
+          'type': 'masque',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (p['profile'] != null) 'profile': p['profile'].toString(),
+          if (p['vhttp'] != null) 'vhttp': p['vhttp'].toString(),
+          if ((p['private-key'] ?? p['private_key']) != null)
+            'private_key': (p['private-key'] ?? p['private_key']).toString(),
+          if ((p['public-key'] ?? p['public_key']) != null)
+            'public_key': (p['public-key'] ?? p['public_key']).toString(),
+          if (p['ip'] != null) 'ip': p['ip'].toString(),
+          if (p['ipv6'] != null) 'ipv6': p['ipv6'].toString(),
+          'tls': ?tls,
+        };
+      case 'trusttunnel':
+        final tls = buildTls(true);
+        out = {
+          'type': 'trusttunnel',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (p['username'] != null) 'username': p['username'].toString(),
+          if (p['password'] != null) 'password': p['password'].toString(),
+          'tls': ?tls,
         };
       case 'snell':
-        return {
+        final ver = _toInt(p['version']) ?? 5;
+        final obfsOpts = p['obfs-opts'] is Map ? p['obfs-opts'] as Map : const {};
+        final obfsMode = (obfsOpts['mode'] ?? p['obfs-opts.mode'] ?? p['obfs'] ?? '')
+            .toString()
+            .trim()
+            .toLowerCase();
+        final obfsHost =
+            (obfsOpts['host'] ?? p['obfs-opts.host'] ?? p['obfs-host'] ?? '').toString().trim();
+        out = {
           'type': 'snell',
           'tag': tag,
           'server': server,
           'server_port': port,
-          'psk': (p['psk'] ?? '').toString(),
-          'version': _toInt(p['version']) ?? 5,
+          'psk': (p['psk'] ?? p['password'] ?? '').toString(),
+          'version': (ver >= 4 && ver <= 6) ? ver : 5,
+          if ((obfsMode == 'http' || obfsMode == 'tls') && ver != 6)
+            'obfs': {
+              'mode': obfsMode,
+              if (obfsHost.isNotEmpty) 'host': obfsHost,
+            },
+          if (p['uot'] == true || p['udp-over-tcp'] == true || p['udp_over_tcp'] == true)
+            'udp_over_tcp': true,
+          if (p['reuse'] == true) 'reuse': true,
+        };
+      case 'sudoku':
+        final sKey = (p['key'] ?? p['password'] ?? '').toString();
+        final hMode = (p['http-mask-mode'] ?? p['http_mask_mode'])?.toString();
+        final hHost = (p['http-mask-host'] ?? p['http_mask_host'])?.toString();
+        final hPath = (p['http-mask-path'] ?? p['http_mask_path'] ?? p['path'])?.toString();
+        final hmBool = p['http-mask'] ?? p['http_mask'];
+        out = {
+          'type': 'sudoku',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          if (sKey.isNotEmpty) 'key': sKey,
+          if ((p['aead-method'] ?? p['aead_method'] ?? p['aead']) != null)
+            'aead': (p['aead-method'] ?? p['aead_method'] ?? p['aead']).toString(),
+          if (_toInt(p['padding-min'] ?? p['padding_min']) != null)
+            'padding_min': _toInt(p['padding-min'] ?? p['padding_min']),
+          if (_toInt(p['padding-max'] ?? p['padding_max']) != null)
+            'padding_max': _toInt(p['padding-max'] ?? p['padding_max']),
+          if ((p['table-type'] ?? p['table_type'] ?? p['ascii']) != null)
+            'table_type': (p['table-type'] ?? p['table_type'] ?? p['ascii']).toString(),
+          if (hmBool is bool) 'disable_http_mask': !hmBool,
+          if (hMode != null || hHost != null || hPath != null)
+            'http_mask': {
+              'mode': ?hMode,
+              'host': ?hHost,
+              'path_root': ?hPath,
+            },
+        };
+      case 'ssh':
+        out = {
+          'type': 'ssh',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'user': (p['username'] ?? p['user'] ?? 'root').toString(),
+          if (p['password'] != null) 'password': p['password'].toString(),
+          if ((p['private-key'] ?? p['private_key']) != null)
+            'private_key': (p['private-key'] ?? p['private_key']).toString(),
+          if ((p['client-version'] ?? p['client_version']) != null)
+            'client_version': (p['client-version'] ?? p['client_version']).toString(),
+        };
+      case 'openconnect':
+      case 'anyconnect':
+        final tls = buildTls(true);
+        out = {
+          'type': 'openconnect',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'flavor': (p['flavor'] ?? 'anyconnect').toString(),
+          if (p['username'] != null) 'username': p['username'].toString(),
+          if (p['password'] != null) 'password': p['password'].toString(),
+          if (p['cookie'] != null) 'cookie': p['cookie'].toString(),
+          'tls': ?tls,
         };
       case 'naive':
         final tls = buildTls(true);
+        tls?.remove('insecure');
+        tls?.remove('disable_sni');
         final isQuic = p['quic'] == true ||
             _isTruthy(p['quic']?.toString()) ||
             (p['network'] ?? '').toString().toLowerCase() == 'quic' ||
             (p['network'] ?? '').toString().toLowerCase() == 'h3' ||
             (p['network'] ?? '').toString().toLowerCase() == 'udp';
-        return {
+        out = {
           'type': 'naive',
           'tag': tag,
           'server': server,
@@ -2752,6 +3820,12 @@ class LinkParser {
       default:
         return null;
     }
+    final detour = (p['dialer-proxy'] ?? p['detour'] ?? '').toString().trim();
+    if (detour.isNotEmpty &&
+        !const {'direct', 'reject', 'block'}.contains(detour.toLowerCase())) {
+      out['detour'] = detour;
+    }
+    return out;
   }
 
   /// Превращает канонический JSON outbound `tachyon-core` в модель `Profile`.
@@ -3095,6 +4169,75 @@ class LinkParser {
   List<String> _splitCsv(String? raw) {
     if (raw == null || raw.trim().isEmpty) return const [];
     return raw.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList(growable: false);
+  }
+
+  List<String> _splitWdttHashes(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return const [];
+    return raw
+        .split(RegExp(r'[,;\s+]+'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  List<String> _splitFirstN(String s, String sep, int n) {
+    final res = <String>[];
+    var rest = s;
+    for (var i = 0; i < n - 1; i++) {
+      final idx = rest.indexOf(sep);
+      if (idx < 0) return [s];
+      res.add(rest.substring(0, idx));
+      rest = rest.substring(idx + sep.length);
+    }
+    res.add(rest);
+    return res;
+  }
+
+  (int, int)? _parsePacketSizeRange(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+    final sep = s.indexOf('-');
+    if (sep >= 0) {
+      final lo = int.tryParse(s.substring(0, sep).trim());
+      final hi = int.tryParse(s.substring(sep + 1).trim());
+      if (lo != null && hi != null && lo > 0 && hi >= lo) return (lo, hi);
+      return null;
+    }
+    final single = int.tryParse(s);
+    if (single != null && single > 0) return (single, single);
+    return null;
+  }
+
+  String? _normalizeDurationString(Object? raw, {bool treatLargeIntsAsMillis = false}) {
+    if (raw == null) return null;
+    if (raw is num) {
+      final v = raw.toInt();
+      if (v <= 0) return null;
+      if (treatLargeIntsAsMillis) {
+        final secs = v >= 1000 ? v ~/ 1000 : 1;
+        return '${secs}s';
+      }
+      return '${v}s';
+    }
+    final s = raw.toString().trim();
+    if (s.isEmpty) return null;
+    final asInt = int.tryParse(s);
+    if (asInt != null) {
+      if (asInt <= 0) return null;
+      if (treatLargeIntsAsMillis) {
+        final secs = asInt >= 1000 ? asInt ~/ 1000 : 1;
+        return '${secs}s';
+      }
+      return '${asInt}s';
+    }
+    return s;
+  }
+
+  int? _parseMbps(Object? raw) {
+    if (raw == null) return null;
+    if (raw is num) return raw.toInt();
+    final m = RegExp(r'(\d+)').firstMatch(raw.toString());
+    return m == null ? null : int.tryParse(m.group(1)!);
   }
 
   bool _isTruthy(String? val) {

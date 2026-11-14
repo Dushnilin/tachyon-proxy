@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tachyon_proxy/core/models/app_rules.dart';
@@ -1451,6 +1453,282 @@ proxies:
       // Профиль VLESS получает packet_encoding: xudp и MTU 1400
       final vlessOut = _vlessProfile().toOutbound();
       expect(vlessOut['packet_encoding'], 'xudp');
+    });
+  });
+
+  group('интероп с tachyon-core', () {
+    final parser = LinkParser();
+
+    test('naive outbound не содержит tls.insecure и tls.disable_sni', () {
+      final fromUri = parser.parse(
+        'naive+https://u:p@edge.example:443?insecure=1&sni=edge.example#Naive1',
+      );
+      expect(fromUri, isNotNull);
+      final uriTls = fromUri!.toOutbound()['tls'] as Map<String, dynamic>;
+      expect(uriTls.containsKey('insecure'), isFalse);
+      expect(uriTls.containsKey('disable_sni'), isFalse);
+
+      final manual = Profile(
+        id: 'n1',
+        name: 'n1',
+        type: 'naive',
+        server: 'edge.example',
+        port: 443,
+        password: 'p',
+        allowInsecure: true,
+        extra: {
+          'username': 'u',
+          'tls': {'enabled': true, 'insecure': true, 'disable_sni': true},
+        },
+      );
+      final out = manual.toOutbound();
+      final tls = out['tls'] as Map<String, dynamic>;
+      expect(tls['enabled'], isTrue);
+      expect(tls.containsKey('insecure'), isFalse);
+      expect(tls.containsKey('disable_sni'), isFalse);
+    });
+
+    test('snell сохраняет версии 4/5/6 и структурированный obfs для v4/v5', () {
+      final v5 = parser.parse(
+        'snell://psk-5@snell.example:6160?version=5&obfs=tls&obfs-host=bing.com&uot=1#Snell5',
+      );
+      expect(v5, isNotNull);
+      final out5 = v5!.toOutbound();
+      expect(out5['version'], 5);
+      expect(out5['obfs'], {'mode': 'tls', 'host': 'bing.com'});
+      expect(out5['udp_over_tcp'], isTrue);
+      expect(out5.containsKey('tls'), isFalse);
+
+      final v6 = parser.parse('snell://psk-6@snell.example:6161?version=6&mode=quic#Snell6');
+      expect(v6, isNotNull);
+      final out6 = v6!.toOutbound();
+      expect(out6['version'], 6);
+      expect(out6['mode'], 'quic');
+      expect(out6.containsKey('obfs'), isFalse);
+      expect(out6.containsKey('udp_over_tcp'), isFalse);
+    });
+
+    test('wdtt / qwdtt / csqtt / sudoku разбираются и сериализуются без невалидного tls', () {
+      final qwdtt = parser.parse(
+        'qwdtt://config?ip=198.51.100.10&dtls=56000&raw=56003&mode=wg&obfs=video&hashes=h1,h2&streams=8&pass=a&b@c#QWDTT',
+      );
+      expect(qwdtt, isNotNull);
+      expect(qwdtt!.type, 'wdtt');
+      expect(qwdtt.password, 'a&b@c');
+      expect(qwdtt.hasTls, isFalse);
+      final qOut = qwdtt.toOutbound();
+      expect(qOut.containsKey('tls'), isFalse);
+      expect(qOut['server_port'], 56000);
+      expect(qOut['raw_port'], 56003);
+      expect(qOut['obfs'], 'video');
+      expect(qOut['hashes'], ['h1', 'h2']);
+      expect(qOut['workers'], 8);
+
+      final csqtt = parser.parse(
+        'csqtt://connect?v=2&host=198.51.100.20&peer=46000&password=pw1&hashes=a+b&workers=4&srtp_mode=auto#CS',
+      );
+      expect(csqtt, isNotNull);
+      expect(csqtt!.toOutbound()['mode'], 'csqtt');
+      expect(csqtt.toOutbound()['hashes'], ['a', 'b']);
+
+      final colonWdtt = parser.parse('wdtt://198.51.100.30:56000:51820:40000:pw2:h1,h2#Colon');
+      expect(colonWdtt, isNotNull);
+      expect(colonWdtt!.toOutbound()['wg_port'], 51820);
+      expect(colonWdtt.toOutbound()['local_port'], 40000);
+
+      final roundTrip = parser.parse(qwdtt.toShareUri());
+      expect(roundTrip, isNotNull);
+      expect(roundTrip!.type, 'wdtt');
+      expect(roundTrip.password, 'a&b@c');
+
+      final sudoku = parser.parse(
+        'sudoku://key-123@srv.example:8443?table_type=prefer_ascii&disable_http_mask=true&http_mask_mode=auto&security=tls&sni=srv.example#Sudoku1',
+      );
+      expect(sudoku, isNotNull);
+      expect(sudoku!.type, 'sudoku');
+      final sOut = sudoku.toOutbound();
+      expect(sOut['uuid'], 'key-123');
+      expect(sOut['table_type'], 'prefer_ascii');
+      expect(sOut['disable_http_mask'], isTrue);
+      expect((sOut['tls'] as Map)['enabled'], isTrue);
+    });
+
+    test('vpn:// Amnezia qCompress контейнер корректно распаковывается', () {
+      const wgIni = '[Interface]\n'
+          'PrivateKey = privkey123=\n'
+          'Address = 10.7.0.2/32\n'
+          'MTU = 1360\n'
+          'Jc = 4\n'
+          '[Peer]\n'
+          'PublicKey = pubkey456=\n'
+          'Endpoint = 198.51.100.40:51820\n';
+      final rawBytes = utf8.encode(wgIni);
+      final compressed = zlib.encode(rawBytes);
+      final header = ByteData(4)..setUint32(0, rawBytes.length, Endian.big);
+      final payload = [...header.buffer.asUint8List(), ...compressed];
+      final link = 'vpn://${base64Url.encode(payload).replaceAll('=', '')}#AmneziaNode';
+
+      final list = parser.parseMany(link);
+      expect(list, hasLength(1));
+      expect(list.first.type, 'wireguard');
+      expect(list.first.server, '198.51.100.40');
+      expect(list.first.extra['jc'], 4);
+      expect(list.first.extra['mtu'], 1360);
+    });
+
+    test('Surge и Quantumult X строки разбираются в профили', () {
+      const text = 'HK-SS = ss, 203.0.113.1, 8388, encrypt-method=aes-256-gcm, password=secret, obfs=tls, obfs-host=cdn.example\n'
+          'vmess = 203.0.113.2:443, method=chacha20-ietf-poly1305, password=uuid-qx, obfs=ws, obfs-host=ws.example, obfs-uri=/ws, tls=true, tag=QX-Node';
+      final list = parser.parseMany(text);
+      expect(list, hasLength(2));
+      expect(list[0].type, 'shadowsocks');
+      expect(list[0].name, 'HK-SS');
+      expect(list[0].extra['plugin'], 'obfs-local');
+      expect(list[1].type, 'vmess');
+      expect(list[1].name, 'QX-Node');
+      expect(list[1].transport, 'ws');
+    });
+
+    test('JSON-обёртки, Clash-в-JSON, удаление висячего detour и Clash YAML dialer-proxy + hy2 gecko', () {
+      final wrappedJson = jsonEncode({
+        'data': {
+          'nodes': [
+            {
+              'name': 'ClashJson',
+              'type': 'ss',
+              'server': '203.0.113.5',
+              'port': 8388,
+              'cipher': '2022-blake3-aes-128-gcm',
+              'password': 'pw',
+            },
+          ],
+        },
+      });
+      final wrappedProfiles = parser.parseMany(wrappedJson);
+      expect(wrappedProfiles, hasLength(1));
+      expect(wrappedProfiles.first.type, 'shadowsocks');
+      expect(wrappedProfiles.first.port, 8388);
+
+      final danglingCfg = jsonEncode({
+        'outbounds': [
+          {
+            'type': 'vless',
+            'tag': 'Main',
+            'server': '203.0.113.6',
+            'server_port': 443,
+            'uuid': 'u1',
+            'detour': 'direct',
+          },
+          {'type': 'direct', 'tag': 'direct'},
+        ],
+      });
+      final cleaned = parser.parseMany(danglingCfg);
+      expect(cleaned, hasLength(1));
+      expect(cleaned.first.toOutbound().containsKey('detour'), isFalse);
+
+      const clashYaml = '''
+proxies:
+  - name: Relay
+    type: socks5
+    server: 198.51.100.1
+    port: 1080
+  - name: HyGecko
+    type: hy2
+    server: 198.51.100.2
+    port: 443
+    password: hy-pw
+    obfs: gecko
+    obfs-password: g-pw
+    packet-size: 512-1200
+    hop-interval: 30
+    up: 100 Mbps
+    down: 200 Mbps
+    dialer-proxy: Relay
+  - name: TuicNode
+    type: tuic
+    server: 198.51.100.3
+    port: 443
+    uuid: u-tuic
+    password: p-tuic
+    reduce-rtt: true
+    heartbeat-interval: 10000
+''';
+      final clashList = parser.parseMany(clashYaml);
+      expect(clashList, hasLength(3));
+      final hy = clashList.firstWhere((p) => p.name == 'HyGecko');
+      final hyOut = hy.toOutbound();
+      expect(hyOut['hop_interval'], '30s');
+      expect(hyOut['up_mbps'], 100);
+      expect(hyOut['down_mbps'], 200);
+      expect(hyOut['obfs'], {
+        'type': 'gecko',
+        'password': 'g-pw',
+        'min_packet_size': 512,
+        'max_packet_size': 1200,
+      });
+      expect(hyOut['detour'], isNotNull);
+      expect(hy.extra['chain_outbounds'], isA<List>());
+
+      final tuicOut = clashList.firstWhere((p) => p.name == 'TuicNode').toOutbound();
+      expect(tuicOut['zero_rtt_handshake'], isTrue);
+      expect(tuicOut['heartbeat'], '10s');
+    });
+
+    test('MTProto ee-префикс извлекает SNI и auto: группа с WireGuard ограничивает TUN MTU', () {
+      const domainHex = '676f6f676c652e636f6d'; // google.com
+      final mt = parser.parse(
+        'tg://proxy?server=203.0.113.9&port=443&secret=ee00112233445566778899aabbccddeeff$domainHex#MT',
+      );
+      expect(mt, isNotNull);
+      expect(mt!.sni, 'google.com');
+      expect((mt.toOutbound()['tls'] as Map)['server_name'], 'google.com');
+
+      const autoGroup = Profile(
+        id: 'auto:wg',
+        name: 'Автовыбор',
+        type: 'urltest',
+        server: 'auto',
+        port: 443,
+      );
+      final wgNode = Profile(
+        id: 'wg1',
+        name: 'WG1',
+        type: 'wireguard',
+        server: '198.51.100.50',
+        port: 51820,
+        subscriptionId: 'wg',
+        extra: const {
+          'private_key': 'priv=',
+          'peer_public_key': 'pub=',
+          'local_address': ['10.0.0.2/32'],
+          'mtu': 1340,
+        },
+      );
+      final vlessNode = Profile(
+        id: 'vl1',
+        name: 'VL1',
+        type: 'vless',
+        server: '203.0.113.10',
+        port: 443,
+        uuid: 'u1',
+        subscriptionId: 'wg',
+      );
+      final cfg = RuntimeConfig(
+        profile: autoGroup,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        mtu: 9000,
+        subscriptions: const [
+          SubscriptionEntry(id: 'wg', name: 'WG Sub', url: 'https://example.com/sub'),
+        ],
+        extraProfiles: [vlessNode, wgNode],
+      );
+      expect(cfg.effectiveTunMtu, 1340);
+      final tun = (cfg.toJson()['inbounds'] as List).cast<Map<String, dynamic>>().firstWhere(
+            (i) => i['tag'] == 'tun-in',
+          );
+      expect(tun['mtu'], 1340);
     });
   });
 }

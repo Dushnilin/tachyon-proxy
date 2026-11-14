@@ -144,7 +144,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.0.20';
+  static const String appVersion = '0.1.0';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -1414,17 +1414,19 @@ class AppController extends ChangeNotifier {
           ? sub.customHwid.trim()
           : globalHwid;
 
-      const userAgents = [
-        'Tachyon/0.0.17 (Android; compatible; sing-box 1.14.3; HiddifyNext)',
-        'v2rayNG/1.8.29 (Linux; Android)',
+      final userAgents = [
+        'Tachyon/$appVersion (Android; compatible; sing-box 1.14.3; HiddifyNext)',
+        'HiddifyNext/2.5.7 (android) like ClashMeta v2ray',
+        'v2rayNG/1.9.34 (Linux; Android)',
         'Happ/3.9.2 (Android; compatible; sing-box; Mihomo)',
-        'v2rayTun/1.8.20 (Android)',
         'ClashMetaForAndroid/2.11.2.Meta',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
       ];
 
       final parser = LinkParser();
       List<Profile> fresh = const [];
       HttpClientResponse? response;
+      String? fetchedBody;
       var lastStatusCode = 0;
       var gotHtml = false;
       var targetSubUrl = sub.url.trim();
@@ -1476,10 +1478,10 @@ class AppController extends ChangeNotifier {
                 request.headers.set('User-Agent', ua);
                 request.headers.set('Accept', 'application/json, text/plain, */*');
                 request.headers.set('Accept-Encoding', 'gzip, deflate');
-                request.headers.set('X-Hwid', hwid);
-                request.headers.set('x-device-os', 'Android');
-                request.headers.set('x-ver-os', '14');
-                request.headers.set('x-device-model', 'Android');
+                request.headers.set('X-HWID', hwid);
+                request.headers.set('X-Device-OS', 'Android');
+                request.headers.set('X-Ver-OS', '14');
+                request.headers.set('X-Device-Model', 'Android');
                 request.followRedirects = false;
                 attemptResp = await request.close().timeout(
                       Duration(seconds: viaProxy ? 12 : 15),
@@ -1613,6 +1615,7 @@ class AppController extends ChangeNotifier {
               if (parsed.isNotEmpty) {
                 fresh = parsed;
                 response = attemptResp;
+                fetchedBody = body;
                 break;
               }
             } catch (_) {
@@ -1660,13 +1663,78 @@ class AppController extends ChangeNotifier {
         return 0;
       }
 
-      // Парсим метаданные подписки (Subscription-Userinfo, Profile-Title, Support-Url)
+      // Парсим метаданные подписки (HTTP-заголовки + строковые комментарии #profile-title, #subscription-userinfo, #support-url)
+      String decodeMetaValue(String raw) {
+        final v = raw.trim();
+        if (v.isEmpty) return '';
+        if (v.toLowerCase().startsWith('base64:')) {
+          try {
+            var b64 = v.substring(7).trim().replaceAll('-', '+').replaceAll('_', '/');
+            final mod = b64.length % 4;
+            if (mod > 1) b64 = b64.padRight(b64.length + (4 - mod), '=');
+            return utf8.decode(base64.decode(b64), allowMalformed: true).replaceAll(RegExp(r'\s+'), ' ').trim();
+          } catch (_) {}
+        }
+        if (v.toLowerCase().startsWith('=?utf-8?b?')) {
+          final end = v.lastIndexOf('?=');
+          if (end > 10) {
+            try {
+              var b64 = v.substring(10, end).trim().replaceAll('-', '+').replaceAll('_', '/');
+              final mod = b64.length % 4;
+              if (mod > 1) b64 = b64.padRight(b64.length + (4 - mod), '=');
+              return utf8.decode(base64.decode(b64), allowMalformed: true).replaceAll(RegExp(r'\s+'), ' ').trim();
+            } catch (_) {}
+          }
+        }
+        if (v.contains('%') && !v.toLowerCase().startsWith('http://') && !v.toLowerCase().startsWith('https://')) {
+          try {
+            return Uri.decodeComponent(v).replaceAll(RegExp(r'\s+'), ' ').trim();
+          } catch (_) {}
+        }
+        return v.replaceAll(RegExp(r'\s+'), ' ').trim();
+      }
+
+      String? bodyUserInfo;
+      String? bodyProfileTitle;
+      String? bodySupportUrl;
+      String? bodyWebUrl;
+      void scanMetaComments(String text) {
+        for (final rawLine in text.split(RegExp(r'[\r\n]+'))) {
+          final line = rawLine.trim();
+          if (!line.startsWith('#') && !line.startsWith('//')) continue;
+          final clean = line.startsWith('//') ? line.substring(2).trim() : line.substring(1).trim();
+          final colon = clean.indexOf(':');
+          if (colon <= 0) continue;
+          final k = clean.substring(0, colon).trim().toLowerCase();
+          final v = clean.substring(colon + 1).trim();
+          if (v.isEmpty) continue;
+          if (k == 'subscription-userinfo' && bodyUserInfo == null) bodyUserInfo = v;
+          if (k == 'profile-title' && bodyProfileTitle == null) bodyProfileTitle = v;
+          if (k == 'support-url' && bodySupportUrl == null) bodySupportUrl = v;
+          if (k == 'profile-web-page-url' && bodyWebUrl == null) bodyWebUrl = v;
+        }
+      }
+      if (fetchedBody != null && fetchedBody!.isNotEmpty) {
+        scanMetaComments(fetchedBody!);
+        if (bodyUserInfo == null && bodyProfileTitle == null && !fetchedBody!.trimLeft().startsWith('{')) {
+          try {
+            var b64 = fetchedBody!.trim().replaceAll('-', '+').replaceAll('_', '/');
+            final mod = b64.length % 4;
+            if (mod > 1) {
+              b64 = b64.padRight(b64.length + (4 - mod), '=');
+              scanMetaComments(utf8.decode(base64.decode(b64), allowMalformed: true));
+            }
+          } catch (_) {}
+        }
+      }
+
       int uploadBytes = (nativeUserInfo?['upload'] as num?)?.toInt() ?? sub.uploadBytes;
       int downloadBytes = (nativeUserInfo?['download'] as num?)?.toInt() ?? sub.downloadBytes;
       int totalBytes = (nativeUserInfo?['total'] as num?)?.toInt() ?? sub.totalBytes;
       int expireUnix = (nativeUserInfo?['expire'] as num?)?.toInt() ?? sub.expireUnix;
       final userInfo = response?.headers.value('subscription-userinfo') ??
           response?.headers.value('Subscription-Userinfo') ??
+          bodyUserInfo ??
           '';
       if (userInfo.isNotEmpty) {
         for (final part in userInfo.split(';')) {
@@ -1685,17 +1753,17 @@ class AppController extends ChangeNotifier {
       if (parsedTitle.isEmpty) {
         final rawTitle = response?.headers.value('profile-title') ??
             response?.headers.value('Profile-Title') ??
+            bodyProfileTitle ??
             '';
-        if (rawTitle.startsWith('base64:')) {
-          try {
-            parsedTitle = utf8.decode(base64.decode(rawTitle.substring(7).trim()));
-          } catch (_) {}
-        } else if (rawTitle.isNotEmpty) {
-          parsedTitle = rawTitle.trim();
+        final decodedTitle = decodeMetaValue(rawTitle);
+        if (decodedTitle.isNotEmpty) {
+          parsedTitle = decodedTitle;
         }
       }
       final supportUrl = response?.headers.value('support-url') ??
           response?.headers.value('profile-web-page-url') ??
+          bodySupportUrl ??
+          bodyWebUrl ??
           sub.supportUrl;
 
       // Заменяем старые профили этой подписки свежими (сохраняя пользовательские network_scope)
@@ -1720,13 +1788,48 @@ class AppController extends ChangeNotifier {
                   p,
             ];
 
+      List<Map<String, dynamic>> buildSubOutboundsForCache(List<Profile> list) {
+        final out = <Map<String, dynamic>>[];
+        final usedTags = <String>{};
+        String uniqueTag(String raw) {
+          final base = raw.trim().isEmpty ? 'proxy-node' : raw.trim();
+          var cand = base;
+          var n = 2;
+          while (!usedTags.add(cand)) {
+            cand = '$base #$n';
+            n++;
+          }
+          return cand;
+        }
+
+        for (final p in list) {
+          final node = p.toOutbound(tag: uniqueTag(p.name));
+          final rawChain = p.extra['chain_outbounds'];
+          if (rawChain is List && rawChain.isNotEmpty) {
+            final chainTags = <String>{};
+            for (final hop in rawChain.whereType<Map>()) {
+              final h = normalizeOutboundNode(Map<String, dynamic>.from(hop));
+              final ht = (h['tag'] ?? '').toString().trim();
+              if (ht.isNotEmpty && usedTags.add(ht)) {
+                chainTags.add(ht);
+                out.add(h);
+              }
+            }
+            if (chainTags.isEmpty && !usedTags.contains(node['detour'])) {
+              node.remove('detour');
+            }
+          } else {
+            node.remove('detour');
+          }
+          out.add(node);
+        }
+        return out;
+      }
+
       final prevSubOutboundsJson = jsonEncode(
-        _settings.profiles
-            .where((p) => p.subscriptionId == subId)
-            .map((p) => p.toOutbound(tag: p.name))
-            .toList(),
+        buildSubOutboundsForCache(_settings.profiles.where((p) => p.subscriptionId == subId).toList()),
       );
-      final nextSubOutboundsList = scopedFresh.map((p) => p.toOutbound(tag: p.name)).toList();
+      final nextSubOutboundsList = buildSubOutboundsForCache(scopedFresh);
       final nextSubOutboundsJson = jsonEncode(nextSubOutboundsList);
       final nodesChanged = prevSubOutboundsJson != nextSubOutboundsJson;
 
@@ -3260,10 +3363,22 @@ class AppController extends ChangeNotifier {
           if (!sel.id.startsWith('auto:') && sel.type != 'urltest') {
             _pings[sel.id] = result;
             _bumpServerRevision(sel.id);
-          } else if (_activeBalancerWinner != null) {
-            final winnerId = _activeBalancerWinner!.id;
-            _pings[winnerId] = result;
-            _bumpServerRevision(winnerId);
+          } else {
+            if (_activeBalancerWinner == null && _tunnel.status.isActive) {
+              unawaited(bridge.stats().then((st) {
+                if (_syncBalancerTelemetry(st?.balancer) && _activeBalancerWinner != null) {
+                  final winnerId = _activeBalancerWinner!.id;
+                  _pings[winnerId] = result;
+                  _bumpServerRevision(winnerId);
+                  notifyListeners();
+                }
+              }));
+            }
+            if (_activeBalancerWinner != null) {
+              final winnerId = _activeBalancerWinner!.id;
+              _pings[winnerId] = result;
+              _bumpServerRevision(winnerId);
+            }
           }
         }
         if (_settings.balancer.multiServiceEnabled) {
@@ -3944,6 +4059,11 @@ class AppController extends ChangeNotifier {
       ]);
     }
 
+    exts.add(const [
+      0x00, 0x10, 0x00, 0x0e, 0x00, 0x0c,
+      0x02, 0x68, 0x32,
+      0x08, 0x68, 0x74, 0x74, 0x70, 0x2f, 0x31, 0x2e, 0x31,
+    ]);
     exts.add(const [0x00, 0x17, 0x00, 0x00, 0xff, 0x01, 0x00, 0x01, 0x00]);
     exts.add(const [
       0x00, 0x0a, 0x00, 0x08, 0x00, 0x06,
@@ -4075,50 +4195,68 @@ class AppController extends ChangeNotifier {
           hopTransport == 'quic' ||
           (hopType == 'naive' && hopQuic);
 
-      // Резолвим IP заранее вне замера RTT
-      InternetAddress? resolvedIp = InternetAddress.tryParse(targetHost);
-      if (resolvedIp == null) {
+      // Резолвим IP заранее вне замера RTT (IPv4 приоритетнее IPv6 для dual-stack сетей)
+      final targetAddresses = <InternetAddress>[];
+      final parsedIp = InternetAddress.tryParse(targetHost);
+      if (parsedIp != null) {
+        targetAddresses.add(parsedIp);
+      } else {
         final resolved = await InternetAddress.lookup(targetHost)
             .timeout(const Duration(milliseconds: 2000));
-        if (resolved.isNotEmpty) {
-          resolvedIp = resolved.first;
-        }
+        targetAddresses.addAll(resolved.where((a) => a.type == InternetAddressType.IPv4));
+        targetAddresses.addAll(resolved.where((a) => a.type == InternetAddressType.IPv6));
       }
 
       Future<int> probeTcpTls() async {
-        final Object connectTarget = resolvedIp ?? targetHost;
-        try {
-          final sw = Stopwatch()..start();
-          socket = await Socket.connect(
-            connectTarget,
-            targetPort,
-            timeout: const Duration(milliseconds: 2200),
-          );
-          sw.stop();
-          final tcpMs = sw.elapsedMilliseconds.clamp(1, 9999);
+        final targets = targetAddresses.isEmpty
+            ? <Object>[targetHost]
+            : targetAddresses.take(2).toList();
+        for (final connectTarget in targets) {
+          Socket? attemptSocket;
+          try {
+            final sw = Stopwatch()..start();
+            attemptSocket = await Socket.connect(
+              connectTarget,
+              targetPort,
+              timeout: const Duration(milliseconds: 2200),
+            );
+            socket = attemptSocket;
+            sw.stop();
+            final tcpMs = sw.elapsedMilliseconds.clamp(1, 9999);
 
-          if (useTlsProbe) {
-            final tlsSw = Stopwatch()..start();
-            socket!.add(_buildTlsClientHello(probeSni));
-            final chunk = await socket!.first.timeout(const Duration(milliseconds: 2200));
-            tlsSw.stop();
-            if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
-              return tcpMs;
+            if (useTlsProbe) {
+              attemptSocket.add(_buildTlsClientHello(probeSni));
+              final chunk = await attemptSocket.first.timeout(const Duration(milliseconds: 2200));
+              if (chunk.length >= 2 && chunk[0] == 0x16 && chunk[1] == 0x03) {
+                return tcpMs;
+              }
+              attemptSocket.destroy();
+              socket = null;
+              continue;
             }
-            return -1;
+            return tcpMs;
+          } catch (_) {
+            attemptSocket?.destroy();
+            if (identical(socket, attemptSocket)) socket = null;
           }
-          return tcpMs;
-        } catch (_) {
-          return -1;
         }
+        return -1;
       }
 
-      if (isQuicProbe && resolvedIp != null) {
-        result = await _probeQuicLatency(resolvedIp, targetPort);
+      Future<int> probeQuicTargets() async {
+        for (final addr in targetAddresses.take(2)) {
+          final r = await _probeQuicLatency(addr, targetPort);
+          if (r > 0) return r;
+        }
+        return -1;
+      }
+
+      if (isQuicProbe && targetAddresses.isNotEmpty) {
+        result = await probeQuicTargets();
         if (result < 0 && hopType == 'naive') {
           result = await probeTcpTls();
         }
-      } else if (hopType == 'naive' && resolvedIp != null) {
+      } else if (hopType == 'naive' && targetAddresses.isNotEmpty) {
         // Для NaiveProxy запускаем QUIC (UDP) и TCP+TLS пробу параллельно:
         // первый успешный ответ побеждает без ожидания таймаута второго стека.
         final completer = Completer<int>();
@@ -4132,11 +4270,17 @@ class AppController extends ChangeNotifier {
           }
         }
 
-        unawaited(_probeQuicLatency(resolvedIp, targetPort).then(handleProbe));
+        unawaited(probeQuicTargets().then(handleProbe));
         unawaited(probeTcpTls().then(handleProbe));
         result = await completer.future;
       } else {
         result = await probeTcpTls();
+      }
+      if (result < 0 && _tunnel.status.isActive) {
+        final clashTag = _resolveLoadedClashProxyTag(id);
+        if (clashTag != null) {
+          result = await _probeClashProxyDelay(clashTag);
+        }
       }
     } catch (_) {
       result = -1;
@@ -4160,6 +4304,64 @@ class AppController extends ChangeNotifier {
       }
     }
     return result;
+  }
+
+  String? _resolveLoadedClashProxyTag(String profileId) {
+    final sel = selectedProfile;
+    if (sel != null) {
+      if (!sel.id.startsWith('auto:') && sel.type != 'urltest') {
+        if (sel.id == profileId) return 'proxy';
+      } else {
+        final candidates = RuntimeConfig.resolveAutoCandidates(
+          sel,
+          _settings.visibleProfiles,
+          activeNetworkType: _lastNetType,
+          subscriptions: _settings.visibleSubscriptions,
+          balancer: _settings.balancer,
+        );
+        final idx = candidates.indexWhere((c) => c.id == profileId);
+        if (idx >= 0) return 'auto-srv-$idx';
+      }
+    }
+    final pinnedVal = 'profile:$profileId';
+    if (_settings.appRoutes.values.contains(pinnedVal) ||
+        _settings.serviceRoutes.values.contains(pinnedVal)) {
+      return 'srv-$profileId';
+    }
+    return null;
+  }
+
+  Future<int> _probeClashProxyDelay(String proxyTag) async {
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 1200);
+    try {
+      final configuredUrl = _settings.balancer.url.trim();
+      final probeUrl = (configuredUrl.startsWith('http://') || configuredUrl.startsWith('https://'))
+          ? configuredUrl
+          : 'http://cp.cloudflare.com/generate_204';
+      final uri = Uri.parse(
+        'http://127.0.0.1:19090/proxies/${Uri.encodeComponent(proxyTag)}/delay'
+        '?timeout=3500&url=${Uri.encodeQueryComponent(probeUrl)}',
+      );
+      final req = await client.getUrl(uri).timeout(const Duration(milliseconds: 3800));
+      final resp = await req.close().timeout(const Duration(milliseconds: 3800));
+      if (resp.statusCode != 200) {
+        await resp.drain<void>();
+        return -1;
+      }
+      final body = await resp.transform(utf8.decoder).join().timeout(
+            const Duration(milliseconds: 1000),
+          );
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['delay'] is num) {
+        final ms = (decoded['delay'] as num).toInt();
+        return ms > 0 ? ms : -1;
+      }
+      return -1;
+    } catch (_) {
+      return -1;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// Проверяет доступность и RTT до QUIC-сервера (NaiveProxy QUIC, Hysteria2, TUIC, MASQUE)

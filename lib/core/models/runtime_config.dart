@@ -159,7 +159,16 @@ class Profile {
   }
 
   bool get hasTls {
-    if (const {'wireguard', 'shadowsocks', 'socks', 'ssh', 'snell', 'mtproto', 'mieru'}.contains(type)) {
+    if (const {
+      'wireguard',
+      'shadowsocks',
+      'socks',
+      'ssh',
+      'snell',
+      'mtproto',
+      'mieru',
+      'wdtt',
+    }.contains(type)) {
       return false;
     }
     if (const {'hysteria2', 'hysteria', 'tuic', 'anytls', 'naive', 'shadowtls', 'masque', 'trusttunnel', 'openconnect', 'tewfai'}.contains(type)) {
@@ -186,6 +195,11 @@ class Profile {
 
     if (type == 'wireguard' || type == 'masque') {
       parts.add('UDP');
+      return parts.join(' · ');
+    }
+    if (type == 'wdtt') {
+      final mode = (extra['mode'] ?? 'wg').toString().trim().toUpperCase();
+      parts.add(mode.isNotEmpty ? mode : 'WG');
       return parts.join(' · ');
     }
     if (type == 'hysteria2' || type == 'hysteria' || type == 'tuic') {
@@ -377,6 +391,18 @@ class Profile {
       }
     }
 
+    String? normalizeGoDuration(Object? raw) {
+      if (raw == null) return null;
+      if (raw is num) {
+        final v = raw.toInt();
+        return v > 0 ? '${v}s' : null;
+      }
+      final s = raw.toString().trim();
+      if (s.isEmpty) return null;
+      if (RegExp(r'^\d+$').hasMatch(s)) return '${s}s';
+      return s;
+    }
+
     Map<String, dynamic> buildTlsObject({
       bool forceEnabled = false,
       bool allowInsecureFlag = true,
@@ -394,7 +420,13 @@ class Profile {
         tls['server_name'] = server;
       }
       if (alpn.isNotEmpty) tls['alpn'] = alpn;
-      if (allowInsecure && allowInsecureFlag) tls['insecure'] = true;
+      if (allowInsecureFlag) {
+        if (allowInsecure) tls['insecure'] = true;
+      } else {
+        // tachyon-core запрещает insecure и disable_sni на naive outbound.
+        tls.remove('insecure');
+        tls.remove('disable_sni');
+      }
       if (certSha256 is List && certSha256.isNotEmpty) {
         tls['certificate_sha256'] = certSha256;
       }
@@ -491,6 +523,8 @@ class Profile {
         }..addAll(cleanExtra);
 
       case 'hysteria2':
+        final hopInterval = normalizeGoDuration(cleanExtra.remove('hop_interval'));
+        if (hopInterval != null) cleanExtra['hop_interval'] = hopInterval;
         final rawObfs = cleanExtra.remove('obfs');
         final obfsPw = cleanExtra.remove('obfs-password')?.toString() ?? '';
         Map<String, dynamic>? obfsObj;
@@ -521,6 +555,10 @@ class Profile {
         }..addAll(cleanExtra);
 
       case 'tuic':
+        final hb = normalizeGoDuration(
+          cleanExtra.remove('heartbeat') ?? cleanExtra.remove('heartbeat_interval'),
+        );
+        if (hb != null) cleanExtra['heartbeat'] = hb;
         return {
           'type': 'tuic',
           'tag': tag,
@@ -554,10 +592,28 @@ class Profile {
 
       case 'snell':
         final psk = (cleanExtra.remove('psk') ?? password).toString();
-        final rawVer = (cleanExtra.remove('version') as num?)?.toInt() ?? 4;
-        final ver = (rawVer == 4 || rawVer == 6) ? rawVer : 4;
+        final rawVer = cleanExtra.remove('version');
+        final parsedVer = rawVer is num
+            ? rawVer.toInt()
+            : int.tryParse(rawVer?.toString().trim() ?? '');
+        final ver = (parsedVer == 4 || parsedVer == 5 || parsedVer == 6) ? parsedVer : 5;
         cleanExtra.remove('tls');
-        cleanExtra.remove('obfs');
+        final rawObfs = cleanExtra['obfs'];
+        if (rawObfs is String) {
+          cleanExtra.remove('obfs');
+          final m = rawObfs.trim();
+          if (m.isNotEmpty && m != 'none' && !cleanExtra.containsKey('obfs_mode')) {
+            cleanExtra['obfs_mode'] = m;
+          }
+        }
+        if (ver == 6) {
+          cleanExtra.remove('obfs');
+          cleanExtra.remove('obfs_mode');
+          cleanExtra.remove('obfs_host');
+          cleanExtra.remove('udp_over_tcp');
+        } else {
+          cleanExtra.remove('mode');
+        }
         return {
           'type': 'snell',
           'tag': tag,
@@ -695,6 +751,16 @@ class Profile {
           'server_port': port,
           if (password.isNotEmpty) 'password': password,
           'tls': buildTlsObject(forceEnabled: true),
+        }..addAll(cleanExtra);
+
+      case 'wdtt':
+        cleanExtra.remove('tls');
+        return {
+          'type': 'wdtt',
+          'tag': tag,
+          'server': server,
+          'server_port': port,
+          'password': password,
         }..addAll(cleanExtra);
 
       default:
@@ -1112,6 +1178,22 @@ class Profile {
       case 'shadowtls':
         final ver = (extra['version'] ?? 3).toString();
         return 'shadowtls://${Uri.encodeComponent(password)}@$hostFmt:$port?sni=${Uri.encodeQueryComponent(sni.isNotEmpty ? sni : server)}&version=$ver#$encodedName';
+
+      case 'wdtt':
+        final mode = (extra['mode'] ?? '').toString().trim();
+        final params = <String, String>{
+          if (mode.isNotEmpty && mode != 'wg') 'mode': mode,
+          if (extra['raw_port'] != null) 'raw_port': extra['raw_port'].toString(),
+          if (extra['obfs'] != null) 'obfs': extra['obfs'].toString(),
+          if (extra['hashes'] is List && (extra['hashes'] as List).isNotEmpty)
+            'hashes': (extra['hashes'] as List).join(','),
+          if (extra['workers'] != null) 'workers': extra['workers'].toString(),
+          if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'wdtt://${Uri.encodeComponent(password)}@$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
 
       default:
         return jsonEncode(toOutbound(tag: name.isNotEmpty ? name : type));
@@ -2503,20 +2585,43 @@ class RuntimeConfig {
   final int mtu;
 
   /// Эффективный MTU для TUN-интерфейса: при использовании WireGuard/AmneziaWG
-  /// ограничивается сверху (1280..1420), чтобы избежать PMTU blackhole на QUIC/TLS пакетах.
+  /// (напрямую, через detour или внутри активной urltest-группы) ограничивается
+  /// сверху (1280..1420), чтобы избежать PMTU blackhole на QUIC/TLS пакетах.
   int get effectiveTunMtu {
     final baseMtu = (mtu >= 1280 && mtu <= 9000) ? mtu : 1400;
-    if (profile.type == 'wireguard' || detourProfile?.type == 'wireguard') {
-      final rawProfMtu = profile.extra['mtu'];
+    int capWgMtu(Profile p, int current) {
+      final rawProfMtu = p.extra['mtu'];
       final profMtu = rawProfMtu is num
           ? rawProfMtu.toInt()
           : int.tryParse(rawProfMtu?.toString().trim() ?? '');
       final wgMtu = (profMtu != null && profMtu >= 1280 && profMtu <= 1420)
           ? profMtu
           : 1280;
-      return baseMtu < wgMtu ? baseMtu : wgMtu;
+      return current < wgMtu ? current : wgMtu;
     }
-    return baseMtu;
+
+    var effective = baseMtu;
+    if (profile.type == 'wireguard') {
+      effective = capWgMtu(profile, effective);
+    }
+    if (detourProfile?.type == 'wireguard') {
+      effective = capWgMtu(detourProfile!, effective);
+    }
+    if (profile.type == 'urltest' || profile.id.startsWith('auto:')) {
+      final candidates = resolveAutoCandidates(
+        profile,
+        extraProfiles,
+        activeNetworkType: activeNetworkType,
+        subscriptions: allSubscriptions.isNotEmpty ? allSubscriptions : subscriptions,
+        balancer: balancer,
+      );
+      for (final candidate in candidates) {
+        if (candidate.type == 'wireguard') {
+          effective = capWgMtu(candidate, effective);
+        }
+      }
+    }
+    return effective;
   }
 
   /// Пакетная десинхронизация: настройки нативного desync-аутбаунда.

@@ -1769,7 +1769,10 @@ proxies:
       TestWidgetsFlutterBinding.ensureInitialized();
       final tmpDir = await Directory.systemTemp.createTemp('tachyon_sub_test_');
       addTearDown(() async {
-        if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        try {
+          if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        } catch (_) {}
       });
 
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -1889,6 +1892,283 @@ proxies:
       }, (error, stack) {
         fail('Неожиданное необработанное исключение в DnsBenchmark: $error\n$stack');
       });
+    });
+
+    test('pingAllProfiles не включает сортировку по пингу автоматически и не перемешивает список', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tmpDir = await Directory.systemTemp.createTemp('tachyon_ping_nosort_');
+      addTearDown(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        try {
+          if (await tmpDir.exists()) await tmpDir.delete(recursive: true);
+        } catch (_) {}
+      });
+
+      final serverA = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final serverB = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await serverA.close();
+        await serverB.close();
+      });
+
+      const vpnChannel = MethodChannel('app.tachyon.proxy/vpn');
+      const eventsChannel = MethodChannel('app.tachyon.proxy/events');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(vpnChannel, (call) async {
+        return switch (call.method) {
+          'status' => <String, dynamic>{'status': 'disconnected', 'error': '', 'server': ''},
+          'filesDir' => tmpDir.path,
+          'networkInfo' => 'wifi',
+          'wifiInfo' => <String, dynamic>{'ssid': '', 'isWifi': false},
+          _ => null,
+        };
+      });
+      messenger.setMockMethodCallHandler(eventsChannel, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(vpnChannel, null);
+        messenger.setMockMethodCallHandler(eventsChannel, null);
+      });
+
+      final profFirst = Profile(
+        id: 'srv-first',
+        name: 'First Server',
+        type: 'shadowsocks',
+        server: '127.0.0.1',
+        port: serverA.port,
+        method: 'chacha20-ietf-poly1305',
+        password: 'pw',
+      );
+      final profSecond = Profile(
+        id: 'srv-second',
+        name: 'Second Server',
+        type: 'shadowsocks',
+        server: '127.0.0.1',
+        port: serverB.port,
+        method: 'chacha20-ietf-poly1305',
+        password: 'pw',
+      );
+
+      final store = SettingsStore(directory: tmpDir.path);
+      await store.save(
+        AppSettings(
+          dns: DnsSettings(checkedAt: DateTime.now().millisecondsSinceEpoch),
+          serviceRoutes: const {},
+          profiles: [profFirst, profSecond],
+          selectedProfileId: 'srv-first',
+        ),
+      );
+
+      final controller = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      addTearDown(controller.dispose);
+      await controller.bootstrap();
+
+      expect(controller.sortByPing, isFalse);
+      await controller.pingAllProfiles();
+      expect(controller.sortByPing, isFalse);
+      expect(controller.pingOf('srv-first'), isNonNegative);
+      expect(controller.pingOf('srv-second'), isNonNegative);
+      expect(
+        controller.sortProfiles(controller.settings.profiles).map((p) => p.id).toList(),
+        ['srv-first', 'srv-second'],
+      );
+    });
+  });
+
+  group('адаптация tachyon-core 0.5.6–0.5.7+ и WARP AWG', () {
+    test('WARP и AmneziaWG сохраняют + в base64-ключах, декодируют reserved и нормализуют CPS', () {
+      const priv = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=';
+      const pubWithPlus = 'abc+def+ghijklmnopqrstuvwxyz0123456789abcde=';
+      final warpUri =
+          'awg://${Uri.encodeComponent(priv)}@engage.cloudflareclient.com:2408'
+          '?publickey=$pubWithPlus'
+          '&address=172.16.0.2/32,2606:4700:110:8a00::1/128'
+          '&reserved=WgID'
+          '&jc=4&jmin=40&jmax=70&s1=0&s2=0&h1=1&h2=2&h3=3&h4=4'
+          '&i1=%3Cb+0x160301015c010001580303%3E%3Cr+32%3E'
+          '&j2=%3Cc%3E%3Ct%3E%3Cr+10%3E'
+          '&i3=0'
+          '&itime=15'
+          '#WARP-AWG';
+
+      final parsed = LinkParser().parseMany(warpUri);
+      expect(parsed, hasLength(1));
+      final p = parsed.first;
+      expect(p.extra['peer_public_key'], pubWithPlus);
+      expect(p.extra['reserved'], [0x5a, 0x02, 0x03]);
+      expect(p.extra['i1'], '<b 0x160301015c010001580303><r 32>');
+      expect(p.extra['i2'], '<c><t><r 10>');
+      expect(p.extra.containsKey('i3'), isFalse);
+      expect(p.extra['itime'], 15);
+      expect(normalizeAwgCpsChain('0xdeadbeef'), '<b 0xdeadbeef>');
+      expect(normalizeAwgCpsChain('0'), '');
+
+      final ep = p.toWireGuardEndpoint(tag: 'proxy');
+      expect(ep['itime'], 15);
+      expect(ep['i1'], '<b 0x160301015c010001580303><r 32>');
+      expect(ep['i2'], '<c><t><r 10>');
+      expect(ep['address'], ['172.16.0.2/32', '2606:4700:110:8a00::1/128']);
+      final peers = ep['peers'] as List;
+      final peer = peers.first as Map;
+      expect(peer['public_key'], pubWithPlus);
+      expect(peer['reserved'], [0x5a, 0x02, 0x03]);
+
+      // Даже если из JSON/подписки reserved пришёл строкой, endpoint передаёт strict []uint8.
+      final strReservedProf = Profile.fromJson({
+        ...p.toJson(),
+        'extra': {...p.extra, 'reserved': 'WgID'},
+      });
+      final strEp = strReservedProf.toWireGuardEndpoint(tag: 'proxy');
+      expect(((strEp['peers'] as List).first as Map)['reserved'], [0x5a, 0x02, 0x03]);
+    });
+
+    test('chain_outbounds с wireguard/WARP и auto-группы не теряют endpoints и detour', () {
+      const wgHopPriv = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=';
+      const wgHopPub = 'QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=';
+      final vlessOverWarp = Profile(
+        id: 'vless-over-warp',
+        name: 'VLESS -> WARP',
+        type: 'vless',
+        server: '203.0.113.10',
+        port: 443,
+        uuid: '11111111-2222-3333-4444-555555555555',
+        extra: {
+          'detour': 'warp-hop',
+          'chain_outbounds': [
+            {
+              'type': 'wireguard',
+              'tag': 'warp-hop',
+              'server': '162.159.192.1',
+              'server_port': 2408,
+              'private_key': wgHopPriv,
+              'peer_public_key': wgHopPub,
+              'reserved': 'WgID',
+            },
+          ],
+        },
+      );
+
+      final cfg = RuntimeConfig(
+        profile: Profile(
+          id: 'auto:all',
+          name: 'Auto',
+          type: 'urltest',
+          server: 'auto',
+          port: 0,
+        ),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        extraProfiles: [vlessOverWarp],
+      ).toJson();
+
+      final endpoints = cfg['endpoints'] as List?;
+      expect(endpoints, isNotNull);
+      expect(endpoints, hasLength(1));
+      final ep = endpoints!.first as Map;
+      expect(ep['tag'], 'auto-hop-0-0');
+      expect(((ep['peers'] as List).first as Map)['reserved'], [0x5a, 0x02, 0x03]);
+    });
+
+    test('Mieru диапазоны портов/mtu/traffic_pattern, WDTT cookie auth и IPv6/FakeIPv6 + Desync QUIC', () {
+      final mieruProfiles = LinkParser().parseMany(
+        'mierus://user1:pass1@198.51.100.20?port-range=20100-20200,20300&protocol=TCP&mtu=1400&traffic-pattern=GgQIARAK&handshake-mode=HANDSHAKE_NO_WAIT#Mieru-Test',
+      );
+      expect(mieruProfiles, hasLength(1));
+      final mp = mieruProfiles.first;
+      expect(mp.port, 20100);
+      expect(mp.extra['server_ports'], ['20100-20200', '20300']);
+      expect(mp.extra['traffic_pattern'], 'GgQIARAK');
+      expect(mp.extra['handshake_mode'], 'HANDSHAKE_NO_WAIT');
+      expect(mp.extra['mtu'], 1400);
+      final mieruOut = mp.toOutbound(tag: 'proxy');
+      expect(mieruOut.containsKey('server_port'), isFalse);
+      expect(mieruOut['server_ports'], ['20100-20200', '20300']);
+      expect(mieruOut['traffic_pattern'], 'GgQIARAK');
+      expect(mieruOut['handshake_mode'], 'HANDSHAKE_NO_WAIT');
+
+      final wdttProfiles = LinkParser().parseMany(
+        'csqtt://connect?host=198.51.100.2&peer=46000&pass=secret&mode=csqtt&obfs=audio&srtp_mode=auto&vk_auth_mode=cookie&vk_cookie=remixsid%3Dabc&vk_client_ids=6287487,7913379#WDTT-Cookie',
+      );
+      expect(wdttProfiles, hasLength(1));
+      final wdOut = wdttProfiles.first.toOutbound(tag: 'proxy');
+      expect(wdOut['vk_auth_mode'], 'cookie');
+      expect(wdOut['vk_cookie'], 'remixsid=abc');
+      expect(wdOut['vk_client_ids'], ['6287487', '7913379']);
+      expect(wdOut['srtp_mode'], 'auto');
+
+      final ipv6Cfg = RuntimeConfig(
+        profile: _vlessProfile(),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(fakeIp: true, ipv6: true, strategy: 'prefer_ipv6'),
+        ruleSets: const [],
+        desync: const DesyncSettings(enabled: true, quicDesync: false),
+      ).toJson();
+
+      final exp = ipv6Cfg['experimental'] as Map;
+      expect((exp['cache_file'] as Map)['store_dns'], isTrue);
+      final dns = ipv6Cfg['dns'] as Map;
+      expect(dns['strategy'], 'prefer_ipv6');
+      final fakeipSrv = (dns['servers'] as List)
+          .cast<Map>()
+          .firstWhere((s) => s['type'] == 'fakeip');
+      expect(fakeipSrv['inet4_range'], '198.18.0.0/15');
+      expect(fakeipSrv['inet6_range'], 'fc00::/18');
+      final tunIn = (ipv6Cfg['inbounds'] as List)
+          .cast<Map>()
+          .firstWhere((i) => i['type'] == 'tun');
+      expect(tunIn['address'], ['172.19.0.1/30', 'fdfe:dcba:9876::1/126']);
+      expect(tunIn['route_address'], ['0.0.0.0/0', '::/0']);
+      final desyncOut = (ipv6Cfg['outbounds'] as List)
+          .cast<Map>()
+          .firstWhere((o) => o['type'] == 'desync');
+      expect(desyncOut['quic_desync'], isFalse);
+    });
+
+    test('несколько WARP/AWG с одинаковым сервером и именем сохраняются после dedupProfiles', () {
+      const k1Priv = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+      const k1Pub = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
+      const k2Priv = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=';
+      const k2Pub = 'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=';
+      final parser = LinkParser();
+      final p1 = parser.parseMany(
+        'wg://${Uri.encodeComponent(k1Priv)}@engage.cloudflareclient.com:2408'
+        '?publickey=${Uri.encodeComponent(k1Pub)}&address=172.16.0.2/32&reserved=WgID#WARP',
+      ).first;
+      final p2 = parser.parseMany(
+        'wg://${Uri.encodeComponent(k2Priv)}@engage.cloudflareclient.com:2408'
+        '?publickey=${Uri.encodeComponent(k2Pub)}&address=172.16.0.2/32&reserved=10,20,30#WARP',
+      ).first;
+      final p1Dup = parser.parseMany(
+        'wg://${Uri.encodeComponent(k1Priv)}@engage.cloudflareclient.com:2408'
+        '?publickey=${Uri.encodeComponent(k1Pub)}&address=172.16.0.2/32&reserved=90,2,3#WARP',
+      ).first;
+
+      final deduped = AppController.dedupProfiles([p1, p2, p1Dup]);
+      expect(deduped.length, 2);
+      expect(deduped[0].password, k1Priv);
+      expect(deduped[1].password, k2Priv);
+
+      final cfg = RuntimeConfig(
+        profile: const Profile(
+          id: 'auto:all',
+          name: 'Автовыбор',
+          type: 'urltest',
+          server: 'auto',
+          port: 0,
+        ),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        extraProfiles: deduped,
+      ).toJson();
+      final eps = (cfg['endpoints'] as List).cast<Map<String, dynamic>>();
+      expect(eps.length, 2);
+      expect(eps[0]['peers'][0]['reserved'], [90, 2, 3]);
+      expect(eps[1]['peers'][0]['reserved'], [10, 20, 30]);
     });
   });
 }

@@ -1257,6 +1257,11 @@ class _DesyncModeCard extends StatelessWidget {
             onChanged: (v) => controller.setDesync(desync.copyWith(autoTune: v)),
           ),
           SwitchRow(
+            title: 'Десинхронизация QUIC (UDP 443)',
+            value: desync.quicDesync,
+            onChanged: (v) => controller.setDesync(desync.copyWith(quicDesync: v)),
+          ),
+          SwitchRow(
             title: 'Разные рецепты для Wi-Fi и Мобильной сети',
             subtitle: 'Wi-Fi: ${desync.wifiPreset} · LTE: ${desync.cellularPreset}',
             value: controller.settings.perNetworkDesync,

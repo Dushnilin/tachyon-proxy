@@ -436,6 +436,39 @@ class TachyonVpnService : VpnService() {
                 .addDnsServer(DNS_SERVER)
                 .addRoute("0.0.0.0", 0)
 
+            // Если в конфиге tun-in включён сквозной IPv6 (например fdfe:dcba:9876::1/126), добавляем адрес и маршрут ::/0.
+            runCatching {
+                val root = JSONObject(config)
+                val inbounds = root.optJSONArray("inbounds")
+                if (inbounds != null) {
+                    for (i in 0 until inbounds.length()) {
+                        val inb = inbounds.optJSONObject(i) ?: continue
+                        if (inb.optString("type") == "tun") {
+                            val addrs = inb.optJSONArray("address")
+                            var hasIpv6 = false
+                            if (addrs != null) {
+                                for (j in 0 until addrs.length()) {
+                                    val cidr = addrs.optString(j)
+                                    val slash = cidr.indexOf('/')
+                                    if (slash > 0 && cidr.contains(':')) {
+                                        val ip6 = cidr.substring(0, slash)
+                                        val prefix6 = cidr.substring(slash + 1).toIntOrNull()
+                                        if (ip6.isNotEmpty() && prefix6 != null && prefix6 in 1..128) {
+                                            builder.addAddress(ip6, prefix6)
+                                            hasIpv6 = true
+                                        }
+                                    }
+                                }
+                            }
+                            if (hasIpv6) {
+                                builder.addRoute("::", 0)
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
             }

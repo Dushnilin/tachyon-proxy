@@ -28,6 +28,14 @@ class DnsScreen extends StatelessWidget {
     ('direct', 'Напрямую', 'Быстрое разрешение через загрузочный DNS'),
   ];
 
+  static const _strategies = <(String, String)>[
+    ('prefer_ipv4', 'Prefer IPv4'),
+    ('prefer_ipv6', 'Prefer IPv6'),
+    ('ipv4_only', 'Только IPv4'),
+    ('ipv6_only', 'Только IPv6'),
+    ('as_is', 'Как есть'),
+  ];
+
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
@@ -47,7 +55,9 @@ class DnsScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SwitchRow(
-                  title: 'FakeIP (198.18.0.0/15)',
+                  title: dns.ipv6
+                      ? 'FakeIP (198.18.0.0/15 + fc00::/18)'
+                      : 'FakeIP (198.18.0.0/15)',
                   subtitle:
                       'Мгновенно выдаёт виртуальные IP и исключает DNS-утечки при подключении',
                   value: dns.fakeIp,
@@ -55,6 +65,41 @@ class DnsScreen extends StatelessWidget {
                     dns.copyWith(fakeIp: value),
                   ),
                 ),
+                const Hairline(),
+                SwitchRow(
+                  title: 'Сквозной IPv6 и FakeIPv6',
+                  subtitle:
+                      'Добавляет IPv6-стек на TUN (fdfe:dcba:9876::1/126) и диапазон FakeIPv6 (fc00::/18)',
+                  value: dns.ipv6,
+                  onChanged: (value) => controller.setDns(
+                    dns.copyWith(ipv6: value),
+                  ),
+                ),
+                const Hairline(),
+                const SizedBox(height: Space.sm),
+                Text(
+                  'Стратегия адресов (DNS Strategy)',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+                const SizedBox(height: Space.xs),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final (stratKey, label) in _strategies)
+                      ChoiceChip(
+                        visualDensity: VisualDensity.compact,
+                        label: Text(label, style: const TextStyle(fontSize: 11.5)),
+                        selected: dns.strategy == stratKey,
+                        onSelected: (selected) {
+                          if (selected) {
+                            controller.setDns(dns.copyWith(strategy: stratKey));
+                          }
+                        },
+                      ),
+                  ],
+                ),
+                const SizedBox(height: Space.sm),
                 const Hairline(),
                 const SizedBox(height: Space.sm),
                 Text(

@@ -206,6 +206,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func buildNetworkSettings(from configJson: String, defaultMtu: Int) -> NEPacketTunnelNetworkSettings {
         var tunnelAddress = "172.19.0.1"
         var subnetMask = "255.255.255.252"
+        var ipv6Address: String?
+        var ipv6Prefix: Int?
         var mtu = defaultMtu
 
         if let data = configJson.data(using: .utf8),
@@ -215,13 +217,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 if let m = inbound["mtu"] as? Int, m >= 1280 {
                     mtu = m
                 }
-                if let addrs = inbound["address"] as? [String], let first = addrs.first {
-                    let parts = first.split(separator: "/")
-                    if let ip = parts.first {
-                        tunnelAddress = String(ip)
-                    }
-                    if parts.count == 2, let prefix = Int(parts[1]) {
-                        subnetMask = Self.ipv4PrefixToMask(prefix)
+                if let addrs = inbound["address"] as? [String] {
+                    for cidr in addrs {
+                        let parts = cidr.split(separator: "/")
+                        if cidr.contains(":") {
+                            if parts.count == 2, let prefix = Int(parts[1]), ipv6Address == nil {
+                                ipv6Address = String(parts[0])
+                                ipv6Prefix = prefix
+                            }
+                        } else if parts.count >= 1, tunnelAddress == "172.19.0.1" {
+                            tunnelAddress = String(parts[0])
+                            if parts.count == 2, let prefix = Int(parts[1]) {
+                                subnetMask = Self.ipv4PrefixToMask(prefix)
+                            }
+                        }
                     }
                 } else if let addrStr = inbound["inet4_address"] as? String {
                     let parts = addrStr.split(separator: "/")
@@ -243,6 +252,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let ipv4 = NEIPv4Settings(addresses: [tunnelAddress], subnetMasks: [subnetMask])
         ipv4.includedRoutes = [NEIPv4Route.default()]
         settings.ipv4Settings = ipv4
+
+        if let ip6 = ipv6Address, let prefix6 = ipv6Prefix {
+            let ipv6 = NEIPv6Settings(addresses: [ip6], networkPrefixLengths: [NSNumber(value: prefix6)])
+            ipv6.includedRoutes = [NEIPv6Route.default()]
+            settings.ipv6Settings = ipv6
+        }
 
         let dns = NEDNSSettings(servers: ["172.19.0.2", "1.1.1.1"])
         dns.matchDomains = [""]

@@ -966,7 +966,14 @@ class _ProfilesTabState extends State<ProfilesTab> {
     final wgKeepalive = TextEditingController(
       text: (edit?.extra['persistent_keepalive_interval'] ?? '').toString(),
     );
+    final rawEditReserved = normalizeWgReserved(edit?.extra['reserved']);
+    final wgReserved = TextEditingController(
+      text: rawEditReserved != null
+          ? rawEditReserved.join(',')
+          : (edit?.extra['reserved'] ?? '').toString(),
+    );
     final awgJc = TextEditingController(text: (edit?.extra['jc'] ?? '').toString());
+    final awgItime = TextEditingController(text: (edit?.extra['itime'] ?? '').toString());
     final awgJmin = TextEditingController(text: (edit?.extra['jmin'] ?? '').toString());
     final awgJmax = TextEditingController(text: (edit?.extra['jmax'] ?? '').toString());
     final awgS1 = TextEditingController(text: (edit?.extra['s1'] ?? '').toString());
@@ -1150,7 +1157,12 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                   wgMtu.text = (p.extra['mtu'] ?? '1280').toString();
                                   wgKeepalive.text =
                                       (p.extra['persistent_keepalive_interval'] ?? '').toString();
+                                  final loadedRes = normalizeWgReserved(p.extra['reserved']);
+                                  wgReserved.text = loadedRes != null
+                                      ? loadedRes.join(',')
+                                      : (p.extra['reserved'] ?? '').toString();
                                   awgJc.text = (p.extra['jc'] ?? '').toString();
+                                  awgItime.text = (p.extra['itime'] ?? '').toString();
                                   awgJmin.text = (p.extra['jmin'] ?? '').toString();
                                   awgJmax.text = (p.extra['jmax'] ?? '').toString();
                                   awgS1.text = (p.extra['s1'] ?? '').toString();
@@ -1228,6 +1240,32 @@ class _ProfilesTabState extends State<ProfilesTab> {
                           ],
                         ),
                         if (type == 'wireguard') ...[
+                          const SizedBox(height: Space.sm),
+                          Row(
+                            children: [
+                              Expanded(
+                                flex: 2,
+                                child: TextField(
+                                  controller: wgReserved,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Reserved (WARP, 3 байта или Base64)',
+                                    hintText: 'например 12,34,56 или WgID',
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: Space.sm),
+                              Expanded(
+                                child: TextField(
+                                  controller: awgItime,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Itime',
+                                    hintText: 'секунды',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                           const SizedBox(height: Space.sm),
                           ExpansionTile(
                             tilePadding: EdgeInsets.zero,
@@ -1672,7 +1710,14 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             hostLower.startsWith('hysteria2://') ||
                             hostLower.startsWith('tuic://') ||
                             hostLower.startsWith('wg://') ||
-                            hostLower.startsWith('amneziawg://'))) {
+                            hostLower.startsWith('awg://') ||
+                            hostLower.startsWith('wireguard://') ||
+                            hostLower.startsWith('amneziawg://') ||
+                            hostLower.startsWith('mieru://') ||
+                            hostLower.startsWith('mierus://') ||
+                            hostLower.startsWith('wdtt://') ||
+                            hostLower.startsWith('csqtt://') ||
+                            hostLower.startsWith('qwdtt://'))) {
                       Navigator.of(dialogContext).pop();
                       final added = await controller.importProfiles(host);
                       if (!context.mounted) return;
@@ -1803,6 +1848,18 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         setAwgHeader('h3', awgH3.text);
                         setAwgHeader('h4', awgH4.text);
                         setAwgHeader('persistent_keepalive_interval', wgKeepalive.text);
+                        setAwgHeader('itime', awgItime.text);
+                        final resRaw = wgReserved.text.trim();
+                        if (resRaw.isEmpty) {
+                          nextExtra.remove('reserved');
+                        } else {
+                          final resBytes = normalizeWgReserved(resRaw);
+                          if (resBytes != null) {
+                            nextExtra['reserved'] = resBytes;
+                          } else {
+                            nextExtra.remove('reserved');
+                          }
+                        }
 
                         void setAwgStr(String k, String raw) {
                           final s = raw.trim();
@@ -1813,11 +1870,20 @@ class _ProfilesTabState extends State<ProfilesTab> {
                           }
                         }
 
-                        setAwgStr('i1', awgI1.text);
-                        setAwgStr('i2', awgI2.text);
-                        setAwgStr('i3', awgI3.text);
-                        setAwgStr('i4', awgI4.text);
-                        setAwgStr('i5', awgI5.text);
+                        void setAwgCps(String k, String raw) {
+                          final s = normalizeAwgCpsChain(raw);
+                          if (s.isEmpty) {
+                            nextExtra.remove(k);
+                          } else {
+                            nextExtra[k] = s;
+                          }
+                        }
+
+                        setAwgCps('i1', awgI1.text);
+                        setAwgCps('i2', awgI2.text);
+                        setAwgCps('i3', awgI3.text);
+                        setAwgCps('i4', awgI4.text);
+                        setAwgCps('i5', awgI5.text);
                         setAwgStr('header_protection_key', awgHpk.text);
                         setAwgInt('content_padding_addition', awgCpa.text);
                         setAwgHeader('id', awgId.text);
@@ -1890,7 +1956,9 @@ class _ProfilesTabState extends State<ProfilesTab> {
       wgLocalIp,
       wgMtu,
       wgKeepalive,
+      wgReserved,
       awgJc,
+      awgItime,
       awgJmin,
       awgJmax,
       awgS1,

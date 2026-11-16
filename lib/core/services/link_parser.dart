@@ -804,16 +804,27 @@ class LinkParser {
 
     final uri = Uri.tryParse(link);
     if (uri == null || uri.host.isEmpty) return null;
-    final query = uri.queryParameters;
+    final query = <String, String>{};
+    for (final entry in _parseQuerySafe(uri.query, plusAsSpace: false).entries) {
+      query[entry.key] = entry.value;
+      query.putIfAbsent(entry.key.toLowerCase(), () => entry.value);
+    }
     final server = _cleanHost(uri.host);
     final port = uri.port == 0 ? 51820 : uri.port;
 
-    final privKey = Uri.decodeComponent(
-      uri.userInfo.isNotEmpty
-          ? uri.userInfo
-          : (query['privatekey'] ?? query['private_key'] ?? query['private-key'] ?? ''),
-    );
-    final pubKey = Uri.decodeComponent(
+    final rawPriv = uri.userInfo.isNotEmpty
+        ? uri.userInfo
+        : (query['privatekey'] ?? query['private_key'] ?? query['private-key'] ?? '');
+    String decodePreservePlus(String rawVal) {
+      try {
+        return Uri.decodeComponent(rawVal);
+      } catch (_) {
+        return rawVal;
+      }
+    }
+
+    final privKey = decodePreservePlus(rawPriv);
+    final pubKey = decodePreservePlus(
       query['publickey'] ?? query['public_key'] ?? query['peer_public_key'] ?? query['public-key'] ?? '',
     );
     if (privKey.isEmpty || pubKey.isEmpty) return null;
@@ -842,7 +853,7 @@ class LinkParser {
     };
 
     final psk = query['psk'] ?? query['presharedkey'] ?? query['pre_shared_key'] ?? '';
-    if (psk.isNotEmpty) extra['pre_shared_key'] = Uri.decodeComponent(psk);
+    if (psk.isNotEmpty) extra['pre_shared_key'] = decodePreservePlus(psk);
 
     final mtu = _toInt(query['mtu']);
     if (mtu != null && mtu > 0) extra['mtu'] = mtu;
@@ -863,6 +874,22 @@ class LinkParser {
 
     final reserved = _parseWgReserved(query['reserved']);
     if (reserved != null) extra['reserved'] = reserved;
+
+    final rawServerPorts = (query['server_ports'] ?? query['ports'] ?? '').trim();
+    if (rawServerPorts.isNotEmpty) {
+      final ports = rawServerPorts
+          .split(RegExp(r'[,;\s]+'))
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList(growable: false);
+      if (ports.isNotEmpty) extra['server_ports'] = ports;
+    }
+    if ((query['hop_interval'] ?? '').trim().isNotEmpty) {
+      extra['hop_interval'] = query['hop_interval']!.trim();
+    }
+    if ((query['hop_interval_max'] ?? '').trim().isNotEmpty) {
+      extra['hop_interval_max'] = query['hop_interval_max']!.trim();
+    }
 
     _extractAwgParams(query, extra, fromUriQuery: true);
 
@@ -1128,7 +1155,11 @@ class LinkParser {
       ),
       (
         'keepalive_timeout',
-        ['keepalive_timeout', 'keepalivetimeout', 'KeepaliveTimeout', 'itime', 'ITime'],
+        ['keepalive_timeout', 'keepalivetimeout', 'KeepaliveTimeout'],
+      ),
+      (
+        'itime',
+        ['itime', 'ITime'],
       ),
       (
         'max_handshake_attempts',
@@ -1147,6 +1178,17 @@ class LinkParser {
       ('i3', ['i3', 'j3']),
       ('i4', ['i4']),
       ('i5', ['i5']),
+    ]) {
+      final raw = pickStr(aliases);
+      if (raw != null) {
+        final norm = normalizeAwgCpsChain(raw);
+        if (norm.isNotEmpty) {
+          dst[target] = norm;
+        }
+      }
+    }
+
+    for (final (target, aliases) in const [
       ('id', ['id']),
       ('ib', ['ib']),
       (
@@ -1192,7 +1234,10 @@ class LinkParser {
         if (cur < 12) dst[sk] = 20;
       }
     }
-    if ((dst['i1']?.toString().trim() ?? '').isNotEmpty) {
+    final ipProto = dst['ip']?.toString().trim().toLowerCase() ?? '';
+    if ((dst['i1']?.toString().trim() ?? '').isNotEmpty ||
+        (ipProto == 'sip' && (dst['i2']?.toString().trim() ?? '').isNotEmpty) ||
+        ipProto.isEmpty) {
       dst
         ..remove('id')
         ..remove('ip')
@@ -1650,51 +1695,94 @@ class LinkParser {
   }
 
   Profile? _parseMieru(String link, {String subscriptionId = ''}) {
-    final uri = Uri.tryParse(link);
+    final normalizedLink = link.contains('&amp;') ? link.replaceAll('&amp;', '&') : link;
+    final uri = Uri.tryParse(normalizedLink);
     if (uri == null || uri.host.isEmpty) return null;
-    final query = uri.queryParameters;
+    final query = <String, String>{};
+    for (final entry in uri.queryParameters.entries) {
+      query[entry.key] = entry.value;
+      query.putIfAbsent(entry.key.toLowerCase(), () => entry.value);
+    }
     final server = _cleanHost(uri.host);
-    final (username, password) = _splitUserPass(uri.userInfo);
+    var (username, password) = _splitUserPass(uri.userInfo);
+    if (password.isEmpty) {
+      password = (query['password'] ?? query['pass'] ?? '').trim();
+    }
     if (username.isEmpty || password.isEmpty) return null;
 
-    var port = uri.port;
     final portRanges = <String>[];
-    final rawQueryPort = (query['port'] ?? '').trim();
-    if (port == 0 && rawQueryPort.isNotEmpty) {
-      final singlePort = int.tryParse(rawQueryPort);
-      if (singlePort != null && singlePort >= 1 && singlePort <= 65535) {
-        port = singlePort;
-      } else {
-        for (final token in rawQueryPort.split(RegExp(r'[,\s]+'))) {
-          final norm = token.trim().replaceAll(':', '-');
-          final m = RegExp(r'^(\d+)-(\d+)$').firstMatch(norm);
-          if (m != null) {
-            final lo = int.tryParse(m.group(1)!);
-            final hi = int.tryParse(m.group(2)!);
-            if (lo != null && hi != null && lo >= 1 && hi <= 65535 && lo <= hi) {
-              portRanges.add('$lo-$hi');
-              if (port == 0) port = lo;
-            }
-          } else {
-            final p = int.tryParse(norm);
-            if (p != null && p >= 1 && p <= 65535) {
-              portRanges.add('$p');
-              if (port == 0) port = p;
-            }
+    final seenRanges = <String>{};
+    var hasExplicitRange = false;
+    var firstParsedPort = 0;
+
+    void collectPortTokens(String raw, {required bool explicitRange}) {
+      for (final rawTok in raw.split(RegExp(r'[,;\s]+'))) {
+        final tok = rawTok.trim();
+        if (tok.isEmpty) continue;
+        final norm = tok.replaceAll(':', '-');
+        final m = RegExp(r'^(\d+)-(\d+)$').firstMatch(norm);
+        if (m != null) {
+          final lo = int.tryParse(m.group(1)!);
+          final hi = int.tryParse(m.group(2)!);
+          if (lo != null && hi != null && lo >= 1 && hi <= 65535 && lo <= hi) {
+            final spec = lo == hi ? '$lo' : '$lo-$hi';
+            if (lo != hi || explicitRange) hasExplicitRange = true;
+            if (seenRanges.add(spec)) portRanges.add(spec);
+            if (firstParsedPort == 0) firstParsedPort = lo;
+          }
+        } else {
+          final p = int.tryParse(norm);
+          if (p != null && p >= 1 && p <= 65535) {
+            if (explicitRange) hasExplicitRange = true;
+            if (seenRanges.add('$p')) portRanges.add('$p');
+            if (firstParsedPort == 0) firstParsedPort = p;
           }
         }
       }
     }
-    if (port == 0) port = 443;
 
-    final rawTr = (query['protocol'] ?? query['transport'] ?? 'TCP').trim().toUpperCase();
+    for (final key in const ['port', 'ports', 'port-range', 'server_ports']) {
+      final rawVal = (query[key] ?? '').trim();
+      if (rawVal.isNotEmpty) {
+        collectPortTokens(rawVal, explicitRange: key != 'port');
+      }
+    }
+
+    var port = uri.port;
+    final List<String> serverPorts;
+    if (portRanges.isNotEmpty) {
+      if (portRanges.length == 1 && !hasExplicitRange && int.tryParse(portRanges.first) != null) {
+        final qp = int.parse(portRanges.first);
+        if (port == 0 || port == qp || uri.scheme.toLowerCase() == 'mierus') {
+          port = qp;
+          serverPorts = const [];
+        } else {
+          serverPorts = portRanges;
+        }
+      } else {
+        if (port == 0) port = firstParsedPort;
+        serverPorts = portRanges;
+      }
+    } else if (port > 0) {
+      serverPorts = const [];
+    } else {
+      return null;
+    }
+
+    final rawTr =
+        (query['protocol'] ?? query['transport'] ?? query['network'] ?? 'TCP').trim().toUpperCase();
     final transport = rawTr == 'UDP' ? 'UDP' : 'TCP';
-    final fallbackName = (query['profile'] ?? '').trim().isNotEmpty
-        ? query['profile']!.trim()
-        : '$server:$port';
+    final profileName = (query['profile'] ?? '').trim();
+    final mux = (query['multiplexing'] ?? query['mux'] ?? '').trim();
+    final trafficPattern = (query['traffic-pattern'] ?? query['traffic_pattern'] ?? '').trim();
+    final handshakeMode = (query['handshake-mode'] ?? query['handshake_mode'] ?? '').trim();
+    final mtu = _toInt(query['mtu']);
+    final fallbackName = profileName.isNotEmpty
+        ? profileName
+        : (serverPorts.isNotEmpty ? '$server:${serverPorts.first}' : '$server:$port');
 
     return Profile(
-      id: _id('mieru', '$server:$port:$username:$portRanges'),
+      id: _id('mieru', '$server:$port:$username:$serverPorts'),
       name: _name(query, uri.fragment, fallbackName),
       type: 'mieru',
       server: server,
@@ -1704,8 +1792,11 @@ class LinkParser {
       extra: {
         'username': username,
         'mieru_transport': transport,
-        if (portRanges.isNotEmpty) 'server_ports': portRanges,
-        if ((query['multiplexing'] ?? '').isNotEmpty) 'multiplexing': query['multiplexing'],
+        if (serverPorts.isNotEmpty) 'server_ports': serverPorts,
+        if (mux.isNotEmpty) 'multiplexing': mux,
+        if (trafficPattern.isNotEmpty) 'traffic_pattern': trafficPattern,
+        if (handshakeMode.isNotEmpty) 'handshake_mode': handshakeMode,
+        if (mtu != null && mtu >= 576 && mtu <= 9000) 'mtu': mtu,
       },
     );
   }
@@ -2008,6 +2099,9 @@ class LinkParser {
       int? workers,
       int? mtu,
       String? vkToken,
+      String? vkAuthMode,
+      String? vkCookie,
+      List<String>? vkClientIds,
       String? srtpMode,
       String? turnTransport,
     }) {
@@ -2025,6 +2119,9 @@ class LinkParser {
         if (workers != null && workers >= 1 && workers <= 126) 'workers': workers,
         if (mtu != null && mtu >= 576 && mtu <= 9000) 'mtu': mtu,
         if (vkToken != null && vkToken.isNotEmpty) 'vk_token': vkToken,
+        if (vkAuthMode != null && vkAuthMode.isNotEmpty) 'vk_auth_mode': vkAuthMode,
+        if (vkCookie != null && vkCookie.isNotEmpty) 'vk_cookie': vkCookie,
+        if (vkClientIds != null && vkClientIds.isNotEmpty) 'vk_client_ids': vkClientIds,
         if (srtpMode != null && srtpMode.isNotEmpty) 'srtp_mode': srtpMode,
         if (turnTransport != null && turnTransport.isNotEmpty) 'turn_transport': turnTransport,
       };
@@ -2063,6 +2160,9 @@ class LinkParser {
         hashes: _splitWdttHashes(params['hashes'] ?? params['hash']),
         workers: _toInt(params['workers'] ?? params['streams']),
         vkToken: params['token'] ?? params['vk_token'],
+        vkAuthMode: params['vk_auth_mode'],
+        vkCookie: params['vk_cookie'],
+        vkClientIds: _splitCsv(params['vk_client_ids']),
         srtpMode: params['srtp_mode'] ?? params['srtp'],
         turnTransport: params['turn_transport'],
       );
@@ -2220,8 +2320,13 @@ class LinkParser {
       did: query['did'] ?? query['device_id'],
       hashes: _splitWdttHashes(query['hashes'] ?? query['hash']),
       workers: _toInt(query['workers'] ?? query['streams']),
+      mtu: _toInt(query['mtu']),
       vkToken: query['token'] ?? query['vk_token'],
+      vkAuthMode: query['vk_auth_mode'],
+      vkCookie: query['vk_cookie'],
+      vkClientIds: _splitCsv(query['vk_client_ids']),
       srtpMode: query['srtp_mode'] ?? query['srtp'],
+      turnTransport: query['turn_transport'],
     );
   }
 
@@ -3651,16 +3756,31 @@ class LinkParser {
         };
       case 'mieru':
         final mTr = (p['transport'] ?? 'TCP').toString().toUpperCase();
-        final pr = (p['port-range'] ?? '').toString().trim();
+        final pr = (p['port-range'] ?? p['ports'] ?? '').toString().trim();
+        final mieruMtu = _toInt(p['mtu']);
         out = {
           'type': 'mieru',
           'tag': tag,
           'server': server,
-          'server_port': port,
+          if (pr.isEmpty || _toInt(p['port']) != null) 'server_port': port,
           'username': (p['username'] ?? '').toString(),
           'password': (p['password'] ?? '').toString(),
           'transport': mTr == 'UDP' ? 'UDP' : 'TCP',
-          if (pr.isNotEmpty) 'server_ports': [pr.replaceAll('-', ':')],
+          if (pr.isNotEmpty)
+            'server_ports': pr
+                .split(RegExp(r'[,;\s]+'))
+                .map((e) => e.trim().replaceAll(':', '-'))
+                .where((e) => e.isNotEmpty)
+                .toList(),
+          if ((p['multiplexing'] ?? '').toString().trim().isNotEmpty)
+            'multiplexing': p['multiplexing'].toString().trim(),
+          if ((p['traffic-pattern'] ?? p['traffic_pattern'] ?? '').toString().trim().isNotEmpty)
+            'traffic_pattern':
+                (p['traffic-pattern'] ?? p['traffic_pattern']).toString().trim(),
+          if ((p['handshake-mode'] ?? p['handshake_mode'] ?? '').toString().trim().isNotEmpty)
+            'handshake_mode':
+                (p['handshake-mode'] ?? p['handshake_mode']).toString().trim(),
+          if (mieruMtu != null && mieruMtu >= 576 && mieruMtu <= 9000) 'mtu': mieruMtu,
         };
       case 'tg':
       case 'mtproto':
@@ -3890,10 +4010,40 @@ class LinkParser {
       if (reservedFromPeers != null && !rest.containsKey('reserved')) {
         rest['reserved'] = reservedFromPeers;
       }
+      final normReserved = normalizeWgReserved(rest['reserved']);
+      if (normReserved != null) {
+        rest['reserved'] = normReserved;
+      } else {
+        rest.remove('reserved');
+      }
+      for (final cpsKey in const ['i1', 'i2', 'i3', 'i4', 'i5']) {
+        if (rest[cpsKey] != null) {
+          final norm = normalizeAwgCpsChain(rest[cpsKey].toString());
+          if (norm.isEmpty) {
+            rest.remove(cpsKey);
+          } else {
+            rest[cpsKey] = norm;
+          }
+        }
+      }
       if (allowedIpsFromPeers != null &&
           allowedIpsFromPeers.isNotEmpty &&
           !rest.containsKey('allowed_ips')) {
         rest['allowed_ips'] = allowedIpsFromPeers;
+      }
+      if (item['peers'] is List && (item['peers'] as List).isNotEmpty) {
+        final peer = (item['peers'] as List).first;
+        if (peer is Map) {
+          if (peer['server_ports'] is List && !rest.containsKey('server_ports')) {
+            rest['server_ports'] = peer['server_ports'];
+          }
+          if (peer['hop_interval'] != null && !rest.containsKey('hop_interval')) {
+            rest['hop_interval'] = peer['hop_interval'];
+          }
+          if (peer['hop_interval_max'] != null && !rest.containsKey('hop_interval_max')) {
+            rest['hop_interval_max'] = peer['hop_interval_max'];
+          }
+        }
       }
     }
 
@@ -4135,16 +4285,25 @@ class LinkParser {
     );
   }
 
-  Map<String, String> _parseQuerySafe(String query) {
+  Map<String, String> _parseQuerySafe(String query, {bool plusAsSpace = true}) {
     if (query.isEmpty) return const {};
     final out = <String, String>{};
     for (final pair in query.split('&')) {
       if (pair.isEmpty) continue;
       final eq = pair.indexOf('=');
       if (eq <= 0) continue;
-      final k = Uri.decodeQueryComponent(pair.substring(0, eq));
-      final v = Uri.decodeQueryComponent(pair.substring(eq + 1));
-      out[k] = v;
+      final kRaw = pair.substring(0, eq);
+      final vRaw = pair.substring(eq + 1);
+      String decodeVal(String s) {
+        if (plusAsSpace) return Uri.decodeQueryComponent(s);
+        try {
+          return Uri.decodeComponent(s);
+        } catch (_) {
+          return s;
+        }
+      }
+
+      out[decodeVal(kRaw)] = decodeVal(vRaw);
     }
     return out;
   }
@@ -4156,15 +4315,7 @@ class LinkParser {
     return s.contains(':') ? '$s/128' : '$s/32';
   }
 
-  Object? _parseWgReserved(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return null;
-    final s = raw.trim().replaceAll('[', '').replaceAll(']', '');
-    final nums = s.split(',').map((e) => int.tryParse(e.trim())).toList();
-    if (nums.length == 3 && nums.every((n) => n != null)) {
-      return nums.cast<int>();
-    }
-    return raw.trim();
-  }
+  Object? _parseWgReserved(String? raw) => normalizeWgReserved(raw);
 
   List<String> _splitCsv(String? raw) {
     if (raw == null || raw.trim().isEmpty) return const [];

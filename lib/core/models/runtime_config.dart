@@ -86,6 +86,7 @@ class Profile {
     'id',
     'ip',
     'ib',
+    'itime',
     'header_protection_key',
     'content_padding_addition',
     'rekey_after_time',
@@ -146,7 +147,7 @@ class Profile {
         return 'AMNEZIAWG 3.0';
       }
     }
-    for (final k in const ['s3', 's4', 'i1', 'i2', 'i3', 'i4', 'i5']) {
+    for (final k in const ['s3', 's4', 'i1', 'i2', 'i3', 'i4', 'i5', 'itime']) {
       final v = extra[k];
       if (v is num && v > 0) return 'AMNEZIAWG 2.0';
       if (v is String && v.trim().isNotEmpty && v.trim() != '0') return 'AMNEZIAWG 2.0';
@@ -284,7 +285,10 @@ class Profile {
             publicKey)
         .toString();
     final psk = cleanExtra.remove('pre_shared_key')?.toString() ?? '';
-    final reserved = cleanExtra.remove('reserved');
+    final reserved = normalizeWgReserved(cleanExtra.remove('reserved'));
+    final serverPorts = cleanExtra.remove('server_ports');
+    final hopInterval = cleanExtra.remove('hop_interval');
+    final hopIntervalMax = cleanExtra.remove('hop_interval_max');
     final rawKeepalive = cleanExtra.remove('persistent_keepalive_interval') ??
         cleanExtra.remove('keepalive');
     Object? keepaliveVal;
@@ -308,7 +312,21 @@ class Profile {
     final localAddr = cleanExtra.remove('local_address') ?? cleanExtra.remove('address');
     final addrs = localAddr is List && localAddr.isNotEmpty
         ? localAddr.map((e) => e.toString()).toList()
-        : <String>['10.0.0.2/32'];
+        : (localAddr is String && localAddr.trim().isNotEmpty
+            ? localAddr.split(',').map((e) => e.trim()).where((s) => s.isNotEmpty).toList()
+            : <String>['10.0.0.2/32']);
+
+    // Нормализуем CPS-цепочки i1..i5 (включая <c>, <b 0x...> и удаление заглушек "0").
+    for (final cpsKey in const ['i1', 'i2', 'i3', 'i4', 'i5']) {
+      final rawCps = cleanExtra[cpsKey];
+      if (rawCps == null) continue;
+      final norm = normalizeAwgCpsChain(rawCps.toString());
+      if (norm.isEmpty) {
+        cleanExtra.remove(cpsKey);
+      } else {
+        cleanExtra[cpsKey] = norm;
+      }
+    }
 
     // AmneziaWG 3.0+: если задан header_protection_key, s1..s4 должны быть >= 12 (по умолчанию 20)
     final hpk = cleanExtra['header_protection_key']?.toString().trim() ?? '';
@@ -322,9 +340,11 @@ class Profile {
         }
       }
     }
-    // Если задан явный i1, удаляем декларативные id/ip/ib во избежание конфликта генератора awg_masque
+    // Если задан явный i1 (или i2 при ip == sip), либо нет обязательного ip при id/ib — очищаем конфликт masquerade.
     final i1 = cleanExtra['i1']?.toString().trim() ?? '';
-    if (i1.isNotEmpty) {
+    final i2 = cleanExtra['i2']?.toString().trim() ?? '';
+    final ipProto = cleanExtra['ip']?.toString().trim().toLowerCase() ?? '';
+    if (i1.isNotEmpty || (ipProto == 'sip' && i2.isNotEmpty) || ipProto.isEmpty) {
       cleanExtra
         ..remove('id')
         ..remove('ip')
@@ -359,6 +379,11 @@ class Profile {
           'allowed_ips': allowedIps.isEmpty ? ['0.0.0.0/0', '::/0'] : allowedIps,
           'persistent_keepalive_interval': ?keepaliveVal,
           'reserved': ?reserved,
+          if (serverPorts is List && serverPorts.isNotEmpty) 'server_ports': serverPorts,
+          if (hopInterval != null && hopInterval.toString().trim().isNotEmpty)
+            'hop_interval': hopInterval,
+          if (hopIntervalMax != null && hopIntervalMax.toString().trim().isNotEmpty)
+            'hop_interval_max': hopIntervalMax,
         },
       ],
       ...cleanExtra,
@@ -1030,6 +1055,13 @@ class Profile {
           if (extra['persistent_keepalive_interval'] != null)
             'keepalive': extra['persistent_keepalive_interval'].toString(),
         };
+        final reservedBytes = normalizeWgReserved(extra['reserved']);
+        if (reservedBytes != null) {
+          params['reserved'] = reservedBytes.join(',');
+        }
+        if (extra['server_ports'] is List && (extra['server_ports'] as List).isNotEmpty) {
+          params['server_ports'] = (extra['server_ports'] as List).join(',');
+        }
         for (final k in const [
           'jc',
           'jmin',
@@ -1049,6 +1081,7 @@ class Profile {
           'i5',
           'id',
           'ib',
+          'itime',
           'header_protection_key',
           'content_padding_addition',
           'rekey_after_time',
@@ -1056,9 +1089,16 @@ class Profile {
           'reject_after_time',
           'keepalive_timeout',
           'max_handshake_attempts',
+          'hop_interval',
+          'hop_interval_max',
         ]) {
-          if (extra[k] != null && extra[k].toString().isNotEmpty) {
-            params[k] = extra[k].toString();
+          final rawVal = extra[k];
+          if (rawVal == null) continue;
+          final s = (k == 'i1' || k == 'i2' || k == 'i3' || k == 'i4' || k == 'i5')
+              ? normalizeAwgCpsChain(rawVal.toString())
+              : rawVal.toString().trim();
+          if (s.isNotEmpty) {
+            params[k] = s;
           }
         }
         if (extra['ip'] != null && extra['ip'].toString().isNotEmpty) {
@@ -1159,13 +1199,23 @@ class Profile {
       case 'mieru':
         final user = (extra['username'] ?? '').toString();
         final mtr = (extra['mieru_transport'] ?? 'TCP').toString().toUpperCase();
-        final portRanges = extra['server_ports'] is List
+        final portRanges = extra['server_ports'] is List &&
+                (extra['server_ports'] as List).isNotEmpty
             ? (extra['server_ports'] as List).join(',')
             : '$port';
         final params = <String, String>{
           'port': portRanges,
           'protocol': mtr,
           'profile': name.isNotEmpty ? name : '$server:$port',
+          if (extra['multiplexing'] != null && extra['multiplexing'].toString().isNotEmpty)
+            'multiplexing': extra['multiplexing'].toString(),
+          if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+          if (extra['traffic_pattern'] != null &&
+              extra['traffic_pattern'].toString().isNotEmpty)
+            'traffic-pattern': extra['traffic_pattern'].toString(),
+          if (extra['handshake_mode'] != null &&
+              extra['handshake_mode'].toString().isNotEmpty)
+            'handshake-mode': extra['handshake_mode'].toString(),
         };
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
@@ -1185,10 +1235,25 @@ class Profile {
           if (mode.isNotEmpty && mode != 'wg') 'mode': mode,
           if (extra['raw_port'] != null) 'raw_port': extra['raw_port'].toString(),
           if (extra['obfs'] != null) 'obfs': extra['obfs'].toString(),
+          if (extra['srtp_mode'] != null && extra['srtp_mode'].toString().isNotEmpty)
+            'srtp_mode': extra['srtp_mode'].toString(),
           if (extra['hashes'] is List && (extra['hashes'] as List).isNotEmpty)
             'hashes': (extra['hashes'] as List).join(','),
           if (extra['workers'] != null) 'workers': extra['workers'].toString(),
           if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+          if (extra['turn_transport'] != null &&
+              extra['turn_transport'].toString().isNotEmpty)
+            'turn_transport': extra['turn_transport'].toString(),
+          if (extra['vk_token'] != null && extra['vk_token'].toString().isNotEmpty)
+            'vk_token': extra['vk_token'].toString(),
+          if (extra['vk_auth_mode'] != null &&
+              extra['vk_auth_mode'].toString().isNotEmpty)
+            'vk_auth_mode': extra['vk_auth_mode'].toString(),
+          if (extra['vk_cookie'] != null && extra['vk_cookie'].toString().isNotEmpty)
+            'vk_cookie': extra['vk_cookie'].toString(),
+          if (extra['vk_client_ids'] is List &&
+              (extra['vk_client_ids'] as List).isNotEmpty)
+            'vk_client_ids': (extra['vk_client_ids'] as List).join(','),
         };
         final q = params.entries
             .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
@@ -1543,6 +1608,8 @@ class DnsSettings {
     this.checkedAt = 0,
     this.ttlHours = 6,
     this.fakeIp = false,
+    this.ipv6 = false,
+    this.strategy = 'prefer_ipv4',
     this.routeMode = 'split_ru',
   });
 
@@ -1561,8 +1628,14 @@ class DnsSettings {
   /// Сколько часов результат проверки считается свежим.
   final int ttlHours;
 
-  /// Выдавать мгновенные виртуальные IP (198.18.0.0/15).
+  /// Выдавать мгновенные виртуальные IP (198.18.0.0/15 и fc00::/18).
   final bool fakeIp;
+
+  /// Сквозной IPv6 на TUN и FakeIPv6 (`fc00::/18`).
+  final bool ipv6;
+
+  /// Стратегия DNS: `prefer_ipv4`, `prefer_ipv6`, `ipv4_only`, `ipv6_only`, `as_is`.
+  final String strategy;
 
   /// Режим маршрутизации DNS: `split_ru`, `proxy`, `direct`.
   final String routeMode;
@@ -1574,6 +1647,8 @@ class DnsSettings {
     int? checkedAt,
     int? ttlHours,
     bool? fakeIp,
+    bool? ipv6,
+    String? strategy,
     String? routeMode,
   }) {
     return DnsSettings(
@@ -1583,6 +1658,8 @@ class DnsSettings {
       checkedAt: checkedAt ?? this.checkedAt,
       ttlHours: ttlHours ?? this.ttlHours,
       fakeIp: fakeIp ?? this.fakeIp,
+      ipv6: ipv6 ?? this.ipv6,
+      strategy: strategy ?? this.strategy,
       routeMode: routeMode ?? this.routeMode,
     );
   }
@@ -1602,22 +1679,36 @@ class DnsSettings {
         'checkedAt': checkedAt,
         'ttlHours': ttlHours,
         'fakeIp': fakeIp,
+        'ipv6': ipv6,
+        'strategy': strategy,
         'routeMode': routeMode,
       };
 
-  static DnsSettings fromJson(Map<String, dynamic> json) => DnsSettings(
-        autoSelect: json['autoSelect'] != false,
-        servers: ((json['servers'] as List?) ?? const [])
-            .map((item) => item.toString())
-            .toList(growable: false),
-        bootstrap: ((json['bootstrap'] as List?) ?? const ['77.88.8.8', '1.1.1.1'])
-            .map((item) => item.toString())
-            .toList(growable: false),
-        checkedAt: (json['checkedAt'] as num?)?.toInt() ?? 0,
-        ttlHours: (json['ttlHours'] as num?)?.toInt() ?? 6,
-        fakeIp: json['fakeIp'] == true,
-        routeMode: (json['routeMode'] as String?) ?? 'split_ru',
-      );
+  static DnsSettings fromJson(Map<String, dynamic> json) {
+    final rawStrategy = (json['strategy'] as String?)?.trim() ?? 'prefer_ipv4';
+    const validStrategies = {
+      'prefer_ipv4',
+      'prefer_ipv6',
+      'ipv4_only',
+      'ipv6_only',
+      'as_is',
+    };
+    return DnsSettings(
+      autoSelect: json['autoSelect'] != false,
+      servers: ((json['servers'] as List?) ?? const [])
+          .map((item) => item.toString())
+          .toList(growable: false),
+      bootstrap: ((json['bootstrap'] as List?) ?? const ['77.88.8.8', '1.1.1.1'])
+          .map((item) => item.toString())
+          .toList(growable: false),
+      checkedAt: (json['checkedAt'] as num?)?.toInt() ?? 0,
+      ttlHours: (json['ttlHours'] as num?)?.toInt() ?? 6,
+      fakeIp: json['fakeIp'] == true,
+      ipv6: json['ipv6'] == true,
+      strategy: validStrategies.contains(rawStrategy) ? rawStrategy : 'prefer_ipv4',
+      routeMode: (json['routeMode'] as String?) ?? 'split_ru',
+    );
+  }
 }
 
 /// Локальный список правил `tachyon-lists` в формате `.trs`.
@@ -1712,6 +1803,7 @@ class DesyncSettings {
     this.wifiPreset = 'fake_disorder',
     this.cellularPreset = 'fake_split',
     this.customSni = 'www.google.com',
+    this.quicDesync = true,
   });
 
   /// Включена ли десинхронизация пакетов.
@@ -1721,7 +1813,7 @@ class DesyncSettings {
   /// `disorder`, `tlsrec`, `fake`, `oob`.
   final String preset;
 
-  /// Способ «одурачивания» DPI: `md5`, `timestamp`, `badseq`, `badsum`,
+  /// Способ маркировки тестовых пакетов: `md5`, `timestamp`, `badseq`, `badsum`,
   /// `autottl`.
   final String fooling;
 
@@ -1737,6 +1829,9 @@ class DesyncSettings {
   /// Фейковый SNI для пакетов приманки.
   final String customSni;
 
+  /// Десинхронизация пакетов QUIC (UDP 443).
+  final bool quicDesync;
+
   DesyncSettings copyWith({
     bool? enabled,
     String? preset,
@@ -1745,6 +1840,7 @@ class DesyncSettings {
     String? wifiPreset,
     String? cellularPreset,
     String? customSni,
+    bool? quicDesync,
   }) {
     return DesyncSettings(
       enabled: enabled ?? this.enabled,
@@ -1754,6 +1850,7 @@ class DesyncSettings {
       wifiPreset: wifiPreset ?? this.wifiPreset,
       cellularPreset: cellularPreset ?? this.cellularPreset,
       customSni: customSni ?? this.customSni,
+      quicDesync: quicDesync ?? this.quicDesync,
     );
   }
 
@@ -1765,6 +1862,7 @@ class DesyncSettings {
         'wifiPreset': wifiPreset,
         'cellularPreset': cellularPreset,
         'customSni': customSni,
+        'quicDesync': quicDesync,
       };
 
   static DesyncSettings fromJson(Map<String, dynamic> json) => DesyncSettings(
@@ -1775,6 +1873,7 @@ class DesyncSettings {
         wifiPreset: (json['wifiPreset'] as String?) ?? 'fake_disorder',
         cellularPreset: (json['cellularPreset'] as String?) ?? 'fake_split',
         customSni: (json['customSni'] as String?) ?? 'www.google.com',
+        quicDesync: json['quicDesync'] != false,
       );
 }
 
@@ -2816,12 +2915,10 @@ class RuntimeConfig {
     final dedicatedEndpoints = <String, Map<String, dynamic>>{};
 
     void registerDedicatedProfile(Profile p, String tag) {
-      if (p.type == 'wireguard') {
-        dedicatedEndpoints.putIfAbsent(tag, () => p.toWireGuardEndpoint(tag: tag));
-        return;
-      }
-      if (dedicatedOutbounds.containsKey(tag)) return;
-      final node = p.toOutbound(tag: tag);
+      final isWg = p.type == 'wireguard';
+      if (!isWg && dedicatedOutbounds.containsKey(tag)) return;
+      if (isWg && dedicatedEndpoints.containsKey(tag)) return;
+      final node = isWg ? p.toWireGuardEndpoint(tag: tag) : p.toOutbound(tag: tag);
       if (p.extra['chain_outbounds'] is List &&
           (p.extra['chain_outbounds'] as List).isNotEmpty) {
         final rawHops = p.extra['chain_outbounds'] as List;
@@ -2835,24 +2932,39 @@ class RuntimeConfig {
         if (node['detour'] != null &&
             tagMap.containsKey(node['detour'].toString())) {
           node['detour'] = tagMap[node['detour'].toString()];
+        } else if (node['detour'] == null && rawHops.isNotEmpty) {
+          final firstHop = rawHops.first;
+          final firstOld = firstHop is Map ? (firstHop['tag']?.toString() ?? '') : '';
+          node['detour'] = tagMap[firstOld] ?? '$tag-hop-0';
         }
-        dedicatedOutbounds[tag] = node;
+        if (isWg) {
+          dedicatedEndpoints[tag] = node;
+        } else {
+          dedicatedOutbounds[tag] = node;
+        }
         for (var h = 0; h < rawHops.length; h++) {
           final rawHop = rawHops[h];
           if (rawHop is! Map) continue;
           final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
-          if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') continue;
           final oldTag = hop['tag']?.toString() ?? '';
           final hopTag = tagMap[oldTag] ?? '$tag-hop-$h';
-          hop['tag'] = hopTag;
           if (hop['detour'] != null &&
               tagMap.containsKey(hop['detour'].toString())) {
             hop['detour'] = tagMap[hop['detour'].toString()];
           }
-          dedicatedOutbounds.putIfAbsent(hopTag, () => hop);
+          if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
+            dedicatedEndpoints.putIfAbsent(hopTag, () => _wireguardHopToEndpoint(hop, tag: hopTag));
+          } else {
+            hop['tag'] = hopTag;
+            dedicatedOutbounds.putIfAbsent(hopTag, () => hop);
+          }
         }
       } else {
-        dedicatedOutbounds[tag] = node;
+        if (isWg) {
+          dedicatedEndpoints.putIfAbsent(tag, () => node);
+        } else {
+          dedicatedOutbounds[tag] = node;
+        }
       }
     }
 
@@ -2948,6 +3060,7 @@ class RuntimeConfig {
         'type': 'fakeip',
         'tag': 'dns-fakeip',
         'inet4_range': '198.18.0.0/15',
+        if (dns.ipv6) 'inet6_range': 'fc00::/18',
       });
     }
 
@@ -3226,18 +3339,7 @@ class RuntimeConfig {
         if (rawHop is! Map) continue;
         final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
         if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
-          if (!hop.containsKey('peers') && hop['server'] != null) {
-            hop['address'] = hop.remove('local_address') ?? ['10.0.0.2/32'];
-            hop['peers'] = [
-              {
-                'address': hop.remove('server'),
-                'port': hop.remove('server_port') ?? 51820,
-                'public_key': hop.remove('peer_public_key') ?? '',
-                'allowed_ips': ['0.0.0.0/0', '::/0'],
-              },
-            ];
-          }
-          chainEndpoints.add(hop);
+          chainEndpoints.add(_wireguardHopToEndpoint(hop));
         } else {
           chainOutbounds.add(hop);
         }
@@ -3251,14 +3353,13 @@ class RuntimeConfig {
       for (var i = 0; i < autoCandidates.length; i++) {
         final cand = autoCandidates[i];
         final memberTag = 'auto-srv-$i';
-        if (cand.type == 'wireguard') {
-          autoMemberEndpoints.add(cand.toWireGuardEndpoint(tag: memberTag));
-          autoMemberTags.add(memberTag);
-          continue;
-        }
-        final node = cand.toOutbound(tag: memberTag);
+        final isWgCand = cand.type == 'wireguard';
+        final node = isWgCand
+            ? cand.toWireGuardEndpoint(tag: memberTag)
+            : cand.toOutbound(tag: memberTag);
         final nodeInsertIdx = autoMemberOutbounds.length;
-        if (cand.extra['chain_outbounds'] is List && (cand.extra['chain_outbounds'] as List).isNotEmpty) {
+        if (cand.extra['chain_outbounds'] is List &&
+            (cand.extra['chain_outbounds'] as List).isNotEmpty) {
           final rawHops = cand.extra['chain_outbounds'] as List;
           final tagMap = <String, String>{};
           for (var h = 0; h < rawHops.length; h++) {
@@ -3269,22 +3370,34 @@ class RuntimeConfig {
           }
           if (node['detour'] != null && tagMap.containsKey(node['detour'].toString())) {
             node['detour'] = tagMap[node['detour'].toString()];
+          } else if (node['detour'] == null && rawHops.isNotEmpty) {
+            final firstHop = rawHops.first;
+            final firstOld = firstHop is Map ? (firstHop['tag']?.toString() ?? '') : '';
+            node['detour'] = tagMap[firstOld] ?? 'auto-hop-$i-0';
           }
           for (var h = 0; h < rawHops.length; h++) {
             final rawHop = rawHops[h];
             if (rawHop is! Map) continue;
             final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
-            if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') continue;
             final oldTag = hop['tag']?.toString() ?? '';
-            hop['tag'] = tagMap[oldTag] ?? 'auto-hop-$i-$h';
+            final hopTag = tagMap[oldTag] ?? 'auto-hop-$i-$h';
             if (hop['detour'] != null && tagMap.containsKey(hop['detour'].toString())) {
               hop['detour'] = tagMap[hop['detour'].toString()];
             }
-            autoMemberOutbounds.add(hop);
+            if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
+              autoMemberEndpoints.add(_wireguardHopToEndpoint(hop, tag: hopTag));
+            } else {
+              hop['tag'] = hopTag;
+              autoMemberOutbounds.add(hop);
+            }
           }
         }
         autoMemberTags.add(memberTag);
-        autoMemberOutbounds.insert(nodeInsertIdx, node);
+        if (isWgCand) {
+          autoMemberEndpoints.add(node);
+        } else {
+          autoMemberOutbounds.insert(nodeInsertIdx, node);
+        }
       }
     }
 
@@ -3360,6 +3473,7 @@ class RuntimeConfig {
         'preset': desync.preset,
         'fooling': desync.fooling,
         'auto_tune': desync.autoTune,
+        'quic_desync': desync.quicDesync,
         if (fakeSni.isNotEmpty) 'fake_sni': fakeSni,
       });
     }
@@ -3387,6 +3501,7 @@ class RuntimeConfig {
         'cache_file': {
           'enabled': true,
           'path': cacheFilePath,
+          'store_dns': true,
           if (dns.fakeIp) 'store_fakeip': true,
         },
         if (autoMemberTags.isNotEmpty && balancer.multiServiceEnabled)
@@ -3398,7 +3513,7 @@ class RuntimeConfig {
         'servers': dnsServers,
         'rules': dnsRules,
         'final': finalTag,
-        'strategy': 'prefer_ipv4',
+        'strategy': dns.strategy,
         'reverse_mapping': true,
       },
       'inbounds': [
@@ -3406,7 +3521,11 @@ class RuntimeConfig {
           {
             'type': 'tun',
             'tag': 'tun-in',
-            'address': ['172.19.0.1/30'],
+            'address': [
+              '172.19.0.1/30',
+              if (dns.ipv6) 'fdfe:dcba:9876::1/126',
+            ],
+            if (dns.ipv6) 'route_address': const ['0.0.0.0/0', '::/0'],
             'mtu': effectiveTunMtu,
             'auto_route': false,
             'strict_route': false,
@@ -3932,4 +4051,182 @@ Map<String, dynamic> normalizeXhttpTransport(Map<String, dynamic> rawInput) {
   }
 
   return out;
+}
+
+/// Нормализует CPS-цепочку AmneziaWG (`i1`..`i5` / `j1`..`j3`):
+/// декодирует URL-кодирование `%3C`..`%3E` / `%20` / `%2B` и `+` внутри тегов,
+/// приводит теги (`b`, `c`, `t`, `r`, `rc`, `rd`, `d`, `ds`, `dz`) и префикс `0X`
+/// к нижнему регистру, оборачивает голый hex `0x...` в `<b 0x...>` и отбрасывает `"0"`.
+String normalizeAwgCpsChain(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty || trimmed == '0') return '';
+  var s = trimmed;
+  if (!s.contains('<') &&
+      (s.contains('%3c') || s.contains('%3C'))) {
+    try {
+      s = Uri.decodeComponent(s.replaceAll('+', ' ')).trim();
+    } catch (_) {}
+  }
+  if (!s.contains('<')) {
+    if ((s.startsWith('0x') || s.startsWith('0X')) &&
+        s.length > 2 &&
+        s.length.isEven &&
+        RegExp(r'^0[xX][0-9a-fA-F]+$').hasMatch(s)) {
+      return '<b 0x${s.substring(2)}>';
+    }
+    return s;
+  }
+
+  const lowerTags = {'b', 'c', 't', 'r', 'rc', 'rd', 'd', 'ds', 'dz'};
+  final out = StringBuffer();
+  var rest = s;
+  while (true) {
+    final start = rest.indexOf('<');
+    if (start < 0) {
+      out.write(rest);
+      break;
+    }
+    out.write(rest.substring(0, start));
+    final endRel = rest.indexOf('>', start);
+    if (endRel < 0) {
+      out.write(rest.substring(start));
+      break;
+    }
+    var body = rest.substring(start + 1, endRel);
+    if (body.contains('%')) {
+      body = body
+          .replaceAll('%20', ' ')
+          .replaceAll('%2b', '+')
+          .replaceAll('%2B', '+');
+    }
+    final tokens = body
+        .split(RegExp(r'[\s+]+'))
+        .where((t) => t.isNotEmpty)
+        .toList(growable: false);
+    if (tokens.isEmpty) {
+      out.write('<>');
+    } else {
+      final rawKey = tokens.first;
+      final keyLower = rawKey.toLowerCase();
+      final keyOut = lowerTags.contains(keyLower) ? keyLower : rawKey;
+      out.write('<');
+      out.write(keyOut);
+      if (tokens.length > 1) {
+        out.write(' ');
+        final arg = tokens[1];
+        if (keyOut == 'b' && arg.startsWith('0X')) {
+          out.write('0x${arg.substring(2)}');
+        } else {
+          out.write(arg);
+        }
+        for (var i = 2; i < tokens.length; i++) {
+          out.write(' ');
+          out.write(tokens[i]);
+        }
+      }
+      out.write('>');
+    }
+    rest = rest.substring(endRel + 1);
+  }
+  return out.toString();
+}
+
+/// Приводит `reserved` Cloudflare WARP / WireGuard к строгому списку `[b0, b1, b2]`
+/// (который требует `peers[].reserved` в валидаторе `tachyon-core`), поддерживая Base64 и CSV.
+List<int>? normalizeWgReserved(Object? raw) {
+  if (raw == null) return null;
+  if (raw is List) {
+    final ints = <int>[];
+    for (final item in raw) {
+      final v = item is num ? item.toInt() : int.tryParse(item.toString().trim());
+      if (v == null || v < 0 || v > 255) return null;
+      ints.add(v);
+    }
+    return ints.length == 3 ? ints : null;
+  }
+  final s = raw.toString().trim();
+  if (s.isEmpty) return null;
+  final clean = s.replaceAll('[', '').replaceAll(']', '');
+  if (clean.contains(',')) {
+    final parts = clean.split(',').map((e) => int.tryParse(e.trim())).toList();
+    if (parts.length == 3 && parts.every((n) => n != null && n >= 0 && n <= 255)) {
+      return parts.cast<int>();
+    }
+    return null;
+  }
+  var b64 = s.replaceAll('-', '+').replaceAll('_', '/');
+  final mod = b64.length % 4;
+  if (mod == 1) return null;
+  if (mod > 1) b64 = b64.padRight(b64.length + (4 - mod), '=');
+  try {
+    final decoded = base64.decode(b64);
+    if (decoded.length == 3) {
+      return List<int>.from(decoded);
+    }
+  } catch (_) {}
+  return null;
+}
+
+/// Приводит транзитный WireGuard/AmneziaWG узел из `chain_outbounds` к каноническому endpoint.
+Map<String, dynamic> _wireguardHopToEndpoint(
+  Map<String, dynamic> rawHop, {
+  String? tag,
+}) {
+  final hop = Map<String, dynamic>.from(rawHop);
+  final resolvedTag = tag ?? (hop['tag']?.toString() ?? 'hop-wg');
+  final server = (hop['server'] ?? '').toString().trim();
+  final port = hop['server_port'] is num
+      ? (hop['server_port'] as num).toInt()
+      : (int.tryParse(hop['server_port']?.toString() ?? '') ?? 51820);
+  if (hop['peers'] is List && (hop['peers'] as List).isNotEmpty) {
+    hop['tag'] = resolvedTag;
+    if (hop['address'] == null && hop['local_address'] != null) {
+      hop['address'] = hop.remove('local_address');
+    } else {
+      hop.remove('local_address');
+    }
+    final peers = (hop['peers'] as List)
+        .whereType<Map>()
+        .map((p) {
+          final pm = Map<String, dynamic>.from(p);
+          final res = normalizeWgReserved(pm['reserved']);
+          if (res != null) {
+            pm['reserved'] = res;
+          } else {
+            pm.remove('reserved');
+          }
+          return pm;
+        })
+        .toList();
+    if (peers.isNotEmpty) hop['peers'] = peers;
+    hop
+      ..remove('server')
+      ..remove('server_port')
+      ..remove('peer_public_key')
+      ..remove('pre_shared_key')
+      ..remove('security')
+      ..remove('transport');
+    return hop;
+  }
+
+  final extra = Map<String, dynamic>.from(hop)
+    ..remove('type')
+    ..remove('tag')
+    ..remove('server')
+    ..remove('server_port');
+  final prof = Profile(
+    id: 'hop-$resolvedTag',
+    name: resolvedTag,
+    type: 'wireguard',
+    server: server,
+    port: port,
+    password: (hop['private_key'] ?? hop['password'] ?? '').toString(),
+    publicKey: (hop['peer_public_key'] ?? hop['public_key'] ?? '').toString(),
+    extra: extra,
+  );
+  final ep = prof.toWireGuardEndpoint(tag: resolvedTag);
+  if (hop['detour'] != null && hop['detour'].toString().isNotEmpty) {
+    ep['detour'] = hop['detour'];
+  }
+  return ep;
 }

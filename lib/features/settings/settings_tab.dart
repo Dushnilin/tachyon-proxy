@@ -944,6 +944,8 @@ class _SettingsTabState extends State<SettingsTab> {
     AppController controller,
   ) async {
     const cloudTipsUrl = 'https://pay.cloudtips.ru/p/449c5ef9';
+    const ozonSbpUrl =
+        'https://finance.ozon.ru/apps/sbp/ozonbankpay/019af2ed-d158-77a9-a698-2805a5e61be5';
     const boostyUrl = 'https://boosty.to/tachyon';
     const telegramUrl = 'https://t.me/tachyon_proxy';
     const wallets = <({String name, String address})>[
@@ -1126,6 +1128,12 @@ class _SettingsTabState extends State<SettingsTab> {
                         ),
                       ),
                     ],
+                    linkTile(
+                      icon: Icons.qr_code_rounded,
+                      title: 'СБП (Ozon Банк)',
+                      subtitle: 'Мгновенный перевод по СБП без комиссии',
+                      url: ozonSbpUrl,
+                    ),
                     linkTile(
                       icon: Icons.credit_card_rounded,
                       title: 'Карты РФ / СБП / Tinkoff Pay',

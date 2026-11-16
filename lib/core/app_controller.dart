@@ -144,7 +144,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.1';
+  static const String appVersion = '0.1.2';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -311,7 +311,7 @@ class AppController extends ChangeNotifier {
 
     // Миграция и дедупликация профилей (устранение дублей и коллизий id)
     if (_settings.profiles.isNotEmpty) {
-      final deduped = _dedupProfiles(
+      final deduped = dedupProfiles(
         _settings.profiles,
         subscriptions: _settings.subscriptions,
       );
@@ -573,7 +573,7 @@ class AppController extends ChangeNotifier {
 
   /// Удаляет полные дубликаты серверов, гарантирует уникальность `id` каждого сервера
   /// и восстанавливает привязку серверов FPTN к подписке FPTN, если ранее они попали в чужую группу.
-  List<Profile> _dedupProfiles(
+  static List<Profile> dedupProfiles(
     List<Profile> items, {
     String defaultSubId = '',
     List<SubscriptionEntry> subscriptions = const [],
@@ -608,7 +608,11 @@ class AppController extends ChangeNotifier {
     final result = <Profile>[];
     for (final p in ordered) {
       final subId = resolveSubId(p);
-      final dedupKey = '$subId|${p.name}|${p.server}|${p.port}|${p.type}';
+      final baseKey = '$subId|${p.name}|${p.server}|${p.port}|${p.type}';
+      final dedupKey = p.type == 'wireguard'
+          ? '$baseKey|${p.password}|${p.publicKey}|'
+              '${normalizeWgReserved(p.extra['reserved'])?.join(',') ?? p.extra['reserved'] ?? ''}'
+          : baseKey;
       if (!seenKeys.add(dedupKey)) continue;
 
       var id = p.id;
@@ -1461,6 +1465,7 @@ class AppController extends ChangeNotifier {
       Map<String, dynamic>? nativeUserInfo;
       Map<String, dynamic>? nativeRes;
       String? nativeParseErr;
+      String? lastHttpErr;
 
       Future<void> tryNativeFetch() async {
         if (fresh.isNotEmpty) return;
@@ -1483,6 +1488,8 @@ class AppController extends ChangeNotifier {
           if (nativeRes!['user_info'] is Map) {
             nativeUserInfo = Map<String, dynamic>.from(nativeRes!['user_info'] as Map);
           }
+        } else if (nativeRes?['error'] != null) {
+          debugPrint('[tachyon-sub] native fetch error ($subId): ${nativeRes!['error']}');
         }
       }
 
@@ -1654,7 +1661,21 @@ class AppController extends ChangeNotifier {
                 fetchedBody = body;
                 break;
               }
-            } catch (_) {
+            } on SocketException catch (e) {
+              lastHttpErr = e.message.isNotEmpty ? e.message : '$e';
+              debugPrint('[tachyon-sub] http socket error (viaProxy=$viaProxy): $e');
+              break;
+            } on HandshakeException catch (e) {
+              lastHttpErr = e.message.isNotEmpty ? e.message : '$e';
+              debugPrint('[tachyon-sub] http tls error (viaProxy=$viaProxy): $e');
+              break;
+            } on TimeoutException catch (e) {
+              lastHttpErr = 'Таймаут соединения';
+              debugPrint('[tachyon-sub] http timeout (viaProxy=$viaProxy): $e');
+              break;
+            } catch (e) {
+              lastHttpErr = '$e';
+              debugPrint('[tachyon-sub] http error (viaProxy=$viaProxy, ua=$ua): $e');
               continue;
             }
           }
@@ -1667,8 +1688,11 @@ class AppController extends ChangeNotifier {
       // поэтому сначала загружаем подписку ЧЕРЕЗ локальный прокси ядра (127.0.0.1:2080),
       // чтобы обновление работало даже при сетевых ограничениях оператора (белых списках),
       // не разрывая текущее соединение.
+      final waitMs = (_tunnel.status.isActive || _tunnel.status == VpnStatus.connecting)
+          ? 1200
+          : 220;
       final proxyReady = _tunnel.status.isActive ||
-          await _waitForLocalProxyReady(timeout: const Duration(milliseconds: 220));
+          await _waitForLocalProxyReady(timeout: Duration(milliseconds: waitMs));
       if (proxyReady) {
         await tryHttpCascade(viaProxy: true);
         if (fresh.isEmpty) {
@@ -1691,10 +1715,12 @@ class AppController extends ChangeNotifier {
           _lastError = 'Сервер вернул HTML-страницу вместо серверов (Cloudflare/капча/ошибка хостинга)';
         } else {
           final nativeErr = nativeRes?['error']?.toString() ?? nativeParseErr ?? '';
-          _lastError = nativeErr.isNotEmpty
-              ? 'Не удалось загрузить подписку ($nativeErr)'
+          final detail = nativeErr.isNotEmpty ? nativeErr : (lastHttpErr ?? '');
+          _lastError = detail.isNotEmpty
+              ? 'Не удалось загрузить подписку ($detail)'
               : 'В ответе подписки не найдено распознаваемых серверов';
         }
+        debugPrint('[tachyon-sub] failed ($subId): $_lastError');
         notifyListeners();
         return 0;
       }
@@ -4175,6 +4201,7 @@ class AppController extends ChangeNotifier {
       notifyListeners();
     }
     var result = -1;
+    var recordPing = true;
     Socket? socket;
     try {
       if (_tunnel.status.isActive && _nodeTelemetry.containsKey(id)) {
@@ -4297,7 +4324,24 @@ class AppController extends ChangeNotifier {
         return -1;
       }
 
-      if (isQuicProbe && targetAddresses.isNotEmpty) {
+      if (hopType == 'wireguard') {
+        // WireGuard / AmneziaWG не отвечает без криптографического рукопожатия:
+        // при активном туннеле замеряем через Clash API, а без туннеля не ставим ложный TCP-таймаут.
+        if (_tunnel.status.isActive) {
+          final clashTag = _resolveLoadedClashProxyTag(id);
+          if (clashTag != null) {
+            result = await _probeClashProxyDelay(clashTag);
+          }
+        }
+        if (result < 0) {
+          if (targetAddresses.isEmpty) {
+            result = -1;
+          } else {
+            recordPing = false;
+            _pings.remove(id);
+          }
+        }
+      } else if (isQuicProbe && targetAddresses.isNotEmpty) {
         result = await probeQuicTargets();
         if (result < 0 && hopType == 'naive') {
           result = await probeTcpTls();
@@ -4322,7 +4366,7 @@ class AppController extends ChangeNotifier {
       } else {
         result = await probeTcpTls();
       }
-      if (result < 0 && _tunnel.status.isActive) {
+      if (hopType != 'wireguard' && result < 0 && _tunnel.status.isActive) {
         final clashTag = _resolveLoadedClashProxyTag(id);
         if (clashTag != null) {
           result = await _probeClashProxyDelay(clashTag);
@@ -4335,9 +4379,12 @@ class AppController extends ChangeNotifier {
       if (result < 0 && _tunnel.status.isActive && (_urlTestPing ?? -1) > 0) {
         if (_settings.selectedProfileId == id || _activeBalancerWinner?.id == id) {
           result = _urlTestPing!;
+          recordPing = true;
         }
       }
-      _pings[id] = result;
+      if (recordPing) {
+        _pings[id] = result;
+      }
       _pingingIds.remove(id);
       _bumpServerRevision(id);
       if (_settings.balancer.multiServiceEnabled) {
@@ -4489,7 +4536,6 @@ class AppController extends ChangeNotifier {
     if (targets.isEmpty) return;
 
     _pingingAll = true;
-    _sortByPing = true;
     notifyListeners();
 
     try {
@@ -4507,11 +4553,17 @@ class AppController extends ChangeNotifier {
       await Future.wait(List.generate(workerCount, (_) => worker()));
 
       // Если текущий выбранный сервер недоступен или не выбран — автоматически выбираем самый быстрый рабочий
-      final sorted = sortProfiles(targets);
-      final best = sorted.firstOrNull;
+      Profile? best;
+      var bestPing = -1;
+      for (final candidate in targets) {
+        final p = _pings[candidate.id];
+        if (p != null && p >= 0 && (bestPing < 0 || p < bestPing)) {
+          bestPing = p;
+          best = candidate;
+        }
+      }
       final currentPing = _pings[_settings.selectedProfileId];
       if (best != null &&
-          (_pings[best.id] ?? -1) >= 0 &&
           (_settings.selectedProfileId.isEmpty || (currentPing != null && currentPing < 0))) {
         await selectProfile(best.id);
       }

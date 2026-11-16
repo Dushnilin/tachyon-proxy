@@ -177,7 +177,7 @@
             android:name="org.tachyon.vpn.RestartActivity"
             android:exported="false"
             android:process=":restart"
-            android:theme="@android:style/Theme.NoDisplay" />
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Виджет главного экрана Android 4x1 -->
         <receiver

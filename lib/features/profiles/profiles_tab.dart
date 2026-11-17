@@ -220,10 +220,10 @@ class _ProfilesTabState extends State<ProfilesTab> {
               title: 'Профилей пока нет',
               description:
                   'Импортируйте подписку по ссылке или QR-коду, либо добавьте сервер вручную — '
-                  'поддерживаются все протоколы tachyon-core: TewFai, VLESS, VMess, Trojan, Shadowsocks-2022, '
+                  'поддерживаются все протоколы tachyon-core: TewFai, WDTT / CSQTT / qWDTT, VLESS, VMess, Trojan, Shadowsocks-2022, '
                   'Hysteria 2, TUIC v5, WireGuard / AmneziaWG, AnyTLS, NaiveProxy, Snell, ShadowTLS, '
-                  'FPTN, MASQUE, Mieru, TrustTunnel, OpenConnect, SSH, MTProto, SOCKS5/HTTP, '
-                  'а также подписки Sing-box, Xray, Clash/Mihomo YAML и SIP008.',
+                  'FPTN, MASQUE, Mieru, TrustTunnel, OpenConnect, OpenVPN, Tailscale, SSH, MTProto, SOCKS5/HTTP, '
+                  'а также подписки Sing-box, Xray, Clash/Mihomo YAML, .conf и .ovpn.',
               action: Wrap(
                 spacing: 10,
                 runSpacing: 8,
@@ -627,7 +627,15 @@ class _ProfilesTabState extends State<ProfilesTab> {
             clipLower.startsWith('masque://') ||
             clipLower.startsWith('trusttunnel://') ||
             clipLower.startsWith('openconnect://') ||
+            clipLower.startsWith('anyconnect://') ||
+            clipLower.startsWith('wdtt://') ||
+            clipLower.startsWith('qwdtt://') ||
+            clipLower.startsWith('csqtt://') ||
+            clipLower.startsWith('sudoku://') ||
+            clipLower.startsWith('fptn:') ||
+            clipLower.startsWith('fptnb:') ||
             clipText.contains('[Interface]') ||
+            clipText.contains('remote ') ||
             clipText.contains('proxies:') ||
             clipText.startsWith('{'))) {
       textController.text = clipText;
@@ -652,7 +660,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Отсканируйте QR-код, выберите файл (.conf AmneziaWG 2.0/3.0/3.1, .fptn, .json) '
+                      'Отсканируйте QR-код, выберите файл (.conf AmneziaWG 2.0/3.0/3.1, .ovpn, .fptn, .json) '
                       'или вставьте ссылку подписки, токен FPTN или любой URI протокола.',
                       style: Theme.of(dialogContext).textTheme.bodyMedium,
                     ),
@@ -849,6 +857,8 @@ class _ProfilesTabState extends State<ProfilesTab> {
     var type = edit?.type ?? 'vless';
     const allowedTypes = [
       'vless',
+      'tewfai',
+      'wdtt',
       'vmess',
       'trojan',
       'shadowsocks',
@@ -861,14 +871,17 @@ class _ProfilesTabState extends State<ProfilesTab> {
       'snell',
       'shadowtls',
       'fptn',
-      'socks',
-      'http',
-      'ssh',
-      'mtproto',
       'masque',
       'mieru',
       'trusttunnel',
       'openconnect',
+      'openvpn-client',
+      'tailscale',
+      'mtproto',
+      'ssh',
+      'socks',
+      'http',
+      'sudoku',
     ];
     if (!allowedTypes.contains(type)) type = 'vless';
 
@@ -902,7 +915,12 @@ class _ProfilesTabState extends State<ProfilesTab> {
     final password = TextEditingController(
       text: edit?.password.isNotEmpty == true
           ? edit!.password
-          : (edit?.extra['private_key'] ?? edit?.extra['psk'] ?? edit?.extra['secret'] ?? '')
+          : (edit?.extra['private_key'] ??
+                  edit?.extra['psk'] ??
+                  edit?.extra['secret'] ??
+                  edit?.extra['static_key'] ??
+                  edit?.extra['auth_key'] ??
+                  '')
               .toString(),
     );
     final method = TextEditingController(
@@ -958,10 +976,13 @@ class _ProfilesTabState extends State<ProfilesTab> {
       text: edit?.extra['local_address'] is List &&
               (edit!.extra['local_address'] as List).isNotEmpty
           ? (edit.extra['local_address'] as List).join(',')
-          : '10.0.0.2/32',
+          : (edit?.extra['address'] is List &&
+                  (edit!.extra['address'] as List).isNotEmpty
+              ? (edit.extra['address'] as List).join(',')
+              : (type == 'openvpn-client' ? '10.8.0.2/24' : '10.0.0.2/32')),
     );
     final wgMtu = TextEditingController(
-      text: (edit?.extra['mtu'] ?? '1420').toString(),
+      text: (edit?.extra['mtu'] ?? (type == 'openvpn-client' ? '1500' : '1420')).toString(),
     );
     final wgKeepalive = TextEditingController(
       text: (edit?.extra['persistent_keepalive_interval'] ?? '').toString(),
@@ -1001,6 +1022,116 @@ class _ProfilesTabState extends State<ProfilesTab> {
     var awgRandomTrailers = edit?.extra['random_trailers'] == true;
     var awgDisableCookies = edit?.extra['disable_cookies'] == true;
 
+    // WDTT / CSQTT / qWDTT
+    final rawWdttMode = (edit?.extra['mode'] ?? '').toString().trim().toLowerCase();
+    var wdttMode = const {'wg', 'raw', 'csqtt', 'csqtt_v1'}.contains(rawWdttMode)
+        ? rawWdttMode
+        : 'csqtt';
+    final rawWdttObfs = (edit?.extra['obfs'] ?? 'audio').toString().trim().toLowerCase();
+    var wdttObfs = const {'audio', 'video', 'unified'}.contains(rawWdttObfs)
+        ? rawWdttObfs
+        : 'audio';
+    final rawWdttSrtp = (edit?.extra['srtp_mode'] ?? 'auto').toString().trim().toLowerCase();
+    var wdttSrtpMode = const {'auto', 'dtls', 'wrap', 'dtls-srtp', 'wrap-srtp'}
+            .contains(rawWdttSrtp)
+        ? rawWdttSrtp
+        : 'auto';
+    final rawWdttTurn = (edit?.extra['turn_transport'] ?? 'auto').toString().trim().toLowerCase();
+    var wdttTurnTransport = const {'auto', 'tcp', 'udp', 'tcp_tls', 'tls'}
+            .contains(rawWdttTurn)
+        ? (rawWdttTurn == 'tls' ? 'tcp_tls' : rawWdttTurn)
+        : 'auto';
+    final wdttHashes = TextEditingController(
+      text: edit?.extra['hashes'] is List
+          ? (edit!.extra['hashes'] as List).join(', ')
+          : (edit?.extra['hashes'] ?? '').toString(),
+    );
+    final wdttWorkers = TextEditingController(text: (edit?.extra['workers'] ?? '').toString());
+    final wdttMtu = TextEditingController(text: (edit?.extra['mtu'] ?? '').toString());
+    final wdttRawPort = TextEditingController(text: (edit?.extra['raw_port'] ?? '').toString());
+    final wdttVkToken = TextEditingController(text: (edit?.extra['vk_token'] ?? '').toString());
+    final wdttDeviceId = TextEditingController(text: (edit?.extra['device_id'] ?? '').toString());
+
+    // OpenConnect
+    final rawOcFlavor = (edit?.extra['flavor'] ?? 'anyconnect').toString().trim().toLowerCase();
+    var ocFlavor = const {'anyconnect', 'gp', 'nc', 'f5', 'fortinet', 'pulse'}
+            .contains(rawOcFlavor)
+        ? rawOcFlavor
+        : 'anyconnect';
+    final ocCookie = TextEditingController(text: (edit?.extra['cookie'] ?? '').toString());
+    final ocUrlPath = TextEditingController(text: (edit?.extra['urlpath'] ?? '').toString());
+    var ocIp = edit?.extra['ip'] == true;
+    var ocDtls = edit?.extra['dtls'] == true;
+    var ocEsp = edit?.extra['esp'] == true;
+
+    // Mieru
+    var mieruTransport = (edit?.extra['mieru_transport'] ?? 'TCP').toString().toUpperCase() == 'UDP'
+        ? 'UDP'
+        : 'TCP';
+    final mieruPorts = TextEditingController(
+      text: edit?.extra['server_ports'] is List
+          ? (edit!.extra['server_ports'] as List).join(',')
+          : '',
+    );
+    final mieruMultiplexing = TextEditingController(
+      text: (edit?.extra['multiplexing'] ?? '').toString(),
+    );
+    final mieruMtu = TextEditingController(text: (edit?.extra['mtu'] ?? '').toString());
+
+    // Tewfai
+    final rawTewfaiTr = edit?.extra['tewfai_transport'];
+    final tewfaiTransport = TextEditingController(
+      text: rawTewfaiTr is List
+          ? rawTewfaiTr.join(',')
+          : (rawTewfaiTr ?? (edit?.transport ?? 'tcp')).toString(),
+    );
+    final tewfaiInnerCipher = TextEditingController(
+      text: (edit?.extra['inner_cipher'] ?? '').toString(),
+    );
+    final tewfaiMorphProfile = TextEditingController(
+      text: (edit?.extra['morph_profile'] ?? '').toString(),
+    );
+    var tewfaiPqc = edit?.extra['pqc'] == true;
+    var tewfaiFec = edit?.extra['fec'] == true;
+    var tewfaiDesync = edit?.extra['desync'] == true;
+
+    // Snell / ShadowTLS / Naive
+    final protoVersion = TextEditingController(
+      text: (edit?.extra['version'] ?? (type == 'snell' ? '5' : '3')).toString(),
+    );
+    var naiveQuic = edit?.extra['quic'] == true || edit?.transport == 'quic';
+
+    // OpenVPN static_key
+    var ovpnNetwork = (edit?.extra['network'] ?? 'udp').toString().toLowerCase().contains('tcp')
+        ? 'tcp'
+        : 'udp';
+    final ovpnCipher = TextEditingController(
+      text: (edit?.extra['cipher'] ?? 'AES-256-CBC').toString(),
+    );
+    final ovpnAuth = TextEditingController(
+      text: (edit?.extra['auth'] ?? 'SHA256').toString(),
+    );
+    var ovpnKeyDir = (edit?.extra['key_direction'] ?? '').toString().toLowerCase();
+    if (!const {'', 'client', 'server'}.contains(ovpnKeyDir)) ovpnKeyDir = '';
+
+    // Tailscale
+    final tsControlUrl = TextEditingController(
+      text: (edit?.extra['control_url'] ?? 'https://controlplane.tailscale.com').toString(),
+    );
+    final tsHostname = TextEditingController(text: (edit?.extra['hostname'] ?? '').toString());
+    final tsExitNode = TextEditingController(text: (edit?.extra['exit_node'] ?? '').toString());
+    final tsListenPort = TextEditingController(
+      text: (edit?.extra['listen_port'] ?? '41641').toString(),
+    );
+    var tsAcceptRoutes = edit?.extra['accept_routes'] == true;
+    var tsAdvertiseExitNode = edit?.extra['advertise_exit_node'] == true;
+    var tsEphemeral = edit?.extra['ephemeral'] == true;
+
+    // Sudoku
+    final sudokuTableType = TextEditingController(
+      text: (edit?.extra['table_type'] ?? 'prefer_ascii').toString(),
+    );
+
     await showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -1009,12 +1140,16 @@ class _ProfilesTabState extends State<ProfilesTab> {
             final hasStreamTransport = const {'vless', 'vmess', 'trojan'}.contains(type);
             final hasTlsConfig = !const {
               'wireguard',
+              'openvpn-client',
+              'tailscale',
+              'wdtt',
               'shadowsocks',
               'socks',
               'ssh',
               'snell',
               'mtproto',
               'mieru',
+              'sudoku',
             }.contains(type);
             final needsUsername = const {
               'naive',
@@ -1042,6 +1177,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         items: const [
                           DropdownMenuItem(value: 'vless', child: Text('VLESS (XTLS / Reality / XHTTP)')),
                           DropdownMenuItem(value: 'tewfai', child: Text('TewFai (QUIC + TCP / PQC)')),
+                          DropdownMenuItem(value: 'wdtt', child: Text('WDTT / CSQTT / qWDTT (DTLS / SRTP / TURN)')),
                           DropdownMenuItem(value: 'vmess', child: Text('VMess (V2Ray / Xray)')),
                           DropdownMenuItem(value: 'trojan', child: Text('Trojan')),
                           DropdownMenuItem(value: 'shadowsocks', child: Text('Shadowsocks / SS-2022')),
@@ -1057,11 +1193,14 @@ class _ProfilesTabState extends State<ProfilesTab> {
                           DropdownMenuItem(value: 'masque', child: Text('Cloudflare MASQUE (HTTP/3)')),
                           DropdownMenuItem(value: 'mieru', child: Text('Mieru')),
                           DropdownMenuItem(value: 'trusttunnel', child: Text('TrustTunnel')),
-                          DropdownMenuItem(value: 'openconnect', child: Text('OpenConnect (AnyConnect)')),
+                          DropdownMenuItem(value: 'openconnect', child: Text('OpenConnect (AnyConnect / GP / Pulse)')),
+                          DropdownMenuItem(value: 'openvpn-client', child: Text('OpenVPN (Static Key)')),
+                          DropdownMenuItem(value: 'tailscale', child: Text('Tailscale (Userspace Mesh)')),
                           DropdownMenuItem(value: 'mtproto', child: Text('Telegram MTProto')),
                           DropdownMenuItem(value: 'ssh', child: Text('SSH Tunnel')),
                           DropdownMenuItem(value: 'socks', child: Text('SOCKS4 / SOCKS5')),
                           DropdownMenuItem(value: 'http', child: Text('HTTP / HTTPS Proxy')),
+                          DropdownMenuItem(value: 'sudoku', child: Text('Sudoku (совместимость)')),
                         ],
                         onChanged: (value) => setState(() {
                           type = value ?? type;
@@ -1073,9 +1212,17 @@ class _ProfilesTabState extends State<ProfilesTab> {
                                 'naive',
                                 'shadowtls',
                                 'tewfai',
+                                'masque',
+                                'trusttunnel',
+                                'openconnect',
+                                'fptn',
                               }.contains(type) &&
                               security == 'none') {
                             security = 'tls';
+                          }
+                          if (type == 'openvpn-client' && address.text.isEmpty && wgLocalIp.text == '10.0.0.2/32') {
+                            wgLocalIp.text = '10.8.0.2/24';
+                            wgMtu.text = '1500';
                           }
                         }),
                       ),
@@ -1089,18 +1236,28 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         controller: address,
                         decoration: InputDecoration(
                           labelText: edit == null
-                              ? 'Адрес:порт или ссылка https:// подписки'
+                              ? 'Адрес:порт или ссылка подписки / узла'
                               : 'Адрес и порт',
-                          hintText: type == 'wireguard'
-                              ? 'engage.cloudflareclient.com:2408'
-                              : 'https://... или example.com:443',
+                          hintText: switch (type) {
+                            'wireguard' => 'engage.cloudflareclient.com:2408',
+                            'wdtt' => 'example.com:46000 или csqtt://... / qwdtt://...',
+                            'openvpn-client' => 'vpn.example.com:1194',
+                            'tailscale' => 'controlplane.tailscale.com:443',
+                            _ => 'https://... или example.com:443',
+                          },
                         ),
                       ),
                       const SizedBox(height: Space.sm),
-                      if (type == 'vless' || type == 'vmess' || type == 'tuic' || type == 'tewfai') ...[
+                      if (type == 'vless' ||
+                          type == 'vmess' ||
+                          type == 'tuic' ||
+                          type == 'tewfai' ||
+                          type == 'sudoku') ...[
                         TextField(
                           controller: uuid,
-                          decoration: const InputDecoration(labelText: 'UUID'),
+                          decoration: InputDecoration(
+                            labelText: type == 'sudoku' ? 'Ключ / UUID Sudoku' : 'UUID',
+                          ),
                         ),
                         const SizedBox(height: Space.sm),
                       ],
@@ -1114,9 +1271,13 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       if (type != 'vless' && type != 'vmess') ...[
                         TextField(
                           controller: password,
+                          maxLines: type == 'openvpn-client' ? 3 : 1,
                           decoration: InputDecoration(
                             labelText: switch (type) {
                               'wireguard' || 'masque' => 'Приватный ключ клиента (Private Key)',
+                              'openvpn-client' => 'Статический ключ (OpenVPN Static Key)',
+                              'tailscale' => 'Auth Key (tskey-auth-...)',
+                              'wdtt' => 'Пароль WDTT / CSQTT',
                               'snell' => 'Ключ PSK',
                               'mtproto' => 'Секрет MTProto (hex / dd...)',
                               _ => 'Пароль / ключ',
@@ -1579,6 +1740,493 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         ),
                         const SizedBox(height: Space.sm),
                       ],
+                      if (type == 'wdtt') ...[
+                        DropdownButtonFormField<String>(
+                          isExpanded: true,
+                          initialValue: wdttMode,
+                          decoration: const InputDecoration(labelText: 'Режим WDTT / CSQTT'),
+                          items: const [
+                            DropdownMenuItem(value: 'csqtt', child: Text('CSQTT v2 (TURN / SRTP / QUIC)')),
+                            DropdownMenuItem(value: 'wg', child: Text('WDTT WG (WireGuard over DTLS/SRTP)')),
+                            DropdownMenuItem(value: 'raw', child: Text('WDTT Raw (UDP без обёртки)')),
+                            DropdownMenuItem(value: 'csqtt_v1', child: Text('CSQTT v1 (совместимость)')),
+                          ],
+                          onChanged: (v) => setState(() => wdttMode = v ?? wdttMode),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: wdttHashes,
+                          maxLines: 2,
+                          decoration: const InputDecoration(
+                            labelText: 'Хэши / ссылки звонков (через запятую)',
+                            hintText: 'hash1, hash2 или https://.../call/join/...',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: wdttObfs,
+                                decoration: const InputDecoration(labelText: 'Обфускация'),
+                                items: const [
+                                  DropdownMenuItem(value: 'audio', child: Text('audio')),
+                                  DropdownMenuItem(value: 'video', child: Text('video')),
+                                  DropdownMenuItem(value: 'unified', child: Text('unified')),
+                                ],
+                                onChanged: (v) => setState(() => wdttObfs = v ?? wdttObfs),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: wdttSrtpMode,
+                                decoration: const InputDecoration(labelText: 'SRTP'),
+                                items: const [
+                                  DropdownMenuItem(value: 'auto', child: Text('auto')),
+                                  DropdownMenuItem(value: 'dtls', child: Text('dtls')),
+                                  DropdownMenuItem(value: 'wrap', child: Text('wrap')),
+                                  DropdownMenuItem(value: 'dtls-srtp', child: Text('dtls-srtp')),
+                                  DropdownMenuItem(value: 'wrap-srtp', child: Text('wrap-srtp')),
+                                ],
+                                onChanged: (v) =>
+                                    setState(() => wdttSrtpMode = v ?? wdttSrtpMode),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: wdttTurnTransport,
+                                decoration: const InputDecoration(labelText: 'TURN'),
+                                items: const [
+                                  DropdownMenuItem(value: 'auto', child: Text('auto')),
+                                  DropdownMenuItem(value: 'tcp', child: Text('tcp')),
+                                  DropdownMenuItem(value: 'udp', child: Text('udp')),
+                                  DropdownMenuItem(value: 'tcp_tls', child: Text('tcp_tls')),
+                                ],
+                                onChanged: (v) => setState(
+                                    () => wdttTurnTransport = v ?? wdttTurnTransport),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: wdttWorkers,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'Потоки (1–126)',
+                                  hintText: '4',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: wdttMtu,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'MTU (576–1500)',
+                                  hintText: '1280',
+                                ),
+                              ),
+                            ),
+                            if (wdttMode == 'raw') ...[
+                              const SizedBox(width: Space.sm),
+                              Expanded(
+                                child: TextField(
+                                  controller: wdttRawPort,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(labelText: 'Raw порт'),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        ExpansionTile(
+                          tilePadding: EdgeInsets.zero,
+                          title: const Text(
+                            'Дополнительные параметры WDTT / CSQTT',
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                          children: [
+                            TextField(
+                              controller: wdttVkToken,
+                              decoration: const InputDecoration(
+                                labelText: 'VK Токен (опционально)',
+                              ),
+                            ),
+                            const SizedBox(height: Space.sm),
+                            TextField(
+                              controller: wdttDeviceId,
+                              decoration: const InputDecoration(
+                                labelText: 'Device ID (опционально)',
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                      ],
+                      if (type == 'openconnect') ...[
+                        DropdownButtonFormField<String>(
+                          isExpanded: true,
+                          initialValue: ocFlavor,
+                          decoration: const InputDecoration(labelText: 'Профиль шлюза (Flavor)'),
+                          items: const [
+                            DropdownMenuItem(value: 'anyconnect', child: Text('Cisco AnyConnect')),
+                            DropdownMenuItem(value: 'gp', child: Text('GlobalProtect')),
+                            DropdownMenuItem(value: 'pulse', child: Text('Pulse Secure / Ivanti')),
+                            DropdownMenuItem(value: 'fortinet', child: Text('Fortinet SSL VPN')),
+                            DropdownMenuItem(value: 'nc', child: Text('Juniper Network Connect')),
+                            DropdownMenuItem(value: 'f5', child: Text('F5 BIG-IP')),
+                          ],
+                          onChanged: (v) => setState(() => ocFlavor = v ?? ocFlavor),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: ocCookie,
+                          decoration: const InputDecoration(
+                            labelText: 'Cookie сессии (опционально)',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: ocUrlPath,
+                          decoration: const InputDecoration(
+                            labelText: 'URL Path (опционально)',
+                          ),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('IP-туннель (userspace stack)', style: TextStyle(fontSize: 13)),
+                          value: ocIp,
+                          onChanged: (v) => setState(() => ocIp = v),
+                        ),
+                        if (ocIp)
+                          SwitchListTile.adaptive(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            title: const Text('ESP поверх UDP', style: TextStyle(fontSize: 13)),
+                            value: ocEsp,
+                            onChanged: (v) => setState(() => ocEsp = v),
+                          ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('DTLS-транспорт', style: TextStyle(fontSize: 13)),
+                          value: ocDtls,
+                          onChanged: (v) => setState(() => ocDtls = v),
+                        ),
+                      ],
+                      if (type == 'mieru') ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: mieruTransport,
+                                decoration: const InputDecoration(labelText: 'Транспорт Mieru'),
+                                items: const [
+                                  DropdownMenuItem(value: 'TCP', child: Text('TCP')),
+                                  DropdownMenuItem(value: 'UDP', child: Text('UDP')),
+                                ],
+                                onChanged: (v) =>
+                                    setState(() => mieruTransport = v ?? mieruTransport),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: mieruMtu,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'MTU (опционально)'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: mieruPorts,
+                          decoration: const InputDecoration(
+                            labelText: 'Диапазоны портов (server_ports, опционально)',
+                            hintText: '2000-2010,3000',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: mieruMultiplexing,
+                          decoration: const InputDecoration(
+                            labelText: 'Мультиплексирование (опционально)',
+                            hintText: 'MULTIPLEXING_LOW / MIDDLE / HIGH',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                      ],
+                      if (type == 'tewfai') ...[
+                        TextField(
+                          controller: tewfaiTransport,
+                          decoration: const InputDecoration(
+                            labelText: 'Транспорты Tewfai (через запятую)',
+                            hintText: 'tcp,quic',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: tewfaiInnerCipher,
+                                decoration: const InputDecoration(
+                                  labelText: 'Inner Cipher (опционально)',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: tewfaiMorphProfile,
+                                decoration: const InputDecoration(
+                                  labelText: 'Morph Profile (опционально)',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Постквантовый обмен ключами (PQC)', style: TextStyle(fontSize: 13)),
+                          value: tewfaiPqc,
+                          onChanged: (v) => setState(() => tewfaiPqc = v),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Коррекция ошибок (FEC)', style: TextStyle(fontSize: 13)),
+                          value: tewfaiFec,
+                          onChanged: (v) => setState(() => tewfaiFec = v),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Десинхронизация (Desync)', style: TextStyle(fontSize: 13)),
+                          value: tewfaiDesync,
+                          onChanged: (v) => setState(() => tewfaiDesync = v),
+                        ),
+                      ],
+                      if (type == 'snell' || type == 'shadowtls') ...[
+                        TextField(
+                          controller: protoVersion,
+                          keyboardType: TextInputType.number,
+                          decoration: InputDecoration(
+                            labelText: type == 'snell' ? 'Версия Snell (4 / 5 / 6)' : 'Версия ShadowTLS (1 / 2 / 3)',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                      ],
+                      if (type == 'naive') ...[
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Использовать QUIC / HTTP/3', style: TextStyle(fontSize: 13)),
+                          value: naiveQuic,
+                          onChanged: (v) => setState(() => naiveQuic = v),
+                        ),
+                      ],
+                      if (type == 'openvpn-client') ...[
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final picked = await CoreBridge.instance.pickConfigFile();
+                              if (picked == null) return;
+                              final fileName = (picked['name'] ?? '')
+                                  .replaceAll(RegExp(r'\.(ovpn|conf|txt)$', caseSensitive: false), '')
+                                  .trim();
+                              final content = picked['content'] ?? '';
+                              final p = LinkParser().parseOpenVpnConf(
+                                content,
+                                nameOverride: fileName.isNotEmpty ? fileName : null,
+                              );
+                              if (p == null) return;
+                              setState(() {
+                                if (name.text.trim().isEmpty || fileName.isNotEmpty) {
+                                  name.text = p.name;
+                                }
+                                address.text = '${p.server}:${p.port}';
+                                password.text = (p.extra['static_key'] ?? p.password).toString();
+                                if (p.extra['local_address'] is List &&
+                                    (p.extra['local_address'] as List).isNotEmpty) {
+                                  wgLocalIp.text = (p.extra['local_address'] as List).join(',');
+                                }
+                                wgMtu.text = (p.extra['mtu'] ?? '1500').toString();
+                                ovpnNetwork = (p.extra['network'] ?? 'udp')
+                                        .toString()
+                                        .toLowerCase()
+                                        .contains('tcp')
+                                    ? 'tcp'
+                                    : 'udp';
+                                ovpnCipher.text = (p.extra['cipher'] ?? 'AES-256-CBC').toString();
+                                ovpnAuth.text = (p.extra['auth'] ?? 'SHA256').toString();
+                                ovpnKeyDir = (p.extra['key_direction'] ?? '').toString().toLowerCase();
+                              });
+                            },
+                            icon: const Icon(Icons.folder_open_rounded, size: 17),
+                            label: const Text(
+                              'Загрузить из .ovpn (Static Key)',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: ovpnNetwork,
+                                decoration: const InputDecoration(labelText: 'Транспорт'),
+                                items: const [
+                                  DropdownMenuItem(value: 'udp', child: Text('UDP')),
+                                  DropdownMenuItem(value: 'tcp', child: Text('TCP')),
+                                ],
+                                onChanged: (v) => setState(() => ovpnNetwork = v ?? ovpnNetwork),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: DropdownButtonFormField<String>(
+                                isExpanded: true,
+                                initialValue: ovpnKeyDir,
+                                decoration: const InputDecoration(labelText: 'Key Direction'),
+                                items: const [
+                                  DropdownMenuItem(value: '', child: Text('Нет (по умолч.)')),
+                                  DropdownMenuItem(value: 'client', child: Text('client (1)')),
+                                  DropdownMenuItem(value: 'server', child: Text('server (0)')),
+                                ],
+                                onChanged: (v) => setState(() => ovpnKeyDir = v ?? ovpnKeyDir),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              flex: 2,
+                              child: TextField(
+                                controller: wgLocalIp,
+                                decoration: const InputDecoration(
+                                  labelText: 'Локальный IP (CIDR)',
+                                  hintText: '10.8.0.2/24',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: wgMtu,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'MTU'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: ovpnCipher,
+                                decoration: const InputDecoration(labelText: 'Шифр (Cipher)'),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: ovpnAuth,
+                                decoration: const InputDecoration(labelText: 'HMAC (Auth)'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                      ],
+                      if (type == 'tailscale') ...[
+                        TextField(
+                          controller: tsControlUrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Control URL (Tailscale / Headscale)',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                        Row(
+                          children: [
+                            Expanded(
+                              flex: 2,
+                              child: TextField(
+                                controller: tsHostname,
+                                decoration: const InputDecoration(
+                                  labelText: 'Hostname устройства (опционально)',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Space.sm),
+                            Expanded(
+                              child: TextField(
+                                controller: tsListenPort,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(labelText: 'Listen Port'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: Space.sm),
+                        TextField(
+                          controller: tsExitNode,
+                          decoration: const InputDecoration(
+                            labelText: 'Exit Node (IP или MagicDNS имя, опционально)',
+                          ),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Принимать маршруты (accept_routes)', style: TextStyle(fontSize: 13)),
+                          value: tsAcceptRoutes,
+                          onChanged: (v) => setState(() => tsAcceptRoutes = v),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Анонсировать Exit Node', style: TextStyle(fontSize: 13)),
+                          value: tsAdvertiseExitNode,
+                          onChanged: (v) => setState(() => tsAdvertiseExitNode = v),
+                        ),
+                        SwitchListTile.adaptive(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('Эфемерный узел (ephemeral)', style: TextStyle(fontSize: 13)),
+                          value: tsEphemeral,
+                          onChanged: (v) => setState(() => tsEphemeral = v),
+                        ),
+                      ],
+                      if (type == 'sudoku') ...[
+                        TextField(
+                          controller: sudokuTableType,
+                          decoration: const InputDecoration(
+                            labelText: 'Table Type (prefer_ascii / prefer_entropy)',
+                          ),
+                        ),
+                        const SizedBox(height: Space.sm),
+                      ],
                       if (hasStreamTransport || hasTlsConfig)
                         Row(
                           children: [
@@ -1705,19 +2353,38 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             hostLower.startsWith('vless://') ||
                             hostLower.startsWith('vmess://') ||
                             hostLower.startsWith('trojan://') ||
+                            hostLower.startsWith('trojan-go://') ||
                             hostLower.startsWith('ss://') ||
+                            hostLower.startsWith('shadowsocks://') ||
                             hostLower.startsWith('hy2://') ||
                             hostLower.startsWith('hysteria2://') ||
+                            hostLower.startsWith('hysteria://') ||
                             hostLower.startsWith('tuic://') ||
                             hostLower.startsWith('wg://') ||
                             hostLower.startsWith('awg://') ||
                             hostLower.startsWith('wireguard://') ||
                             hostLower.startsWith('amneziawg://') ||
+                            hostLower.startsWith('tewfai://') ||
+                            hostLower.startsWith('anytls://') ||
+                            hostLower.startsWith('naive') ||
+                            hostLower.startsWith('snell://') ||
+                            hostLower.startsWith('shadowtls://') ||
+                            hostLower.startsWith('fptn:') ||
+                            hostLower.startsWith('fptnb:') ||
+                            hostLower.startsWith('masque://') ||
+                            hostLower.startsWith('trusttunnel://') ||
+                            hostLower.startsWith('openconnect://') ||
+                            hostLower.startsWith('anyconnect://') ||
+                            hostLower.startsWith('socks') ||
+                            hostLower.startsWith('ssh://') ||
+                            hostLower.startsWith('mtproto://') ||
+                            hostLower.startsWith('tg://proxy') ||
                             hostLower.startsWith('mieru://') ||
                             hostLower.startsWith('mierus://') ||
                             hostLower.startsWith('wdtt://') ||
                             hostLower.startsWith('csqtt://') ||
-                            hostLower.startsWith('qwdtt://'))) {
+                            hostLower.startsWith('qwdtt://') ||
+                            hostLower.startsWith('sudoku://'))) {
                       Navigator.of(dialogContext).pop();
                       final added = await controller.importProfiles(host);
                       if (!context.mounted) return;
@@ -1733,11 +2400,19 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       );
                       return;
                     }
-                    final separator = host.lastIndexOf(':');
-                    final server =
-                        separator > 0 ? host.substring(0, separator) : host;
+                    final effectiveHost = (type == 'tailscale' && host.isEmpty)
+                        ? (Uri.tryParse(tsControlUrl.text.trim())?.host.isNotEmpty == true
+                            ? '${Uri.tryParse(tsControlUrl.text.trim())!.host}:443'
+                            : 'controlplane.tailscale.com:443')
+                        : host;
+                    final separator = effectiveHost.lastIndexOf(':');
+                    final server = separator > 0
+                        ? effectiveHost.substring(0, separator)
+                        : effectiveHost;
                     final defaultPort = switch (type) {
                       'wireguard' => 51820,
+                      'openvpn-client' => 1194,
+                      'wdtt' => (wdttMode == 'csqtt' || wdttMode == 'csqtt_v1') ? 46000 : 56000,
                       'shadowsocks' => 8388,
                       'socks' => 1080,
                       'http' => 8080,
@@ -1745,7 +2420,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       _ => 443,
                     };
                     final port = separator > 0
-                        ? int.tryParse(host.substring(separator + 1)) ?? defaultPort
+                        ? int.tryParse(effectiveHost.substring(separator + 1)) ?? defaultPort
                         : defaultPort;
 
                     final nextExtra = Map<String, Object?>.from(edit?.extra ?? const {});
@@ -1778,8 +2453,224 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     }
 
                     if (needsUsername && username.text.trim().isNotEmpty) {
-                      final key = (type == 'ssh' || type == 'openconnect') ? 'user' : 'username';
+                      final key = type == 'ssh' ? 'user' : 'username';
                       nextExtra[key] = username.text.trim();
+                    }
+                    if (type == 'wdtt') {
+                      nextExtra['mode'] = wdttMode;
+                      nextExtra['obfs'] = wdttObfs;
+                      nextExtra['srtp_mode'] = wdttSrtpMode;
+                      nextExtra['turn_transport'] = wdttTurnTransport;
+                      final hashes = wdttHashes.text
+                          .split(RegExp(r'[\s,;|\n\r]+'))
+                          .map((s) => s.trim())
+                          .where((s) => s.isNotEmpty)
+                          .toList();
+                      if (hashes.isNotEmpty) {
+                        nextExtra['hashes'] = hashes;
+                      } else {
+                        nextExtra.remove('hashes');
+                      }
+                      final wVal = int.tryParse(wdttWorkers.text.trim());
+                      if (wVal != null && wVal >= 1 && wVal <= 126) {
+                        nextExtra['workers'] = wVal;
+                      } else {
+                        nextExtra.remove('workers');
+                      }
+                      final mVal = int.tryParse(wdttMtu.text.trim());
+                      if (mVal != null && mVal >= 576 && mVal <= 1500) {
+                        nextExtra['mtu'] = mVal;
+                      } else {
+                        nextExtra.remove('mtu');
+                      }
+                      final rpVal = int.tryParse(wdttRawPort.text.trim());
+                      if (wdttMode == 'raw' && rpVal != null && rpVal > 0 && rpVal <= 65535) {
+                        nextExtra['raw_port'] = rpVal;
+                      } else {
+                        nextExtra.remove('raw_port');
+                      }
+                      if (wdttVkToken.text.trim().isNotEmpty) {
+                        nextExtra['vk_token'] = wdttVkToken.text.trim();
+                      } else {
+                        nextExtra.remove('vk_token');
+                      }
+                      if (wdttDeviceId.text.trim().isNotEmpty) {
+                        nextExtra['device_id'] = wdttDeviceId.text.trim();
+                      } else {
+                        nextExtra.remove('device_id');
+                      }
+                    }
+                    if (type == 'openconnect') {
+                      nextExtra.remove('user');
+                      nextExtra['flavor'] = ocFlavor;
+                      if (ocCookie.text.trim().isNotEmpty) {
+                        nextExtra['cookie'] = ocCookie.text.trim();
+                      } else {
+                        nextExtra.remove('cookie');
+                      }
+                      if (ocUrlPath.text.trim().isNotEmpty) {
+                        nextExtra['urlpath'] = ocUrlPath.text.trim();
+                      } else {
+                        nextExtra.remove('urlpath');
+                      }
+                      if (ocIp) {
+                        nextExtra['ip'] = true;
+                        if (ocEsp) {
+                          nextExtra['esp'] = true;
+                        } else {
+                          nextExtra.remove('esp');
+                        }
+                      } else {
+                        nextExtra.remove('ip');
+                        nextExtra.remove('esp');
+                      }
+                      if (ocDtls) {
+                        nextExtra['dtls'] = true;
+                      } else {
+                        nextExtra.remove('dtls');
+                      }
+                    }
+                    if (type == 'mieru') {
+                      nextExtra['mieru_transport'] = mieruTransport;
+                      final mMtu = int.tryParse(mieruMtu.text.trim());
+                      if (mMtu != null && mMtu >= 576 && mMtu <= 9000) {
+                        nextExtra['mtu'] = mMtu;
+                      } else {
+                        nextExtra.remove('mtu');
+                      }
+                      final mPorts = mieruPorts.text
+                          .split(',')
+                          .map((s) => s.trim())
+                          .where((s) => s.isNotEmpty)
+                          .toList();
+                      if (mPorts.isNotEmpty) {
+                        nextExtra['server_ports'] = mPorts;
+                      } else {
+                        nextExtra.remove('server_ports');
+                      }
+                      if (mieruMultiplexing.text.trim().isNotEmpty) {
+                        nextExtra['multiplexing'] = mieruMultiplexing.text.trim();
+                      } else {
+                        nextExtra.remove('multiplexing');
+                      }
+                    }
+                    if (type == 'tewfai') {
+                      final tList = tewfaiTransport.text
+                          .split(',')
+                          .map((s) => s.trim().toLowerCase())
+                          .where((s) => s.isNotEmpty)
+                          .toList();
+                      if (tList.isNotEmpty) {
+                        nextExtra['tewfai_transport'] = tList;
+                      } else {
+                        nextExtra.remove('tewfai_transport');
+                      }
+                      if (tewfaiInnerCipher.text.trim().isNotEmpty) {
+                        nextExtra['inner_cipher'] = tewfaiInnerCipher.text.trim();
+                      } else {
+                        nextExtra.remove('inner_cipher');
+                      }
+                      if (tewfaiMorphProfile.text.trim().isNotEmpty) {
+                        nextExtra['morph_profile'] = tewfaiMorphProfile.text.trim();
+                      } else {
+                        nextExtra.remove('morph_profile');
+                      }
+                      if (tewfaiPqc) {
+                        nextExtra['pqc'] = true;
+                      } else {
+                        nextExtra.remove('pqc');
+                      }
+                      if (tewfaiFec) {
+                        nextExtra['fec'] = true;
+                      } else {
+                        nextExtra.remove('fec');
+                      }
+                      if (tewfaiDesync) {
+                        nextExtra['desync'] = true;
+                      } else {
+                        nextExtra.remove('desync');
+                      }
+                    }
+                    if (type == 'snell' || type == 'shadowtls') {
+                      final ver = int.tryParse(protoVersion.text.trim());
+                      if (ver != null && ver > 0) {
+                        nextExtra['version'] = ver;
+                      }
+                    }
+                    if (type == 'naive') {
+                      if (naiveQuic) {
+                        nextExtra['quic'] = true;
+                      } else {
+                        nextExtra.remove('quic');
+                      }
+                    }
+                    if (type == 'openvpn-client') {
+                      nextExtra['mode'] = 'static_key';
+                      nextExtra['network'] = ovpnNetwork;
+                      nextExtra['static_key'] = password.text.trim();
+                      nextExtra['cipher'] = ovpnCipher.text.trim().isEmpty
+                          ? 'AES-256-CBC'
+                          : ovpnCipher.text.trim().toUpperCase();
+                      nextExtra['auth'] = ovpnAuth.text.trim().isEmpty
+                          ? 'SHA256'
+                          : ovpnAuth.text.trim().toUpperCase();
+                      if (ovpnKeyDir.isNotEmpty) {
+                        nextExtra['key_direction'] = ovpnKeyDir;
+                      } else {
+                        nextExtra.remove('key_direction');
+                      }
+                      final addrs = wgLocalIp.text
+                          .split(',')
+                          .map((s) => s.trim())
+                          .where((s) => s.isNotEmpty)
+                          .toList();
+                      nextExtra['local_address'] = addrs.isEmpty ? ['10.8.0.2/24'] : addrs;
+                      final mtuVal = int.tryParse(wgMtu.text.trim());
+                      if (mtuVal != null && mtuVal >= 576 && mtuVal <= 65535) {
+                        nextExtra['mtu'] = mtuVal;
+                      } else {
+                        nextExtra.remove('mtu');
+                      }
+                    }
+                    if (type == 'tailscale') {
+                      nextExtra['control_url'] = tsControlUrl.text.trim().isEmpty
+                          ? 'https://controlplane.tailscale.com'
+                          : tsControlUrl.text.trim();
+                      nextExtra['auth_key'] = password.text.trim();
+                      if (tsHostname.text.trim().isNotEmpty) {
+                        nextExtra['hostname'] = tsHostname.text.trim();
+                      } else {
+                        nextExtra.remove('hostname');
+                      }
+                      if (tsExitNode.text.trim().isNotEmpty) {
+                        nextExtra['exit_node'] = tsExitNode.text.trim();
+                      } else {
+                        nextExtra.remove('exit_node');
+                      }
+                      final lp = int.tryParse(tsListenPort.text.trim());
+                      if (lp != null && lp > 0 && lp <= 65535) {
+                        nextExtra['listen_port'] = lp;
+                      } else {
+                        nextExtra.remove('listen_port');
+                      }
+                      if (tsAcceptRoutes) {
+                        nextExtra['accept_routes'] = true;
+                      } else {
+                        nextExtra.remove('accept_routes');
+                      }
+                      if (tsAdvertiseExitNode) {
+                        nextExtra['advertise_exit_node'] = true;
+                      } else {
+                        nextExtra.remove('advertise_exit_node');
+                      }
+                      if (tsEphemeral) {
+                        nextExtra['ephemeral'] = true;
+                      } else {
+                        nextExtra.remove('ephemeral');
+                      }
+                    }
+                    if (type == 'sudoku' && sudokuTableType.text.trim().isNotEmpty) {
+                      nextExtra['table_type'] = sudokuTableType.text.trim();
                     }
                     if (type == 'vmess') {
                       nextExtra['vmess_security'] =
@@ -1903,6 +2794,14 @@ class _ProfilesTabState extends State<ProfilesTab> {
                     }
 
                     Navigator.of(dialogContext).pop();
+                    final resolvedTransport = switch (type) {
+                      'wireguard' || 'wdtt' || 'tailscale' => 'udp',
+                      'openvpn-client' => ovpnNetwork,
+                      'hysteria2' || 'hysteria' || 'tuic' || 'masque' => 'quic',
+                      'naive' => naiveQuic ? 'quic' : 'tcp',
+                      'mieru' => mieruTransport.toLowerCase(),
+                      _ => hasStreamTransport ? transport : 'tcp',
+                    };
                     final profile = Profile(
                       id: edit?.id ??
                           '$type-$server-$port-${DateTime.now().millisecondsSinceEpoch}',
@@ -1915,7 +2814,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                       uuid: uuid.text.trim(),
                       password: password.text.trim(),
                       method: type == 'shadowsocks' ? method.text.trim() : '',
-                      transport: hasStreamTransport ? transport : 'tcp',
+                      transport: resolvedTransport,
                       flow: flow.text.trim(),
                       sni: sni.text.trim(),
                       publicKey: pbk.text.trim(),

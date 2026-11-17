@@ -37,8 +37,12 @@ class TachyonVpnService : VpnService() {
     private var statsThread: Thread? = null
     private var wifiWatchThread: Thread? = null
 
-    /** Дескриптор TUN: должен жить дольше, чем ядро читает из него. */
+    /** Дескриптор TUN и его дубликат, переданный в ядро: оба должны закрываться в [closeTun]. */
+    private val tunLock = Any()
+    @Volatile
     private var tunDescriptor: ParcelFileDescriptor? = null
+    @Volatile
+    private var coreTunDescriptor: ParcelFileDescriptor? = null
 
     /** Конфигурация текущего запуска: нужна для перезапуска ядра и возврата из авто-паузы Wi-Fi. */
     private var currentConfig: String? = null
@@ -64,6 +68,7 @@ class TachyonVpnService : VpnService() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val restarting = AtomicBoolean(false)
+    private val stopRequested = AtomicBoolean(false)
 
     @Volatile
     private var running = false
@@ -100,9 +105,12 @@ class TachyonVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                stopRequested.set(true)
+                running = false
                 forceOverrideWifiSsid = ""
                 pausedByWifi = false
                 stopWifiWatcher()
+                stopNetworkWatcher()
                 TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
                 lifecycleExecutor.execute {
                     stopTunnel()
@@ -124,6 +132,7 @@ class TachyonVpnService : VpnService() {
                 }
             }
             ACTION_FORCE_RESUME -> {
+                stopRequested.set(false)
                 val ssid = WifiSsidHelper.getCurrentWifiSsid(this)
                     .ifEmpty { TunnelStateHolder.pausedByWifiSsid }
                 forceOverrideWifiSsid = ssid
@@ -133,6 +142,7 @@ class TachyonVpnService : VpnService() {
                 return START_STICKY
             }
             else -> {
+                stopRequested.set(false)
                 var config = intent?.getStringExtra(EXTRA_CONFIG)
                 var allowedPackages =
                     intent?.getStringArrayListExtra(EXTRA_ALLOWED_PACKAGES).orEmpty()
@@ -399,7 +409,7 @@ class TachyonVpnService : VpnService() {
         mtu: Int = MTU,
         proxyOnly: Boolean = false,
     ) {
-        if (running) return
+        if (running || stopRequested.get()) return
 
         currentServerName = serverName
         TunnelStateHolder.serverName = serverName
@@ -507,15 +517,24 @@ class TachyonVpnService : VpnService() {
                 stopSelf()
                 return
             }
-            tunDescriptor = descriptor
+            if (stopRequested.get()) {
+                runCatching { descriptor.close() }
+                closeTun()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return
+            }
             if (physNet != null) {
                 runCatching { setUnderlyingNetworks(arrayOf(physNet)) }
             } else {
                 runCatching { setUnderlyingNetworks(null) }
             }
 
-            val detachedFd = detachTunFd(descriptor)
-            if (detachedFd == null) {
+            val corePfd = duplicateTunDescriptor(descriptor)
+            if (corePfd == null) {
+                synchronized(tunLock) {
+                    runCatching { descriptor.close() }
+                }
                 TunnelStateHolder.update(
                     TunnelStateHolder.State.Failed,
                     "не удалось подготовить дескриптор TUN",
@@ -527,14 +546,24 @@ class TachyonVpnService : VpnService() {
                 stopSelf()
                 return
             }
-            coreTunFd = detachedFd
+            synchronized(tunLock) {
+                if (stopRequested.get()) {
+                    runCatching { corePfd.close() }
+                    runCatching { descriptor.close() }
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    return
+                }
+                tunDescriptor = descriptor
+                coreTunDescriptor = corePfd
+            }
+            coreTunFd = corePfd.fd
 
             val protectSocket = File(filesDir, PROTECT_SOCKET_NAME)
             protectSocket.delete()
             val opened = TachyonCore.protectOpen(protectSocket.absolutePath)
             if (opened != 0) {
                 Log.e(TAG, "protectOpen вернул $opened: ${TachyonCore.lastError()}")
-                runCatching { ParcelFileDescriptor.adoptFd(coreTunFd).close() }
                 TunnelStateHolder.update(
                     TunnelStateHolder.State.Failed,
                     "не удалось открыть канал защиты сокетов",
@@ -560,6 +589,17 @@ class TachyonVpnService : VpnService() {
             }
         }
 
+        if (stopRequested.get()) {
+            runCatching { TachyonCore.protectClose() }
+            protectThread?.interrupt()
+            runCatching { protectThread?.join(300) }
+            protectThread = null
+            closeTun()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
         val logFile = File(filesDir, LOG_FILE_NAME)
         runCatching { logFile.writeText("") }
         protectPath = activeProtectPath
@@ -577,10 +617,32 @@ class TachyonVpnService : VpnService() {
             )
             if (code != 0) {
                 running = false
+                runCatching { TachyonCore.protectClose() }
+                protectThread?.interrupt()
+                runCatching { protectThread?.join(300) }
+                protectThread = null
+                closeTun()
                 val error = TachyonCore.lastError() ?: "ядро не стартовало (код $code)"
                 Log.e(TAG, error)
-                TunnelStateHolder.update(TunnelStateHolder.State.Failed, error, pausedWifi = "")
+                if (stopRequested.get()) {
+                    TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
+                } else {
+                    TunnelStateHolder.update(TunnelStateHolder.State.Failed, error, pausedWifi = "")
+                }
                 runCatching { TachyonAppWidget.updateAll(this) }
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            } else if (stopRequested.get()) {
+                running = false
+                runCatching { TachyonCore.stop() }
+                runCatching { TachyonCore.protectClose() }
+                protectThread?.interrupt()
+                runCatching { protectThread?.join(300) }
+                protectThread = null
+                closeTun()
+                TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
+                runCatching { TachyonAppWidget.updateAll(this) }
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             } else {
                 running = true
@@ -603,13 +665,13 @@ class TachyonVpnService : VpnService() {
             var prevDown = 0L
             var prevAt = System.currentTimeMillis()
             val manager = getSystemService(NotificationManager::class.java)
-            while (running && !Thread.currentThread().isInterrupted) {
+            while (running && !stopRequested.get() && !Thread.currentThread().isInterrupted) {
                 try {
                     Thread.sleep(2000)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (!running) break
+                if (!running || stopRequested.get()) break
                 runCatching {
                     val raw = TachyonCore.stats()
                     TunnelStateHolder.updateStats(raw)
@@ -624,6 +686,7 @@ class TachyonVpnService : VpnService() {
                     prevUp = up
                     prevDown = down
                     prevAt = now
+                    if (!running || stopRequested.get()) return@runCatching
                     val line = "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с  |  ↑ ${formatBytes(up)} ↓ ${formatBytes(down)} ($conns)"
                     manager?.notify(NOTIFICATION_ID, buildNotification(line))
                     runCatching { TachyonAppWidget.updateAll(this@TachyonVpnService, "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с") }
@@ -642,8 +705,8 @@ class TachyonVpnService : VpnService() {
         else -> String.format("%.2f ГБ", bytes / (1024.0 * 1024.0 * 1024.0))
     }
 
-    private fun detachTunFd(descriptor: ParcelFileDescriptor): Int? =
-        runCatching { ParcelFileDescriptor.dup(descriptor.fileDescriptor).detachFd() }
+    private fun duplicateTunDescriptor(descriptor: ParcelFileDescriptor): ParcelFileDescriptor? =
+        runCatching { ParcelFileDescriptor.dup(descriptor.fileDescriptor) }
             .onFailure { Log.e(TAG, "не удалось клонировать дескриптор TUN", it) }
             .getOrNull()
 
@@ -779,37 +842,42 @@ class TachyonVpnService : VpnService() {
         }
     }
 
+    private fun stopNetworkWatcher() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        underlyingNetwork = null
+        activeNetworkHandle = null
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+        }.onFailure { Log.w(TAG, "не удалось отписать networkCallback", it) }
+    }
+
     /** Останавливает только ядро и закрывает TUN, не завершая сам сервис. */
     private fun stopCoreAndTunOnly() {
         running = false
         statsThread?.interrupt()
         statsThread = null
 
-        runCatching { coreThread?.join(2000) }
-        coreThread = null
-
         runCatching { TachyonCore.stop() }
             .onFailure { Log.e(TAG, "остановка ядра не удалась", it) }
         runCatching { TachyonCore.protectClose() }
+
+        runCatching { coreThread?.join(2000) }
+        coreThread = null
 
         protectThread?.interrupt()
         runCatching { protectThread?.join(300) }
         protectThread = null
 
         closeTun()
+        runCatching { setUnderlyingNetworks(null) }
     }
 
     /** Полностью останавливает туннель, фоновый наблюдатель и освобождает ресурсы. */
     fun stopTunnel() {
         pausedByWifi = false
         stopWifiWatcher()
-        if (!running && coreThread == null) {
-            closeTun()
-            TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
-            runCatching { TachyonAppWidget.updateAll(this) }
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            return
-        }
+        stopNetworkWatcher()
         stopCoreAndTunOnly()
         currentConfig = null
         TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = "")
@@ -818,15 +886,21 @@ class TachyonVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        stopRequested.set(true)
+        running = false
         pausedByWifi = false
         stopWifiWatcher()
-        lifecycleExecutor.execute { stopTunnel() }
+        stopNetworkWatcher()
+        stopCoreAndTunOnly()
         super.onDestroy()
     }
 
     override fun onRevoke() {
+        stopRequested.set(true)
+        running = false
         pausedByWifi = false
         stopWifiWatcher()
+        stopNetworkWatcher()
         lifecycleExecutor.execute {
             stopTunnel()
             stopSelf()
@@ -835,8 +909,12 @@ class TachyonVpnService : VpnService() {
     }
 
     private fun closeTun() {
-        runCatching { tunDescriptor?.close() }
-        tunDescriptor = null
+        synchronized(tunLock) {
+            runCatching { coreTunDescriptor?.close() }
+            coreTunDescriptor = null
+            runCatching { tunDescriptor?.close() }
+            tunDescriptor = null
+        }
     }
 
     private fun createNotificationChannel() {

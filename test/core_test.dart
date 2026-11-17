@@ -2170,6 +2170,137 @@ proxies:
       expect(eps[0]['peers'][0]['reserved'], [90, 2, 3]);
       expect(eps[1]['peers'][0]['reserved'], [10, 20, 30]);
     });
+
+    test('openvpn-client (.ovpn) и tailscale сериализуются в endpoints и сохраняются при импорте', () {
+      const ovpnText = '''
+client
+dev tun
+proto udp
+remote vpn.example.org 1194
+ifconfig 10.8.0.2 255.255.255.0
+cipher AES-256-CBC
+auth SHA256
+key-direction 1
+tun-mtu 1480
+<secret>
+-----BEGIN OpenVPN Static key V1-----
+0123456789abcdef0123456789abcdef
+0123456789abcdef0123456789abcdef
+-----END OpenVPN Static key V1-----
+</secret>
+''';
+      final parser = LinkParser();
+      final ovpn = parser.parseMany(ovpnText).single;
+      expect(ovpn.type, 'openvpn-client');
+      expect(ovpn.server, 'vpn.example.org');
+      expect(ovpn.port, 1194);
+      expect(ovpn.extra['key_direction'], 'client');
+      expect(ovpn.extra['local_address'], ['10.8.0.2/24']);
+      expect(ovpn.fullTransportLabel, 'OPENVPN · UDP · STATIC KEY');
+
+      final ovpnCfg = RuntimeConfig(
+        profile: ovpn,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+      ).toJson();
+      final ovpnEps = (ovpnCfg['endpoints'] as List).cast<Map<String, dynamic>>();
+      expect(ovpnEps.length, 1);
+      expect(ovpnEps.first['type'], 'openvpn-client');
+      expect(ovpnEps.first['mode'], 'static_key');
+      expect(ovpnEps.first['server'], 'vpn.example.org');
+      expect(ovpnEps.first['server_port'], 1194);
+      expect(ovpnEps.first['peer_address'], '10.8.0.1');
+      expect(ovpnEps.first['cipher'], 'AES-256-CBC');
+
+      const tsJson = '''
+{
+  "endpoints": [
+    {
+      "type": "tailscale",
+      "tag": "OfficeMesh",
+      "control_url": "https://headscale.example.com",
+      "auth_key": "tskey-auth-test",
+      "hostname": "android-phone",
+      "accept_routes": true,
+      "exit_node": "100.64.0.10"
+    }
+  ]
+}
+''';
+      final ts = parser.parseMany(tsJson).single;
+      expect(ts.type, 'tailscale');
+      expect(ts.server, 'headscale.example.com');
+      expect(ts.password, 'tskey-auth-test');
+      expect(ts.fullTransportLabel, 'TAILSCALE · EXIT NODE');
+
+      final tsCfg = RuntimeConfig(
+        profile: ts,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(),
+        ruleSets: const [],
+        filesDir: '/data/user/0/app.tachyon/files',
+      ).toJson();
+      final tsEps = (tsCfg['endpoints'] as List).cast<Map<String, dynamic>>();
+      expect(tsEps.length, 1);
+      expect(tsEps.first['type'], 'tailscale');
+      expect(tsEps.first['control_url'], 'https://headscale.example.com');
+      expect(tsEps.first['state_directory'], '/data/user/0/app.tachyon/files/tailscale-proxy');
+      expect(tsEps.first['exit_node'], '100.64.0.10');
+    });
+
+    test('wdtt/csqtt, openconnect, masque и trusttunnel корректно экспортируются в URI и outbound', () {
+      final parser = LinkParser();
+      final csqtt = parser
+          .parseMany(
+            'csqtt://connect?v=2&host=198.51.100.42&peer=46000&password=secret-pass'
+            '&obfs=unified&srtp_mode=dtls&turn_transport=tcp_tls&workers=4&hashes=abc,def#MyCSQTT',
+          )
+          .single;
+      expect(csqtt.type, 'wdtt');
+      expect(csqtt.extra['mode'], 'csqtt');
+      expect(csqtt.fullTransportLabel, 'WDTT · CSQTT');
+      final csqttOut = csqtt.toOutbound();
+      expect(csqttOut['mode'], 'csqtt');
+      expect(csqttOut['workers'], 4);
+      final csqttUri = csqtt.toShareUri();
+      expect(csqttUri, startsWith('wdtt://'));
+      expect(csqttUri, contains('mode=csqtt'));
+
+      final oc = const Profile(
+        id: 'oc-1',
+        name: 'CorpOC',
+        type: 'openconnect',
+        server: 'vpn.corp.example',
+        port: 443,
+        password: 'pw',
+        sni: 'vpn.corp.example',
+        extra: {
+          'flavor': 'pulse',
+          'username': 'alice',
+          'ip': true,
+          'dtls': true,
+          'mtu': '1380',
+        },
+      );
+      final ocOut = oc.toOutbound();
+      expect(ocOut['username'], 'alice');
+      expect(ocOut['flavor'], 'pulse');
+      expect(ocOut['mtu'], '1380');
+      expect(oc.toShareUri(), startsWith('openconnect://alice:pw@vpn.corp.example:443?'));
+
+      final tt = const Profile(
+        id: 'tt-1',
+        name: 'TT',
+        type: 'trusttunnel',
+        server: 'tt.example.com',
+        port: 443,
+        password: 'p',
+        sni: 'tt.example.com',
+        extra: {'username': 'u'},
+      );
+      expect(tt.toShareUri(), startsWith('trusttunnel://u:p@tt.example.com:443?'));
+    });
   });
 }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3]
+
+- **Закрытие системного интерфейса TUN при отключении VPN на Android (`TachyonVpnService`):** устранена утечка дублированного файлового дескриптора `coreTunDescriptor` (`ParcelFileDescriptor.dup`), из-за которого системный интерфейс `tun0` и индикатор VPN в строке состояния оставались активными после нажатия «Отключить». В `closeTun()` гарантированно закрываются оба дескриптора (`coreTunDescriptor` и `tunDescriptor`), `TachyonCore.stop()` и `protectClose()` в `stopCoreAndTunOnly()` вызываются до ожидания потоков `coreThread`/`protectThread`, добавлен флаг `stopRequested` против гонки запуска/остановки и отписка `ConnectivityManager.NetworkCallback` при остановке сервиса.
+- **Полная поддержка всех протоколов и эндпоинтов `tachyon-core` в приложении (`ProfilesTab`, `RuntimeConfig`, `LinkParser`, `AppController`):**
+  - Добавлены создание, редактирование и импорт узлов **WDTT / CSQTT / qWDTT** (`mode`: `csqtt`, `wg`, `raw`, `csqtt_v1`, `hashes`, `obfs`, `srtp_mode`, `turn_transport`, `workers`, `mtu`, `raw_port`, `vk_token`, `device_id`) с поддержкой схем `wdtt://`, `csqtt://`, `qwdtt://`.
+  - Добавлены конечные точки (`endpoints`) **OpenVPN (Static Key)** (с импортом `.ovpn` и JSON) и **Tailscale (Userspace Mesh / Exit Node)** с корректной сериализацией в `endpoints[]` для одиночного режима, цепных переходов, балансировщика и точечной маршрутизации.
+  - Расширены поля редактора и сериализация URI (`Profile.toUri`) для `TewFai`, `Mieru`, `MASQUE`, `TrustTunnel`, `OpenConnect` (исправлено имя поля `username` вместо `user` и нормализация числового `mtu`), `Snell`, `ShadowTLS`, `NaiveProxy` (`QUIC/H3`), `Hysteria v1` и `Sudoku`, а также фильтры протоколов (`commonProtocolFilters`).
+
 ## [0.1.2]
 
 - **Проверка пинга и стабильность работы с несколькими `WARP` / `WireGuard` / `AmneziaWG`:** при запуске замера задержки списка серверов больше не включается автоматическая пересортировка, порядок карточек сохраняется неизменным; исправлена дедупликация в `AppController.dedupProfiles`, чтобы несколько профилей `WARP` с одинаковым именем и конечной точкой, но разными ключами и `reserved` не удалялись; добавлены декодирование `reserved` в Base64 и запятых, нормализация `CPS`-цепочек и параметров `itime` / `server_ports` / `hop_interval`, сохранение `+` в ключах `WireGuard` при разборе URI, поля `Reserved` и `Itime` в редакторе профиля и корректный пинг узлов `WireGuard` без ложных таймаутов по TCP.

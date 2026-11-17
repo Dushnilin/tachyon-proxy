@@ -144,7 +144,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.2';
+  static const String appVersion = '0.1.3';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -890,7 +890,7 @@ class AppController extends ChangeNotifier {
     // извлекаем https:// ссылку, если в тексте нет прямых URI серверов (vless://, hy2:// и т.д.).
     if (!payload.startsWith('http://') && !payload.startsWith('https://')) {
       final hasDirectProxyScheme = RegExp(
-        r'\b(vless|vmess|trojan|ss|shadowsocks|hy2|hysteria2?|tuic|wg|wireguard|amneziawg|awg|anytls|naive(\+https|\+http2|\+h2|\+quic|\+h3)?|snell|shadowtls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|socks5?|ssh|mtproto|tg)://',
+        r'\b(vless|vmess|trojan(-go)?|ss|shadowsocks|hy2|hysteria2?|tuic5?|wg|wireguard|amneziawg|awg|anytls|naive(\+https|\+http2|\+h2|\+quic|\+h3)?|snell|shadowtls|stls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|anyconnect|wdtt|qwdtt|csqtt|sudoku|socks5h?|socks4|socks|ssh|mtproto|tg)://',
         caseSensitive: false,
       ).hasMatch(payload);
       if (!hasDirectProxyScheme) {

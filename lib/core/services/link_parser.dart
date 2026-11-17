@@ -45,6 +45,12 @@ class LinkParser {
       if (wgProfiles.isNotEmpty) return wgProfiles;
     }
 
+    // 3b. OpenVPN статический ключ (.ovpn)
+    if (looksLikeOpenVpnConf(trimmed)) {
+      final ovpnProfile = parseOpenVpnConf(trimmed, subscriptionId: subscriptionId);
+      if (ovpnProfile != null) return [ovpnProfile];
+    }
+
     // 4. Clash / Mihomo YAML (секция proxies:)
     if (RegExp(r'(^|\n)\s*proxies\s*:', multiLine: true).hasMatch(trimmed)) {
       final clashProfiles = _parseClashYaml(trimmed, subscriptionId: subscriptionId);
@@ -176,6 +182,10 @@ class LinkParser {
 
     if (looksLikeWireGuardConf(value)) {
       return _parseWireGuardConf(value, subscriptionId: subscriptionId);
+    }
+
+    if (looksLikeOpenVpnConf(value)) {
+      return parseOpenVpnConf(value, subscriptionId: subscriptionId);
     }
 
     final lower = value.toLowerCase();
@@ -3956,7 +3966,14 @@ class LinkParser {
     final type = (item['type'] as String?)?.toLowerCase();
     if (type == null || type.isEmpty) return null;
     var server = (item['server'] as String?) ?? '';
-    var port = (item['server_port'] as num?)?.toInt() ?? 443;
+    var port = (item['server_port'] as num?)?.toInt() ??
+        (type == 'openvpn-client' ? 1194 : 443);
+
+    if (type == 'tailscale' && server.isEmpty) {
+      final ctrl = (item['control_url'] ?? '').toString().trim();
+      final uri = ctrl.isNotEmpty ? Uri.tryParse(ctrl) : null;
+      server = (uri != null && uri.host.isNotEmpty) ? uri.host : 'controlplane.tailscale.com';
+    }
 
     // Для WireGuard-эндпоинтов с массивом peers[]
     String peerPubFromPeers = '';
@@ -3983,7 +4000,7 @@ class LinkParser {
         }
       }
     }
-    if (server.isEmpty && item['token'] == null) return null;
+    if (server.isEmpty && item['token'] == null && type != 'tailscale') return null;
 
     final rest = Map<String, dynamic>.from(item)
       ..remove('type')
@@ -3991,6 +4008,14 @@ class LinkParser {
       ..remove('server')
       ..remove('server_port')
       ..remove('peers');
+
+    if (type == 'openvpn-client') {
+      if (rest['address'] is List && !rest.containsKey('local_address')) {
+        rest['local_address'] = rest.remove('address');
+      } else if (rest['address'] is String && !rest.containsKey('local_address')) {
+        rest['local_address'] = [rest.remove('address').toString()];
+      }
+    }
 
     if (type == 'wireguard') {
       if (rest['address'] is List && !rest.containsKey('local_address')) {
@@ -4078,8 +4103,12 @@ class LinkParser {
         type == 'tuic' ||
         type == 'masque') {
       transportType = 'quic';
-    } else if (type == 'wireguard') {
+    } else if (type == 'wireguard' || type == 'tailscale' || type == 'wdtt') {
       transportType = 'udp';
+    } else if (type == 'openvpn-client') {
+      transportType = (rest['network'] ?? 'udp').toString().toLowerCase().contains('tcp')
+          ? 'tcp'
+          : 'udp';
     } else if (type == 'mieru') {
       final rawTr = rest.remove('transport');
       if (rawTr is String && rawTr.isNotEmpty) {
@@ -4123,6 +4152,8 @@ class LinkParser {
             rest['private_key'] ??
             rest['psk'] ??
             rest['secret'] ??
+            rest['static_key'] ??
+            rest['auth_key'] ??
             '')
         .toString();
     final method = (rest.remove('method') ?? '').toString();
@@ -4455,5 +4486,161 @@ class LinkParser {
     if (pin.isNotEmpty) {
       extra['certificate_sha256'] = [pin];
     }
+  }
+
+  /// Проверяет, похож ли текст на конфигурацию OpenVPN (`.ovpn`).
+  bool looksLikeOpenVpnConf(String text) {
+    final hasRemote = RegExp(r'(^|\n)\s*remote\s+\S+', multiLine: true).hasMatch(text);
+    final hasOvpnMarker = RegExp(
+      r'(^|\n)\s*(client|dev\s+tun|proto\s+(udp|tcp)|<secret>|<tls-auth>|<ca>)',
+      multiLine: true,
+      caseSensitive: false,
+    ).hasMatch(text);
+    return hasRemote && hasOvpnMarker;
+  }
+
+  /// Разбирает конфигурацию OpenVPN статического ключа (`.ovpn`) в профиль `openvpn-client`.
+  Profile? parseOpenVpnConf(
+    String content, {
+    String subscriptionId = '',
+    String? nameOverride,
+  }) {
+    var server = '';
+    var port = 1194;
+    var network = 'udp';
+    var cipher = 'AES-256-CBC';
+    var auth = 'SHA256';
+    var keyDirection = '';
+    var peerAddress = '';
+    int? mtu;
+    final addresses = <String>[];
+
+    final secretMatch = RegExp(
+      r'<secret>\s*([\s\S]*?)\s*</secret>',
+      caseSensitive: false,
+    ).firstMatch(content);
+    final staticKey = secretMatch?.group(1)?.trim() ?? '';
+
+    for (final rawLine in content.split(RegExp(r'[\r\n]+'))) {
+      final line = rawLine.trim();
+      if (line.isEmpty ||
+          line.startsWith('#') ||
+          line.startsWith(';') ||
+          line.startsWith('<')) {
+        continue;
+      }
+      final tokens = line.split(RegExp(r'\s+'));
+      if (tokens.isEmpty) continue;
+      final cmd = tokens.first.toLowerCase();
+      switch (cmd) {
+        case 'remote':
+          if (server.isEmpty && tokens.length >= 2) {
+            server = _cleanHost(tokens[1]);
+            if (tokens.length >= 3) {
+              final p = int.tryParse(tokens[2]);
+              if (p != null && p > 0 && p <= 65535) port = p;
+            }
+            if (tokens.length >= 4) {
+              final proto = tokens[3].toLowerCase();
+              if (proto.startsWith('tcp') || proto.startsWith('udp')) {
+                network = proto;
+              }
+            }
+          }
+        case 'proto':
+          if (tokens.length >= 2) {
+            final proto = tokens[1].toLowerCase();
+            if (proto.startsWith('tcp') || proto.startsWith('udp')) {
+              network = proto;
+            }
+          }
+        case 'port':
+          if (tokens.length >= 2) {
+            final p = int.tryParse(tokens[1]);
+            if (p != null && p > 0 && p <= 65535) port = p;
+          }
+        case 'cipher':
+          if (tokens.length >= 2) cipher = tokens[1].toUpperCase();
+        case 'auth':
+          if (tokens.length >= 2) auth = tokens[1].toUpperCase();
+        case 'tun-mtu':
+        case 'mtu':
+          if (tokens.length >= 2) mtu = int.tryParse(tokens[1]);
+        case 'key-direction':
+          if (tokens.length >= 2) {
+            final v = tokens[1].toLowerCase();
+            keyDirection = switch (v) {
+              '0' || 'server' => 'server',
+              '1' || 'client' => 'client',
+              _ => '',
+            };
+          }
+        case 'ifconfig':
+          if (tokens.length >= 3) {
+            final ip = tokens[1].trim();
+            final maskOrPeer = tokens[2].trim();
+            final maskPrefix = _netmaskToPrefix(maskOrPeer);
+            final prefix = maskPrefix ?? 30;
+            if (maskPrefix == null &&
+                peerAddress.isEmpty &&
+                RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(maskOrPeer)) {
+              peerAddress = maskOrPeer;
+            }
+            if (ip.isNotEmpty) addresses.add('$ip/$prefix');
+          }
+      }
+    }
+
+    if (server.isEmpty || staticKey.isEmpty) return null;
+    final resolvedAddrs = addresses.isEmpty ? ['10.8.0.2/24'] : addresses;
+    final label = (nameOverride != null && nameOverride.trim().isNotEmpty)
+        ? nameOverride.trim()
+        : 'OpenVPN $server:$port';
+    return Profile(
+      id: _id('openvpn-client', '$server:$port:$cipher:$label'),
+      name: label,
+      type: 'openvpn-client',
+      server: server,
+      port: port,
+      password: staticKey,
+      transport: network.contains('tcp') ? 'tcp' : 'udp',
+      subscriptionId: subscriptionId,
+      extra: {
+        'mode': 'static_key',
+        'network': network,
+        'local_address': resolvedAddrs,
+        if (peerAddress.isNotEmpty) 'peer_address': peerAddress,
+        'static_key': staticKey,
+        if (keyDirection.isNotEmpty) 'key_direction': keyDirection,
+        'cipher': cipher,
+        'auth': auth,
+        if (mtu != null && mtu >= 576 && mtu <= 65535) 'mtu': mtu,
+      },
+    );
+  }
+
+  int? _netmaskToPrefix(String mask) {
+    final octets = mask.split('.');
+    if (octets.length != 4) return null;
+    if (octets.first != '255' && octets.first != '0') return null;
+    var bits = 0;
+    for (final raw in octets) {
+      final n = int.tryParse(raw);
+      if (n == null || n < 0 || n > 255) return null;
+      bits += switch (n) {
+        255 => 8,
+        254 => 7,
+        252 => 6,
+        248 => 5,
+        240 => 4,
+        224 => 3,
+        192 => 2,
+        128 => 1,
+        0 => 0,
+        _ => -1,
+      };
+      if (bits < 0) return null;
+    }
+    return bits > 0 ? bits : null;
   }
 }

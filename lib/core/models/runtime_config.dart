@@ -159,9 +159,18 @@ class Profile {
     return 'AMNEZIAWG';
   }
 
+  static bool isEndpointType(String t) {
+    final l = t.trim().toLowerCase();
+    return l == 'wireguard' || l == 'openvpn-client' || l == 'tailscale';
+  }
+
+  bool get isEndpoint => isEndpointType(type);
+
   bool get hasTls {
     if (const {
       'wireguard',
+      'openvpn-client',
+      'tailscale',
       'shadowsocks',
       'socks',
       'ssh',
@@ -200,8 +209,20 @@ class Profile {
     }
     if (type == 'wdtt') {
       final mode = (extra['mode'] ?? 'wg').toString().trim().toUpperCase();
-      parts.add(mode.isNotEmpty ? mode : 'WG');
+      parts.add(mode.isNotEmpty ? mode.replaceAll('_', ' ') : 'WG');
       return parts.join(' · ');
+    }
+    if (type == 'openvpn-client') {
+      final net = (extra['network'] ?? 'udp').toString().trim().toUpperCase();
+      return 'OPENVPN · ${net.isEmpty ? "UDP" : net} · STATIC KEY';
+    }
+    if (type == 'tailscale') {
+      final exitNode = (extra['exit_node'] ?? '').toString().trim();
+      return exitNode.isNotEmpty ? 'TAILSCALE · EXIT NODE' : 'TAILSCALE · MESH';
+    }
+    if (type == 'openconnect') {
+      final flavor = (extra['flavor'] ?? 'anyconnect').toString().trim().toUpperCase();
+      return 'OPENCONNECT · ${flavor.isEmpty ? "ANYCONNECT" : flavor}';
     }
     if (type == 'hysteria2' || type == 'hysteria' || type == 'tuic') {
       parts.add('QUIC');
@@ -390,12 +411,122 @@ class Profile {
     };
   }
 
+  /// Собирает канонический OpenVPN client эндпоинт для массива `endpoints` ядра.
+  Map<String, dynamic> toOpenVpnEndpoint({String tag = 'proxy'}) {
+    final cleanExtra = Map<String, dynamic>.from(extra);
+    final staticKey = (cleanExtra.remove('static_key') ?? password).toString();
+    final rawAddrs = cleanExtra.remove('local_address') ?? cleanExtra.remove('address');
+    final addrs = rawAddrs is List && rawAddrs.isNotEmpty
+        ? rawAddrs.map((e) => e.toString().trim()).where((s) => s.isNotEmpty).toList()
+        : (rawAddrs is String && rawAddrs.trim().isNotEmpty
+            ? rawAddrs.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
+            : <String>['10.8.0.2/24']);
+    final net = (cleanExtra.remove('network') ?? 'udp').toString().trim().toLowerCase();
+    final cipher = (cleanExtra.remove('cipher') ?? 'AES-256-CBC').toString().trim();
+    final auth = (cleanExtra.remove('auth') ?? 'SHA256').toString().trim();
+    final kd = (cleanExtra.remove('key_direction') ?? '').toString().trim().toLowerCase();
+    final rawMtu = cleanExtra.remove('mtu');
+    final parsedMtu = rawMtu is num
+        ? rawMtu.toInt()
+        : int.tryParse(rawMtu?.toString().trim() ?? '');
+    var peerAddr = (cleanExtra.remove('peer_address') ?? '').toString().trim();
+    if (peerAddr.isEmpty) {
+      for (final cidr in addrs) {
+        final ipPart = cidr.split('/').first.trim();
+        final octets = ipPart.split('.');
+        if (octets.length == 4) {
+          final last = int.tryParse(octets[3]);
+          if (last != null) {
+            peerAddr = '${octets[0]}.${octets[1]}.${octets[2]}.${last == 1 ? 2 : 1}';
+            break;
+          }
+        }
+      }
+      if (peerAddr.isEmpty) peerAddr = '10.8.0.1';
+    }
+
+    return {
+      'type': 'openvpn-client',
+      'tag': tag,
+      'mode': 'static_key',
+      'server': server,
+      'server_port': port > 0 ? port : 1194,
+      'network': net.isEmpty ? 'udp' : net,
+      'address': addrs,
+      'peer_address': peerAddr,
+      if (staticKey.isNotEmpty) 'static_key': staticKey,
+      if (kd == 'server' || kd == 'client') 'key_direction': kd,
+      'cipher': cipher.isEmpty ? 'AES-256-CBC' : cipher,
+      'auth': auth.isEmpty ? 'SHA256' : auth,
+      if (parsedMtu != null && parsedMtu >= 576 && parsedMtu <= 65535) 'mtu': parsedMtu,
+    };
+  }
+
+  /// Собирает канонический Tailscale эндпоинт для массива `endpoints` ядра.
+  Map<String, dynamic> toTailscaleEndpoint({
+    String tag = 'proxy',
+    String filesDir = '',
+  }) {
+    final authKey = (extra['auth_key'] ?? password).toString().trim();
+    final controlUrl = (extra['control_url'] ?? '').toString().trim();
+    final resolvedControl = controlUrl.isNotEmpty
+        ? controlUrl
+        : (server.isNotEmpty && server != 'controlplane.tailscale.com'
+            ? (server.startsWith('http://') || server.startsWith('https://')
+                ? server
+                : 'https://$server')
+            : 'https://controlplane.tailscale.com');
+    final hostname = (extra['hostname'] ?? '').toString().trim();
+    final exitNode = (extra['exit_node'] ?? '').toString().trim();
+    final ephemeral = extra['ephemeral'] == true;
+    final rawStateDir = (extra['state_directory'] ?? '').toString().trim();
+    final resolvedStateDir = rawStateDir.isNotEmpty
+        ? rawStateDir
+        : (filesDir.isNotEmpty && !ephemeral ? '$filesDir/tailscale-$tag' : '');
+    final rawListenPort = extra['listen_port'];
+    final listenPort = rawListenPort is num
+        ? rawListenPort.toInt()
+        : int.tryParse(rawListenPort?.toString().trim() ?? '');
+    final rawAdvRoutes = extra['advertise_routes'];
+    final advRoutes = rawAdvRoutes is List
+        ? rawAdvRoutes.map((e) => e.toString().trim()).where((s) => s.isNotEmpty).toList()
+        : (rawAdvRoutes is String && rawAdvRoutes.trim().isNotEmpty
+            ? rawAdvRoutes
+                .split(',')
+                .map((s) => s.trim())
+                .where((s) => s.isNotEmpty)
+                .toList()
+            : <String>[]);
+
+    return {
+      'type': 'tailscale',
+      'tag': tag,
+      'control_url': resolvedControl,
+      if (authKey.isNotEmpty) 'auth_key': authKey,
+      if (hostname.isNotEmpty) 'hostname': hostname,
+      if (ephemeral) 'ephemeral': true,
+      if (resolvedStateDir.isNotEmpty) 'state_directory': resolvedStateDir,
+      if (extra['accept_routes'] == true) 'accept_routes': true,
+      if (exitNode.isNotEmpty) 'exit_node': exitNode,
+      if (extra['exit_node_allow_lan_access'] == true) 'exit_node_allow_lan_access': true,
+      if (extra['advertise_exit_node'] == true) 'advertise_exit_node': true,
+      if (advRoutes.isNotEmpty) 'advertise_routes': advRoutes,
+      if (listenPort != null && listenPort > 0 && listenPort <= 65535) 'listen_port': listenPort,
+    };
+  }
+
   /// Собирает канонический outbound `tachyon-core` для этого профиля.
   ///
   /// `tag` переопределяется, когда `proxy` занят группой подписки.
-  Map<String, dynamic> toOutbound({String tag = 'proxy'}) {
+  Map<String, dynamic> toOutbound({String tag = 'proxy', String filesDir = ''}) {
     if (type == 'wireguard') {
       return toWireGuardEndpoint(tag: tag);
+    }
+    if (type == 'openvpn-client') {
+      return toOpenVpnEndpoint(tag: tag);
+    }
+    if (type == 'tailscale') {
+      return toTailscaleEndpoint(tag: tag, filesDir: filesDir);
     }
     final cleanExtra = Map<String, dynamic>.from(extra);
     final security = cleanExtra.remove('security')?.toString().toLowerCase() ?? '';
@@ -769,23 +900,43 @@ class Profile {
 
       case 'trusttunnel':
       case 'openconnect':
+        final rawOcMtu = cleanExtra.remove('mtu')?.toString().trim() ?? '';
+        if (cleanExtra['username'] == null && cleanExtra['user'] != null) {
+          cleanExtra['username'] = cleanExtra.remove('user');
+        } else {
+          cleanExtra.remove('user');
+        }
         return {
           'type': type,
           'tag': tag,
           'server': server,
           'server_port': port,
           if (password.isNotEmpty) 'password': password,
+          if (rawOcMtu.isNotEmpty) 'mtu': rawOcMtu,
           'tls': buildTlsObject(forceEnabled: true),
         }..addAll(cleanExtra);
 
       case 'wdtt':
         cleanExtra.remove('tls');
+        int? parsePositiveInt(Object? raw) =>
+            raw is num ? raw.toInt() : int.tryParse(raw?.toString().trim() ?? '');
+        final wdttRawPort = parsePositiveInt(cleanExtra.remove('raw_port'));
+        final wdttWgPort = parsePositiveInt(cleanExtra.remove('wg_port'));
+        final wdttLocalPort = parsePositiveInt(cleanExtra.remove('local_port'));
+        final wdttWorkers = parsePositiveInt(cleanExtra.remove('workers'));
+        final wdttMtu = parsePositiveInt(cleanExtra.remove('mtu'));
         return {
           'type': 'wdtt',
           'tag': tag,
           'server': server,
           'server_port': port,
           'password': password,
+          if (wdttRawPort != null && wdttRawPort > 0) 'raw_port': wdttRawPort,
+          if (wdttWgPort != null && wdttWgPort > 0) 'wg_port': wdttWgPort,
+          if (wdttLocalPort != null && wdttLocalPort > 0) 'local_port': wdttLocalPort,
+          if (wdttWorkers != null && wdttWorkers >= 1 && wdttWorkers <= 126)
+            'workers': wdttWorkers,
+          if (wdttMtu != null && wdttMtu >= 576 && wdttMtu <= 1500) 'mtu': wdttMtu,
         }..addAll(cleanExtra);
 
       default:
@@ -1225,6 +1376,80 @@ class Profile {
       case 'mtproto':
         return 'https://t.me/proxy?server=${Uri.encodeQueryComponent(server)}&port=$port&secret=${Uri.encodeQueryComponent(password)}#$encodedName';
 
+      case 'hysteria':
+        final authStr = (extra['auth_str'] ?? password).toString();
+        final params = <String, String>{
+          if (authStr.isNotEmpty) 'auth': authStr,
+          if (sni.isNotEmpty) 'peer': sni,
+          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
+          if (allowInsecure) 'insecure': '1',
+          if (extra['obfs'] != null && extra['obfs'].toString().isNotEmpty)
+            'obfsParam': extra['obfs'].toString(),
+          if (extra['up_mbps'] != null) 'upmbps': extra['up_mbps'].toString(),
+          if (extra['down_mbps'] != null) 'downmbps': extra['down_mbps'].toString(),
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'hysteria://$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'masque':
+        final privKey = (extra['private_key'] ?? password).toString();
+        final pubKey = (extra['public_key'] ?? extra['peer_public_key'] ?? publicKey).toString();
+        final params = <String, String>{
+          if (privKey.isNotEmpty) 'private_key': privKey,
+          if (pubKey.isNotEmpty) 'public_key': pubKey,
+          if (sni.isNotEmpty) 'sni': sni,
+          if (extra['profile'] != null && extra['profile'].toString().isNotEmpty)
+            'profile': extra['profile'].toString(),
+          if (extra['uri'] != null && extra['uri'].toString().isNotEmpty)
+            'uri': extra['uri'].toString(),
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'masque://$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'trusttunnel':
+        final user = (extra['username'] ?? extra['user'] ?? '').toString();
+        final auth = (user.isNotEmpty || password.isNotEmpty)
+            ? '${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@'
+            : '';
+        final params = <String, String>{
+          if (sni.isNotEmpty) 'sni': sni,
+          if (alpn.isNotEmpty) 'alpn': alpn.join(','),
+          if (allowInsecure) 'insecure': '1',
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'trusttunnel://$auth$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
+      case 'openconnect':
+        final user = (extra['username'] ?? extra['user'] ?? '').toString();
+        final auth = user.isNotEmpty && password.isNotEmpty
+            ? '${Uri.encodeComponent(user)}:${Uri.encodeComponent(password)}@'
+            : (user.isNotEmpty ? '${Uri.encodeComponent(user)}@' : '');
+        final params = <String, String>{
+          if (extra['flavor'] != null &&
+              extra['flavor'].toString().isNotEmpty &&
+              extra['flavor'].toString() != 'anyconnect')
+            'flavor': extra['flavor'].toString(),
+          if (extra['cookie'] != null && extra['cookie'].toString().isNotEmpty)
+            'cookie': extra['cookie'].toString(),
+          if (extra['urlpath'] != null && extra['urlpath'].toString().isNotEmpty)
+            'urlpath': extra['urlpath'].toString(),
+          if (extra['ip'] == true) 'ip': '1',
+          if (extra['esp'] == true) 'esp': '1',
+          if (extra['dtls'] == true) 'dtls': '1',
+          if (sni.isNotEmpty) 'sni': sni,
+          if (allowInsecure) 'insecure': '1',
+        };
+        final q = params.entries
+            .map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}')
+            .join('&');
+        return 'openconnect://$auth$hostFmt:$port${q.isEmpty ? "" : "?$q"}#$encodedName';
+
       case 'shadowtls':
         final ver = (extra['version'] ?? 3).toString();
         return 'shadowtls://${Uri.encodeComponent(password)}@$hostFmt:$port?sni=${Uri.encodeQueryComponent(sni.isNotEmpty ? sni : server)}&version=$ver#$encodedName';
@@ -1241,6 +1466,8 @@ class Profile {
             'hashes': (extra['hashes'] as List).join(','),
           if (extra['workers'] != null) 'workers': extra['workers'].toString(),
           if (extra['mtu'] != null) 'mtu': extra['mtu'].toString(),
+          if (extra['device_id'] != null && extra['device_id'].toString().isNotEmpty)
+            'did': extra['device_id'].toString(),
           if (extra['turn_transport'] != null &&
               extra['turn_transport'].toString().isNotEmpty)
             'turn_transport': extra['turn_transport'].toString(),
@@ -2062,6 +2289,8 @@ class BalancerSettings {
   /// Протоколы для фильтра исключений.
   static const List<(String id, String label)> commonProtocolFilters = [
     ('vless', 'VLESS'),
+    ('tewfai', 'Tewfai'),
+    ('wdtt', 'WDTT / CSQTT'),
     ('vmess', 'VMess'),
     ('trojan', 'Trojan'),
     ('shadowsocks', 'Shadowsocks'),
@@ -2070,8 +2299,17 @@ class BalancerSettings {
     ('wireguard', 'WireGuard / AWG'),
     ('anytls', 'AnyTLS'),
     ('naive', 'NaiveProxy'),
+    ('snell', 'Snell'),
+    ('shadowtls', 'ShadowTLS'),
     ('fptn', 'FPTN'),
-    ('tewfai', 'Tewfai'),
+    ('masque', 'MASQUE'),
+    ('mieru', 'Mieru'),
+    ('trusttunnel', 'TrustTunnel'),
+    ('openconnect', 'OpenConnect'),
+    ('openvpn-client', 'OpenVPN'),
+    ('tailscale', 'Tailscale'),
+    ('mtproto', 'MTProto'),
+    ('ssh', 'SSH'),
     ('socks', 'SOCKS / HTTP'),
   ];
 
@@ -2129,6 +2367,21 @@ class BalancerSettings {
         }
         if ((proto == 'hy2' || proto == 'hysteria2' || proto == 'hysteria') &&
             (pType == 'hysteria2' || pType == 'hysteria')) {
+          return false;
+        }
+        if ((proto == 'wdtt' || proto == 'csqtt' || proto == 'qwdtt') &&
+            pType == 'wdtt') {
+          return false;
+        }
+        if ((proto == 'openvpn' || proto == 'openvpn-client') &&
+            pType == 'openvpn-client') {
+          return false;
+        }
+        if (proto == 'mierus' && pType == 'mieru') {
+          return false;
+        }
+        if ((proto == 'openconnect' || proto == 'anyconnect') &&
+            pType == 'openconnect') {
           return false;
         }
       }
@@ -2914,11 +3167,20 @@ class RuntimeConfig {
     final dedicatedOutbounds = <String, Map<String, dynamic>>{};
     final dedicatedEndpoints = <String, Map<String, dynamic>>{};
 
+    Map<String, dynamic> buildHopEndpoint(Map<String, dynamic> hop, {String? tag}) {
+      final ty = (hop['type'] ?? '').toString().toLowerCase();
+      if (ty == 'wireguard') return _wireguardHopToEndpoint(hop, tag: tag);
+      if (tag != null && tag.isNotEmpty) {
+        return {...hop, 'tag': tag};
+      }
+      return Map<String, dynamic>.from(hop);
+    }
+
     void registerDedicatedProfile(Profile p, String tag) {
-      final isWg = p.type == 'wireguard';
-      if (!isWg && dedicatedOutbounds.containsKey(tag)) return;
-      if (isWg && dedicatedEndpoints.containsKey(tag)) return;
-      final node = isWg ? p.toWireGuardEndpoint(tag: tag) : p.toOutbound(tag: tag);
+      final isEp = p.isEndpoint;
+      if (!isEp && dedicatedOutbounds.containsKey(tag)) return;
+      if (isEp && dedicatedEndpoints.containsKey(tag)) return;
+      final node = p.toOutbound(tag: tag, filesDir: filesDir);
       if (p.extra['chain_outbounds'] is List &&
           (p.extra['chain_outbounds'] as List).isNotEmpty) {
         final rawHops = p.extra['chain_outbounds'] as List;
@@ -2937,7 +3199,7 @@ class RuntimeConfig {
           final firstOld = firstHop is Map ? (firstHop['tag']?.toString() ?? '') : '';
           node['detour'] = tagMap[firstOld] ?? '$tag-hop-0';
         }
-        if (isWg) {
+        if (isEp) {
           dedicatedEndpoints[tag] = node;
         } else {
           dedicatedOutbounds[tag] = node;
@@ -2952,15 +3214,15 @@ class RuntimeConfig {
               tagMap.containsKey(hop['detour'].toString())) {
             hop['detour'] = tagMap[hop['detour'].toString()];
           }
-          if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
-            dedicatedEndpoints.putIfAbsent(hopTag, () => _wireguardHopToEndpoint(hop, tag: hopTag));
+          if (Profile.isEndpointType((hop['type'] ?? '').toString())) {
+            dedicatedEndpoints.putIfAbsent(hopTag, () => buildHopEndpoint(hop, tag: hopTag));
           } else {
             hop['tag'] = hopTag;
             dedicatedOutbounds.putIfAbsent(hopTag, () => hop);
           }
         }
       } else {
-        if (isWg) {
+        if (isEp) {
           dedicatedEndpoints.putIfAbsent(tag, () => node);
         } else {
           dedicatedOutbounds[tag] = node;
@@ -3313,11 +3575,11 @@ class RuntimeConfig {
         detourProfile!.server.isNotEmpty &&
         detourProfile!.id != profile.id;
 
-    final isMainWg = hasStatic && profile.type == 'wireguard';
-    final isDetourWg = hasDetour && detourProfile!.type == 'wireguard';
+    final isMainEp = hasStatic && profile.isEndpoint;
+    final isDetourEp = hasDetour && detourProfile!.isEndpoint;
 
     Map<String, dynamic> buildMainProfileOutbound({String tag = 'proxy'}) {
-      final out = profile.toOutbound(tag: tag);
+      final out = profile.toOutbound(tag: tag, filesDir: filesDir);
       if (hasDetour) {
         out['detour'] = 'detour-proxy';
       }
@@ -3325,8 +3587,8 @@ class RuntimeConfig {
     }
 
     Map<String, dynamic> buildMainProfileEndpoint({String tag = 'proxy'}) {
-      final ep = profile.toWireGuardEndpoint(tag: tag);
-      if (hasDetour) {
+      final ep = profile.toOutbound(tag: tag, filesDir: filesDir);
+      if (hasDetour && profile.type == 'wireguard') {
         ep['detour'] = 'detour-proxy';
       }
       return ep;
@@ -3338,8 +3600,8 @@ class RuntimeConfig {
       for (final rawHop in profile.extra['chain_outbounds'] as List) {
         if (rawHop is! Map) continue;
         final hop = normalizeOutboundNode(Map<String, dynamic>.from(rawHop));
-        if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
-          chainEndpoints.add(_wireguardHopToEndpoint(hop));
+        if (Profile.isEndpointType((hop['type'] ?? '').toString())) {
+          chainEndpoints.add(buildHopEndpoint(hop));
         } else {
           chainOutbounds.add(hop);
         }
@@ -3353,10 +3615,8 @@ class RuntimeConfig {
       for (var i = 0; i < autoCandidates.length; i++) {
         final cand = autoCandidates[i];
         final memberTag = 'auto-srv-$i';
-        final isWgCand = cand.type == 'wireguard';
-        final node = isWgCand
-            ? cand.toWireGuardEndpoint(tag: memberTag)
-            : cand.toOutbound(tag: memberTag);
+        final isEpCand = cand.isEndpoint;
+        final node = cand.toOutbound(tag: memberTag, filesDir: filesDir);
         final nodeInsertIdx = autoMemberOutbounds.length;
         if (cand.extra['chain_outbounds'] is List &&
             (cand.extra['chain_outbounds'] as List).isNotEmpty) {
@@ -3384,8 +3644,8 @@ class RuntimeConfig {
             if (hop['detour'] != null && tagMap.containsKey(hop['detour'].toString())) {
               hop['detour'] = tagMap[hop['detour'].toString()];
             }
-            if ((hop['type'] ?? '').toString().toLowerCase() == 'wireguard') {
-              autoMemberEndpoints.add(_wireguardHopToEndpoint(hop, tag: hopTag));
+            if (Profile.isEndpointType((hop['type'] ?? '').toString())) {
+              autoMemberEndpoints.add(buildHopEndpoint(hop, tag: hopTag));
             } else {
               hop['tag'] = hopTag;
               autoMemberOutbounds.add(hop);
@@ -3393,7 +3653,7 @@ class RuntimeConfig {
           }
         }
         autoMemberTags.add(memberTag);
-        if (isWgCand) {
+        if (isEpCand) {
           autoMemberEndpoints.add(node);
         } else {
           autoMemberOutbounds.insert(nodeInsertIdx, node);
@@ -3402,9 +3662,9 @@ class RuntimeConfig {
     }
 
     final endpoints = <Map<String, dynamic>>[
-      if (autoMemberTags.isEmpty && subTags.isEmpty && isMainWg) buildMainProfileEndpoint(),
-      if (autoMemberTags.isEmpty && subTags.isNotEmpty && isMainWg) buildMainProfileEndpoint(tag: 'profile'),
-      if (isDetourWg) detourProfile!.toWireGuardEndpoint(tag: 'detour-proxy'),
+      if (autoMemberTags.isEmpty && subTags.isEmpty && isMainEp) buildMainProfileEndpoint(),
+      if (autoMemberTags.isEmpty && subTags.isNotEmpty && isMainEp) buildMainProfileEndpoint(tag: 'profile'),
+      if (isDetourEp) detourProfile!.toOutbound(tag: 'detour-proxy', filesDir: filesDir),
       ...autoMemberEndpoints,
       ...chainEndpoints,
       ...dedicatedEndpoints.values,
@@ -3424,7 +3684,7 @@ class RuntimeConfig {
           ),
         ...autoMemberOutbounds,
       ],
-      if (autoMemberTags.isEmpty && subTags.isEmpty && hasStatic && !isMainWg)
+      if (autoMemberTags.isEmpty && subTags.isEmpty && hasStatic && !isMainEp)
         buildMainProfileOutbound(),
       if (autoMemberTags.isEmpty && subTags.isNotEmpty)
         {
@@ -3436,9 +3696,9 @@ class RuntimeConfig {
           ],
           'default': hasStatic ? 'profile' : subTags.first,
         },
-      if (autoMemberTags.isEmpty && subTags.isNotEmpty && hasStatic && !isMainWg)
+      if (autoMemberTags.isEmpty && subTags.isNotEmpty && hasStatic && !isMainEp)
         buildMainProfileOutbound(tag: 'profile'),
-      if (hasDetour && !isDetourWg) detourProfile!.toOutbound(tag: 'detour-proxy'),
+      if (hasDetour && !isDetourEp) detourProfile!.toOutbound(tag: 'detour-proxy', filesDir: filesDir),
       ...chainOutbounds,
       ...dedicatedOutbounds.values,
       {'type': 'direct', 'tag': 'direct'},

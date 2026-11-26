@@ -26,6 +26,9 @@ import org.tachyon.vpn.WifiSsidHelper
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Мост между Flutter и нативным слоем.
@@ -51,6 +54,22 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingWifiPermResult: MethodChannel.Result? = null
     private var pendingInstallApkFileName: String? = null
 
+    private val ioExecutor: ExecutorService = Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "tachyon-io").apply { isDaemon = true }
+    }
+    private val iconExecutor: ExecutorService = Executors.newFixedThreadPool(3) { r ->
+        Thread(r, "tachyon-icon").apply { isDaemon = true }
+    }
+
+    private fun submitTask(executor: ExecutorService, task: Runnable) {
+        if (executor.isShutdown || isFinishing || isDestroyed) return
+        try {
+            executor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            // Исполнитель уже остановлен в onDestroy().
+        }
+    }
+
     /** Выбор конфигурационного файла (.conf / .fptn / .json / .txt) через системный пикер. */
     private val filePickerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { answer ->
@@ -66,10 +85,12 @@ class MainActivity : FlutterFragmentActivity() {
                 res.success(null)
                 return@registerForActivityResult
             }
-            Thread({
+            submitTask(ioExecutor, Runnable {
                 val parsed = readContentUriMap(uri)
-                runOnUiThread { res.success(parsed) }
-            }, "tachyon-file-read").start()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) res.success(parsed)
+                }
+            })
         }
 
     /** Запрос разрешения геолокации для чтения SSID Wi-Fi в режиме «Домашний интернет». */
@@ -160,8 +181,8 @@ class MainActivity : FlutterFragmentActivity() {
                 pendingCmd = cmd
             }
         }
-        extractIncomingLink(intent)?.let { link ->
-            pendingDeepLink = link
+        extractIncomingLink(intent) { link ->
+            deliverIncomingLink(link)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
@@ -197,40 +218,60 @@ class MainActivity : FlutterFragmentActivity() {
                 pendingCmd = cmd
             }
         }
-        extractIncomingLink(intent)?.let { link ->
-            val sink = eventSink
-            if (sink != null) {
-                runOnUiThread { sink.success(mapOf("type" to "deeplink", "url" to link)) }
-            } else {
-                pendingDeepLink = link
-            }
+        extractIncomingLink(intent) { link ->
+            deliverIncomingLink(link)
         }
     }
 
-    private fun extractIncomingLink(intent: Intent?): String? {
-        if (intent == null) return null
+    private fun deliverIncomingLink(link: String) {
+        val sink = eventSink
+        if (sink != null) {
+            sink.success(mapOf("type" to "deeplink", "url" to link))
+        } else {
+            pendingDeepLink = link
+        }
+    }
+
+    private fun extractIncomingLink(intent: Intent?, onResult: (String) -> Unit) {
+        if (intent == null) return
         when (intent.action) {
             Intent.ACTION_VIEW -> {
                 val uri = intent.data
+                val fallbackData = intent.dataString?.trim()
                 if (uri != null && (uri.scheme == "content" || uri.scheme == "file")) {
-                    val content = readContentUriMap(uri)?.get("content")?.trim()
-                    if (!content.isNullOrEmpty()) return content
+                    submitTask(ioExecutor, Runnable {
+                        val content = readContentUriMap(uri)?.get("content")?.trim()
+                        val resolved = if (!content.isNullOrEmpty()) content else fallbackData
+                        if (!resolved.isNullOrEmpty()) {
+                            runOnUiThread {
+                                if (!isFinishing && !isDestroyed) onResult(resolved)
+                            }
+                        }
+                    })
+                } else if (!fallbackData.isNullOrEmpty()) {
+                    onResult(fallbackData)
                 }
-                val data = intent.dataString?.trim()
-                if (!data.isNullOrEmpty()) return data
             }
             Intent.ACTION_SEND -> {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
-                if (!text.isNullOrEmpty()) return text
+                if (!text.isNullOrEmpty()) {
+                    onResult(text)
+                    return
+                }
                 @Suppress("DEPRECATION")
                 val streamUri = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
                 if (streamUri != null) {
-                    val content = readContentUriMap(streamUri)?.get("content")?.trim()
-                    if (!content.isNullOrEmpty()) return content
+                    submitTask(ioExecutor, Runnable {
+                        val content = readContentUriMap(streamUri)?.get("content")?.trim()
+                        if (!content.isNullOrEmpty()) {
+                            runOnUiThread {
+                                if (!isFinishing && !isDestroyed) onResult(content)
+                            }
+                        }
+                    })
                 }
             }
         }
-        return null
     }
 
     private fun readContentUriMap(uri: android.net.Uri): Map<String, String>? {
@@ -267,7 +308,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun dumpDiagnostics() {
-        Thread({
+        submitTask(ioExecutor, Runnable {
             try {
                 val ver = runCatching { TachyonCore.version() }.getOrNull()
                 android.util.Log.i("TachyonDump", "ENGINE VERSION: $ver (customSo=${TachyonCore.isCustomSoLoaded})")
@@ -286,7 +327,7 @@ class MainActivity : FlutterFragmentActivity() {
             } catch (e: Throwable) {
                 android.util.Log.e("TachyonDump", "dump failed", e)
             }
-        }, "tachyon-dump").start()
+        })
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -364,6 +405,8 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onDestroy() {
         TunnelStateHolder.removeListener(stateListener)
         TunnelStateHolder.removeCommandListener(commandListener)
+        ioExecutor.shutdownNow()
+        iconExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -374,11 +417,13 @@ class MainActivity : FlutterFragmentActivity() {
             result.success("""{"ok":false,"error":"пустая конфигурация"}""")
             return
         }
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val response = runCatching { TachyonCore.check(config) }
                 .getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
-            runOnUiThread { result.success(response) }
-        }, "tachyon-check").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(response)
+            }
+        })
     }
 
     /** Адаптивная загрузка подписки напрямую через движок tachyon-core. */
@@ -392,12 +437,14 @@ class MainActivity : FlutterFragmentActivity() {
             result.success("""{"ok":false,"error":"пустой URL"}""")
             return
         }
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val response = runCatching {
                 TachyonCore.fetchSubscription(url, customUa, sendHwid, customHwid, insecure)
             }.getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
-            runOnUiThread { result.success(response) }
-        }, "tachyon-sub-fetch").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(response)
+            }
+        })
     }
 
     /** Разбор любого текста/JSON/YAML подписки напрямую через движок tachyon-core. */
@@ -407,12 +454,14 @@ class MainActivity : FlutterFragmentActivity() {
             result.success("""{"ok":false,"error":"пустой ответ"}""")
             return
         }
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val response = runCatching {
                 TachyonCore.parseSubscription(payload)
             }.getOrElse { error -> """{"ok":false,"error":"${escape(error.message)}"}""" }
-            runOnUiThread { result.success(response) }
-        }, "tachyon-sub-parse").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(response)
+            }
+        })
     }
 
     /**
@@ -433,36 +482,50 @@ class MainActivity : FlutterFragmentActivity() {
         val mtu = call.argument<Int>("mtu") ?: 9000
         val proxyOnly = call.argument<Boolean>("proxyOnly") ?: false
 
-        // Проверяем конфигурацию до запроса разрешения: если она невалидна,
-        // пользователю незачем показывать диалог VPN.
-        if (!TachyonCore.isAvailable && !TachyonCore.ensureInitialized(applicationContext)) {
-            result.success("движок недоступен: ${TachyonCore.loadError ?: "библиотека не загружена"}")
-            return
-        }
-        val check = runCatching { TachyonCore.check(config) }.getOrNull()
-        if (check == null) {
-            val detail = runCatching { TachyonCore.lastError() }.getOrNull() ?: TachyonCore.loadError
-            result.success("движок недоступен: $detail")
-            return
-        }
-        val verdict = runCatching { JSONObject(check) }.getOrNull()
-        val accepted = verdict?.optBoolean("ok", false) ?: false
-        if (!accepted) {
-            val reason = verdict?.optString("error").orEmpty().ifEmpty { check }
-            result.success("конфигурация отклонена движком: $reason")
-            return
-        }
-
-        if (!proxyOnly) {
-            val prepare = VpnService.prepare(this)
-            if (prepare != null) {
-                pendingStart = PendingStart(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly, result)
-                vpnPermission.launch(prepare)
-                return
+        submitTask(ioExecutor, Runnable {
+            // Проверяем конфигурацию до запроса разрешения: если она невалидна,
+            // пользователю незачем показывать диалог VPN.
+            if (!TachyonCore.isAvailable && !TachyonCore.ensureInitialized(applicationContext)) {
+                val errorMsg = "движок недоступен: ${TachyonCore.loadError ?: "библиотека не загружена"}"
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) result.success(errorMsg)
+                }
+                return@Runnable
             }
-        }
-        startTunnel(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly)
-        result.success(null)
+            val check = runCatching { TachyonCore.check(config) }.getOrNull()
+            if (check == null) {
+                val detail = runCatching { TachyonCore.lastError() }.getOrNull() ?: TachyonCore.loadError
+                val errorMsg = "движок недоступен: $detail"
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) result.success(errorMsg)
+                }
+                return@Runnable
+            }
+            val verdict = runCatching { JSONObject(check) }.getOrNull()
+            val accepted = verdict?.optBoolean("ok", false) ?: false
+            if (!accepted) {
+                val reason = verdict?.optString("error").orEmpty().ifEmpty { check }
+                val errorMsg = "конфигурация отклонена движком: $reason"
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) result.success(errorMsg)
+                }
+                return@Runnable
+            }
+
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (!proxyOnly) {
+                    val prepare = VpnService.prepare(this)
+                    if (prepare != null) {
+                        pendingStart = PendingStart(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly, result)
+                        vpnPermission.launch(prepare)
+                        return@runOnUiThread
+                    }
+                }
+                startTunnel(config, allowedApps, disallowedApps, serverName, mtu, proxyOnly)
+                result.success(null)
+            }
+        })
     }
 
     /** Останавливает туннель. */
@@ -484,10 +547,12 @@ class MainActivity : FlutterFragmentActivity() {
 
     /** Версия нативного ядра. */
     private fun handleVersion(result: MethodChannel.Result) {
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val version = runCatching { TachyonCore.version() }.getOrNull()
-            runOnUiThread { result.success(version ?: "неизвестно") }
-        }, "tachyon-version").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(version ?: "неизвестно")
+            }
+        })
     }
 
     /** Статистика трафика: байты и число соединений (с использованием общего кэша сервиса). */
@@ -498,25 +563,29 @@ class MainActivity : FlutterFragmentActivity() {
             result.success(cached)
             return
         }
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val stats = TachyonCore.stats()
             TunnelStateHolder.updateStats(stats)
-            runOnUiThread { result.success(stats) }
-        }, "tachyon-stats").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(stats)
+            }
+        })
     }
 
     /** Хвост журнала ядра (чтение с конца файла через RandomAccessFile и авто-ротация при > 2 МБ). */
     private fun handleLogs(call: MethodCall, result: MethodChannel.Result) {
         val limit = call.argument<Int>("limit") ?: 400
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val file = File(filesDir, LOG_FILE_NAME)
             val tail = if (file.exists()) {
                 runCatching { readLogTail(file, limit) }.getOrDefault(emptyList())
             } else {
                 emptyList()
             }
-            runOnUiThread { result.success(tail) }
-        }, "tachyon-logs").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(tail)
+            }
+        })
     }
 
     private fun readLogTail(file: File, maxLines: Int): List<String> {
@@ -562,11 +631,13 @@ class MainActivity : FlutterFragmentActivity() {
 
     /** Очищает журнал ядра. */
     private fun handleClearLogs(result: MethodChannel.Result) {
-        Thread({
+        submitTask(ioExecutor, Runnable {
             val file = File(filesDir, LOG_FILE_NAME)
             runCatching { if (file.exists()) file.writeText("") }
-            runOnUiThread { result.success(true) }
-        }, "tachyon-clear-logs").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(true)
+            }
+        })
     }
 
     /** Возвращает PNG-иконку приложения (64x64) с кэшированием в память. */
@@ -580,7 +651,7 @@ class MainActivity : FlutterFragmentActivity() {
             result.success(cached)
             return
         }
-        Thread({
+        submitTask(iconExecutor, Runnable {
             val bytes = runCatching {
                 val drawable = packageManager.getApplicationIcon(pkg)
                 val size = 64
@@ -596,8 +667,10 @@ class MainActivity : FlutterFragmentActivity() {
             if (bytes != null) {
                 iconCache.put(pkg, bytes)
             }
-            runOnUiThread { result.success(bytes) }
-        }, "tachyon-icon").start()
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) result.success(bytes)
+            }
+        })
     }
 
     /** Открывает системное меню «Поделиться» для текста/ссылки/резервной копии. */
@@ -767,12 +840,16 @@ class MainActivity : FlutterFragmentActivity() {
             result.success("error: пустой путь к файлу")
             return
         }
-        Thread({
+        submitTask(ioExecutor, Runnable {
             try {
                 val srcFile = File(srcPath)
                 if (!srcFile.exists() || srcFile.length() < 1_000_000L) {
-                    runOnUiThread { result.success("error: файл ядра повреждён или не найден") }
-                    return@Thread
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) {
+                            result.success("error: файл ядра повреждён или не найден")
+                        }
+                    }
+                    return@Runnable
                 }
                 val engineDir = TachyonCore.engineDir(this)
                 engineDir.mkdirs()
@@ -816,13 +893,16 @@ class MainActivity : FlutterFragmentActivity() {
 
                 if (!dlopenAllowed) {
                     TachyonCore.clearCustomEngine(this)
-                    runOnUiThread { result.success("requires_apk") }
-                    return@Thread
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) result.success("requires_apk")
+                    }
+                    return@Runnable
                 }
 
                 TachyonCore.writeCustomStamp(this)
 
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
                     result.success("ok")
                     // Перезапускаем процесс через RestartActivity (:restart), чтобы TachyonCore загрузил новый .so с нуля
                     window.decorView.postDelayed({
@@ -831,9 +911,11 @@ class MainActivity : FlutterFragmentActivity() {
                     }, 300)
                 }
             } catch (e: Throwable) {
-                runOnUiThread { result.success("requires_apk") }
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) result.success("requires_apk")
+                }
             }
-        }, "tachyon-install-so").start()
+        })
     }
 
     /** Запускает системный установщик пакетов Android для обновления APK. */

@@ -81,6 +81,13 @@ class RootShell extends StatefulWidget {
 }
 
 class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
+  static const List<Widget> _pages = [
+    HomeTab(),
+    ProfilesTab(),
+    RulesTab(),
+    SettingsTab(),
+  ];
+
   int _index = 0;
   String _lastCheckedClip = '';
 
@@ -185,15 +192,8 @@ class _RootShellState extends State<RootShell> with WidgetsBindingObserver {
       });
     }
 
-    final pages = <Widget>[
-      const HomeTab(),
-      const ProfilesTab(),
-      const RulesTab(),
-      const SettingsTab(),
-    ];
-
     return Scaffold(
-      body: pages[_index],
+      body: IndexedStack(index: _index, children: _pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (index) => setState(() => _index = index),

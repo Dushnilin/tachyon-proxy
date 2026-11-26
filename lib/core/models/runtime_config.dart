@@ -538,7 +538,9 @@ class Profile {
       ..remove('pcs')
       ..remove('chain_outbounds')
       ..remove('network_scope');
-    final certSha256 = cleanExtra.remove('certificate_sha256');
+    final certSha256Pins = sanitizeCertificateSha256Pins(
+      cleanExtra.remove('certificate_sha256'),
+    );
     if (cleanExtra['transport'] is Map) {
       final tr = cleanExtra['transport'] as Map;
       final trType = tr['type']?.toString().toLowerCase();
@@ -583,8 +585,17 @@ class Profile {
         tls.remove('insecure');
         tls.remove('disable_sni');
       }
-      if (certSha256 is List && certSha256.isNotEmpty) {
-        tls['certificate_sha256'] = certSha256;
+      if (certSha256Pins.isNotEmpty) {
+        tls['certificate_sha256'] = certSha256Pins;
+      } else if (tls.containsKey('certificate_sha256')) {
+        final existingPins = sanitizeCertificateSha256Pins(
+          tls['certificate_sha256'],
+        );
+        if (existingPins.isNotEmpty) {
+          tls['certificate_sha256'] = existingPins;
+        } else {
+          tls.remove('certificate_sha256');
+        }
       }
       if (pq) tls['pq'] = true;
       if (fp.isNotEmpty) {
@@ -620,7 +631,7 @@ class Profile {
             sni.isNotEmpty ||
             alpn.isNotEmpty ||
             allowInsecure ||
-            certSha256 != null ||
+            certSha256Pins.isNotEmpty ||
             cleanExtra['tls'] is Map);
 
     switch (type) {
@@ -3932,6 +3943,82 @@ String normalizeVlessFlow(String raw) {
   return f;
 }
 
+/// Валидирует и нормализует SHA-256 пины сертификатов в канонический Base64 (32 байта).
+List<String> sanitizeCertificateSha256Pins(Object? raw) {
+  final Iterable<Object?> items;
+  if (raw is String) {
+    items = [raw];
+  } else if (raw is List) {
+    items = raw;
+  } else {
+    return const [];
+  }
+
+  final out = <String>[];
+  final seen = <String>{};
+  final prefixRe = RegExp(
+    r'^(?:pin-sha256[:=]|sha256[:/])',
+    caseSensitive: false,
+  );
+  final hexRe = RegExp(r'^[0-9a-fA-F]{64}$');
+  final b64Re = RegExp(r'^[A-Za-z0-9+/]+={0,2}$');
+
+  String stripQuotesAndSpace(String s) {
+    var v = s.trim();
+    while (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+      v = v.substring(1, v.length - 1).trim();
+    }
+    if (v.startsWith('"')) v = v.substring(1).trim();
+    if (v.endsWith('"')) v = v.substring(0, v.length - 1).trim();
+    return v;
+  }
+
+  for (final entry in items) {
+    if (entry == null) continue;
+    for (final part in entry.toString().split(RegExp(r'[,;]'))) {
+      var token = stripQuotesAndSpace(part);
+      if (token.isEmpty) continue;
+      token = token.replaceFirst(prefixRe, '');
+      token = stripQuotesAndSpace(token);
+      if (token.isEmpty) continue;
+
+      final hexCandidate = token.replaceAll(':', '').replaceAll('-', '');
+      if (hexCandidate.length == 64 && hexRe.hasMatch(hexCandidate)) {
+        final bytes = List<int>.generate(
+          32,
+          (i) => int.parse(hexCandidate.substring(i * 2, i * 2 + 2), radix: 16),
+          growable: false,
+        );
+        final canonical = base64.encode(bytes);
+        if (seen.add(canonical)) out.add(canonical);
+        continue;
+      }
+
+      var b64 = token
+          .replaceAll(RegExp(r'\s+'), '')
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
+      if (b64.isEmpty || !b64Re.hasMatch(b64)) continue;
+      final mod = b64.length % 4;
+      if (mod == 1) continue;
+      if (mod != 0) {
+        if (b64.endsWith('=')) continue;
+        b64 = b64.padRight(b64.length + (4 - mod), '=');
+      }
+      try {
+        final decoded = base64.decode(b64);
+        if (decoded.length == 32) {
+          final canonical = base64.encode(decoded);
+          if (seen.add(canonical)) out.add(canonical);
+        }
+      } on FormatException {
+        // Некорректный Base64-пин отбрасывается.
+      }
+    }
+  }
+  return out;
+}
+
 /// Нормализует произвольный узел outbound (включая транзитные `chain_outbounds`).
 Map<String, dynamic> normalizeOutboundNode(Map<String, dynamic> rawNode) {
   final node = Map<String, dynamic>.from(rawNode);
@@ -3973,6 +4060,14 @@ Map<String, dynamic> normalizeOutboundNode(Map<String, dynamic> rawNode) {
       tls['reality'] = reality;
       if (reality['enabled'] == true && tls['utls'] == null) {
         tls['utls'] = {'enabled': true, 'fingerprint': 'chrome'};
+      }
+    }
+    if (tls.containsKey('certificate_sha256')) {
+      final pins = sanitizeCertificateSha256Pins(tls['certificate_sha256']);
+      if (pins.isEmpty) {
+        tls.remove('certificate_sha256');
+      } else {
+        tls['certificate_sha256'] = pins;
       }
     }
     node['tls'] = tls;

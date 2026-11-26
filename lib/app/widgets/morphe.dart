@@ -314,31 +314,37 @@ class Wordmark extends StatelessWidget {
           ),
         ),
         const SizedBox(width: Space.sm + 2),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Tachyon',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -0.3,
-                height: 1.15,
-                color: tokens.ink,
-              ),
-            ),
-            if (subtitle != null)
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
               Text(
-                subtitle!,
+                'Tachyon',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w400,
-                  letterSpacing: 0,
-                  color: tokens.muted,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.3,
+                  height: 1.15,
+                  color: tokens.ink,
                 ),
               ),
-          ],
+              if (subtitle != null)
+                Text(
+                  subtitle!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w400,
+                    letterSpacing: 0,
+                    color: tokens.muted,
+                  ),
+                ),
+            ],
+          ),
         ),
       ],
     );

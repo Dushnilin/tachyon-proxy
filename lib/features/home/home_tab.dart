@@ -28,15 +28,6 @@ class HomeTab extends StatefulWidget {
 class _HomeTabState extends State<HomeTab> {
   String _searchQuery = '';
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      AppScope.read(context).startTrafficPolling();
-    });
-  }
-
   List<Profile> _filter(
     List<Profile> items,
     AppController controller, {
@@ -109,13 +100,36 @@ class _HomeTabState extends State<HomeTab> {
                 ),
                 const SizedBox(width: Space.sm),
                 Expanded(
-                  child: Text(
+                  child: SelectableText(
                     tunnel.error,
                     style: TextStyle(
                       fontSize: 12.5,
                       height: 1.4,
                       color: tokens.danger,
                     ),
+                  ),
+                ),
+                const SizedBox(width: Space.xs),
+                IconButton(
+                  tooltip: 'Скопировать ошибку',
+                  constraints: const BoxConstraints(
+                    minWidth: 28,
+                    minHeight: 28,
+                  ),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: tunnel.error));
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      const SnackBar(
+                        content: Text('Текст ошибки скопирован'),
+                      ),
+                    );
+                  },
+                  icon: Icon(
+                    Icons.copy_rounded,
+                    size: 15,
+                    color: tokens.danger,
                   ),
                 ),
               ],
@@ -984,6 +998,27 @@ class _TachyonDialPainter extends CustomPainter {
 
   static const int _tickCount = 60;
 
+  final Paint _outerRingPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.0;
+
+  final Paint _tickPaint = Paint()..strokeCap = StrokeCap.round;
+
+  final Paint _arcTrackPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.5;
+
+  final Paint _arcActivePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2.2
+    ..strokeCap = StrokeCap.round;
+
+  final Paint _coreFillPaint = Paint();
+
+  final Paint _coreStrokePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.2;
+
   @override
   void paint(Canvas canvas, Size size) {
     final phase = phaseAnimation.value;
@@ -999,15 +1034,10 @@ class _TachyonDialPainter extends CustomPainter {
         status == VpnStatus.connecting || status == VpnStatus.disconnecting;
 
     // 1. Внешнее инструментальное кольцо отсчёта (только тонкий контур без размытого свечения)
-    canvas.drawCircle(
-      center,
-      dialR,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0
-        ..color = (isConnected || isConnecting ? primaryColor : lineColor)
-            .withValues(alpha: isConnected || isConnecting ? 0.24 : 0.65),
-    );
+    _outerRingPaint.color =
+        (isConnected || isConnecting ? primaryColor : lineColor)
+            .withValues(alpha: isConnected || isConnecting ? 0.24 : 0.65);
+    canvas.drawCircle(center, dialR, _outerRingPaint);
 
     // 2. 60 делений приборной шкалы (60 Gauge Ticks — полный круг 360°)
     final speedBoost = (math.log(downSpeed + 1) / math.log(10 * 1024 * 1024 + 1))
@@ -1058,64 +1088,37 @@ class _TachyonDialPainter extends CustomPainter {
         center.dx + rOuter * math.cos(angle),
         center.dy + rOuter * math.sin(angle),
       );
-      canvas.drawLine(
-        p1,
-        p2,
-        Paint()
-          ..color = tickColor
-          ..strokeWidth = strokeW
-          ..strokeCap = StrokeCap.round,
-      );
+      _tickPaint
+        ..color = tickColor
+        ..strokeWidth = strokeW;
+      canvas.drawLine(p1, p2, _tickPaint);
     }
 
     // 3. Внутренняя дуга состояния канала
     final arcR = coreR + (ringR - coreR) * 0.34;
     final arcRect = Rect.fromCircle(center: center, radius: arcR);
-    canvas.drawCircle(
-      center,
-      arcR,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5
-        ..color = lineColor.withValues(alpha: 0.45),
-    );
+    _arcTrackPaint.color = lineColor.withValues(alpha: 0.45);
+    canvas.drawCircle(center, arcR, _arcTrackPaint);
 
     if (isConnecting) {
       final startAngle = phase * 2 * math.pi - math.pi / 2;
       const sweep = math.pi * 0.65;
-      final arcPaint = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.2
-        ..strokeCap = StrokeCap.round
-        ..color = primaryColor;
-      canvas.drawArc(arcRect, startAngle, sweep, false, arcPaint);
+      _arcActivePaint.color = primaryColor;
+      canvas.drawArc(arcRect, startAngle, sweep, false, _arcActivePaint);
     } else if (isConnected && reveal > 0.01) {
       final sweep = 2 * math.pi * reveal;
       const startAngle = -math.pi / 2;
-      final arcPaint = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.2
-        ..strokeCap = StrokeCap.round
-        ..color = primaryColor.withValues(alpha: 0.85);
-      canvas.drawArc(arcRect, startAngle, sweep, false, arcPaint);
+      _arcActivePaint.color = primaryColor.withValues(alpha: 0.85);
+      canvas.drawArc(arcRect, startAngle, sweep, false, _arcActivePaint);
     }
 
     // 4. Центральный приборный диск (без мыльных бликов и молний)
-    canvas.drawCircle(
-      center,
-      coreR,
-      Paint()..color = surfaceColor,
-    );
-    canvas.drawCircle(
-      center,
-      coreR,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2
-        ..color = isConnected || isConnecting
-            ? primaryColor.withValues(alpha: 0.45)
-            : lineColor,
-    );
+    _coreFillPaint.color = surfaceColor;
+    canvas.drawCircle(center, coreR, _coreFillPaint);
+    _coreStrokePaint.color = isConnected || isConnecting
+        ? primaryColor.withValues(alpha: 0.45)
+        : lineColor;
+    canvas.drawCircle(center, coreR, _coreStrokePaint);
   }
 
   @override
@@ -1123,6 +1126,10 @@ class _TachyonDialPainter extends CustomPainter {
     return old.status != status ||
         old.downSpeed != downSpeed ||
         old.primaryColor != primaryColor ||
+        old.secondaryColor != secondaryColor ||
+        old.surfaceColor != surfaceColor ||
+        old.lineColor != lineColor ||
+        old.inkColor != inkColor ||
         old.phaseAnimation != phaseAnimation ||
         old.revealAnimation != revealAnimation;
   }
@@ -1309,6 +1316,9 @@ class _StatusLine extends StatelessWidget {
         const SizedBox(height: Space.xs),
         Text(
           displayName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium,
         ),
       ],
@@ -1637,6 +1647,7 @@ class _TrafficRow extends StatelessWidget {
                   upValues: controller.upHistory,
                   downColor: tokens.accent,
                   upColor: tokens.muted.withValues(alpha: 0.65),
+                  revision: controller.trafficRevision.value,
                 ),
               ),
             ),
@@ -1653,12 +1664,14 @@ class _SparklinePainter extends CustomPainter {
     required this.upValues,
     required this.downColor,
     required this.upColor,
+    required this.revision,
   });
 
   final List<int> downValues;
   final List<int> upValues;
   final Color downColor;
   final Color upColor;
+  final int revision;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1710,7 +1723,10 @@ class _SparklinePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _SparklinePainter oldDelegate) => true;
+  bool shouldRepaint(covariant _SparklinePainter oldDelegate) =>
+      oldDelegate.revision != revision ||
+      oldDelegate.downColor != downColor ||
+      oldDelegate.upColor != upColor;
 }
 
 /// Карточка выбранного профиля.

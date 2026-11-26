@@ -1,6 +1,9 @@
 package org.tachyon.vpn
 
 import android.graphics.Bitmap
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import kotlin.math.abs
 import kotlin.math.max
@@ -980,15 +983,20 @@ object QrDecoder {
 
     private fun gfInv(a: Int): Int = GF_EXP[255 - GF_LOG[a]]
 
+    private fun computeSyndrome(cw: IntArray, rootIdx: Int): Int {
+        var eval = 0
+        val a = GF_EXP[rootIdx]
+        for (c in cw) {
+            eval = gfMul(eval, a) xor (c and 0xFF)
+        }
+        return eval
+    }
+
     private fun rsDecode(cw: IntArray, twoS: Int): Boolean {
         val syn = IntArray(twoS)
         var hasError = false
         for (i in 0 until twoS) {
-            var eval = 0
-            val a = GF_EXP[i]
-            for (c in cw) {
-                eval = gfMul(eval, a) xor (c and 0xFF)
-            }
+            val eval = computeSyndrome(cw, i)
             syn[i] = eval
             if (eval != 0) hasError = true
         }
@@ -1076,6 +1084,9 @@ object QrDecoder {
                 cw[idx] = (cw[idx] xor errMag) and 0xFF
             }
         }
+        for (i in 0 until twoS) {
+            if (computeSyndrome(cw, i) != 0) return false
+        }
         return true
     }
 
@@ -1110,7 +1121,22 @@ object QrDecoder {
                         if (b < 0) return null
                         buf[i] = b.toByte()
                     }
-                    sb.append(String(buf, StandardCharsets.UTF_8))
+                    val decoded = try {
+                        StandardCharsets.UTF_8
+                            .newDecoder()
+                            .onMalformedInput(CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(buf))
+                            .toString()
+                    } catch (_: CharacterCodingException) {
+                        val hasControl = buf.any { byte ->
+                            val u = byte.toInt() and 0xFF
+                            u < 0x20 && u != 0x09 && u != 0x0A && u != 0x0D
+                        }
+                        if (hasControl) return null
+                        String(buf, StandardCharsets.ISO_8859_1)
+                    }
+                    sb.append(decoded)
                 }
                 0x2 -> { // Alphanumeric mode
                     val lenBits = if (ver <= 9) 9 else if (ver <= 26) 11 else 13

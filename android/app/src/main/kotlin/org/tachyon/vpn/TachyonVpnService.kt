@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.util.Log
 import app.tachyon.tachyon_proxy.MainActivity
 import app.tachyon.tachyon_proxy.R
@@ -35,6 +36,7 @@ class TachyonVpnService : VpnService() {
     private var coreThread: Thread? = null
     private var protectThread: Thread? = null
     private var statsThread: Thread? = null
+    @Volatile
     private var wifiWatchThread: Thread? = null
 
     /** Дескриптор TUN и его дубликат, переданный в ядро: оба должны закрываться в [closeTun]. */
@@ -309,7 +311,7 @@ class TachyonVpnService : VpnService() {
         TunnelStateHolder.serverName = currentServerName
         TunnelStateHolder.update(TunnelStateHolder.State.Stopped, null, pausedWifi = ssid)
         startVpnForeground(buildHomeWifiStandbyNotification(ssid))
-        runCatching { TachyonAppWidget.updateAll(this, "🏠 Пауза в Wi-Fi: $ssid") }
+        runCatching { TachyonAppWidget.updateAll(this, "Пауза в Wi-Fi: $ssid") }
     }
 
     /**
@@ -337,15 +339,23 @@ class TachyonVpnService : VpnService() {
         watcherActive = true
         WifiSsidHelper.ensureRegistered(applicationContext)
         watchNetwork()
+        val (homeWifiMode, _) = WifiSsidHelper.readHomeWifiConfig(filesDir)
+        if (!homeWifiMode) {
+            stopWifiWatchThread()
+            return
+        }
         if (wifiWatchThread?.isAlive == true) return
         wifiWatchThread = Thread({
-            while (watcherActive && !Thread.currentThread().isInterrupted) {
+            while (watcherActive &&
+                wifiWatchThread === Thread.currentThread() &&
+                !Thread.currentThread().isInterrupted
+            ) {
                 try {
-                    Thread.sleep(1500)
+                    Thread.sleep(4000L)
                 } catch (_: InterruptedException) {
                     break
                 }
-                if (!watcherActive) break
+                if (!watcherActive || wifiWatchThread !== Thread.currentThread()) break
                 runCatching { evaluateHomeWifiState() }
             }
         }, "tachyon-wifi-watch").apply {
@@ -354,10 +364,15 @@ class TachyonVpnService : VpnService() {
         }
     }
 
+    private fun stopWifiWatchThread() {
+        val thread = wifiWatchThread ?: return
+        wifiWatchThread = null
+        thread.interrupt()
+    }
+
     private fun stopWifiWatcher() {
         watcherActive = false
-        wifiWatchThread?.interrupt()
-        wifiWatchThread = null
+        stopWifiWatchThread()
         networkCallback?.let { callback ->
             val manager = getSystemService(ConnectivityManager::class.java)
             runCatching { manager?.unregisterNetworkCallback(callback) }
@@ -395,6 +410,16 @@ class TachyonVpnService : VpnService() {
         } else if (pausedByWifi) {
             Log.i(TAG, "Выход из домашнего Wi-Fi — автоматически включаем маршрутизацию")
             resumeFromHomeWifi()
+        }
+
+        if (watcherActive) {
+            if (homeWifiMode) {
+                if (wifiWatchThread?.isAlive != true) {
+                    startWifiWatcher()
+                }
+            } else {
+                stopWifiWatchThread()
+            }
         }
     }
 
@@ -604,7 +629,10 @@ class TachyonVpnService : VpnService() {
         runCatching { logFile.writeText("") }
         protectPath = activeProtectPath
         logPath = logFile.absolutePath
-        Log.i(TAG, "CONFIG: $config")
+        Log.i(
+            TAG,
+            "Запуск ядра: server=$currentServerName, mtu=$mtu, proxyOnly=$proxyOnly, configBytes=${config.length}",
+        )
 
         running = true
         pausedByWifi = false
@@ -657,7 +685,7 @@ class TachyonVpnService : VpnService() {
         }
     }
 
-    /** Фоновый поток обновления живой статистики в уведомлении раз в 2 секунды. */
+    /** Фоновый поток обновления живой статистики в уведомлении (2 с при активном экране, 10 с в режиме ожидания). */
     private fun startStatsLoop() {
         statsThread?.interrupt()
         statsThread = Thread({
@@ -665,13 +693,17 @@ class TachyonVpnService : VpnService() {
             var prevDown = 0L
             var prevAt = System.currentTimeMillis()
             val manager = getSystemService(NotificationManager::class.java)
+            val powerManager = getSystemService(PowerManager::class.java)
             while (running && !stopRequested.get() && !Thread.currentThread().isInterrupted) {
+                val interactive = powerManager?.isInteractive ?: true
+                val sleepMs = if (interactive) 2000L else 10_000L
                 try {
-                    Thread.sleep(2000)
+                    Thread.sleep(sleepMs)
                 } catch (_: InterruptedException) {
                     break
                 }
                 if (!running || stopRequested.get()) break
+                val interactiveNow = powerManager?.isInteractive ?: true
                 runCatching {
                     val raw = TachyonCore.stats()
                     TunnelStateHolder.updateStats(raw)
@@ -689,7 +721,14 @@ class TachyonVpnService : VpnService() {
                     if (!running || stopRequested.get()) return@runCatching
                     val line = "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с  |  ↑ ${formatBytes(up)} ↓ ${formatBytes(down)} ($conns)"
                     manager?.notify(NOTIFICATION_ID, buildNotification(line))
-                    runCatching { TachyonAppWidget.updateAll(this@TachyonVpnService, "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с") }
+                    if (interactiveNow && TachyonAppWidget.hasActiveWidgets(this@TachyonVpnService)) {
+                        runCatching {
+                            TachyonAppWidget.updateAll(
+                                this@TachyonVpnService,
+                                "↑ ${formatBytes(upRate)}/с · ↓ ${formatBytes(downRate)}/с",
+                            )
+                        }
+                    }
                 }
             }
         }, "tachyon-notif-stats").apply {
@@ -978,7 +1017,7 @@ class TachyonVpnService : VpnService() {
         ).build()
 
         return builder
-            .setContentTitle("🏠 Домашний интернет · $ssid")
+            .setContentTitle("Домашний интернет · $ssid")
             .setContentText("Маршрутизация на паузе в домашней сети · Включится вне Wi-Fi")
             .setSmallIcon(R.drawable.ic_tachyon_bolt)
             .setOngoing(true)
@@ -1024,9 +1063,9 @@ class TachyonVpnService : VpnService() {
         }
 
         val title = if (currentServerName.isNotEmpty()) {
-            "⚡ Tachyon · $currentServerName"
+            "Tachyon · $currentServerName"
         } else {
-            "⚡ ${getString(R.string.notification_title)}"
+            getString(R.string.notification_title)
         }
 
         val stopAction = Notification.Action.Builder(

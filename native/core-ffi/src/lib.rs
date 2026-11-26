@@ -336,7 +336,11 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_nativeStats<'caller>(
                 });
             drop(guard);
             let (up, down) = core_runtime::clash_state::traffic_totals();
-            let connections = core_runtime::clash_state::snapshot().0.len();
+            let connections = if running {
+                core_runtime::clash_state::snapshot().0.len()
+            } else {
+                0
+            };
             let mut root = json!({
                 "running": running,
                 "up": up,
@@ -503,19 +507,81 @@ pub extern "system" fn Java_org_tachyon_vpn_TachyonCore_parseSubscription<'calle
 /// retires it.
 #[cfg(unix)]
 static PROTECT: Mutex<Option<(usize, std::os::unix::net::UnixListener)>> = Mutex::new(None);
-/// Bumped by every `protectOpen`/`protectClose`: closing another thread's
-/// blocked `accept` is not portable, so the loop polls this instead.
+/// Read/write ends of the wakeup pipe used to interrupt `poll` in `serve_loop`.
+#[cfg(unix)]
+static PROTECT_WAKE_READ: Mutex<Option<std::os::fd::OwnedFd>> = Mutex::new(None);
+#[cfg(unix)]
+static PROTECT_WAKE_WRITE: Mutex<Option<std::os::fd::OwnedFd>> = Mutex::new(None);
+/// Bumped by every `protectOpen`/`protectClose` so the loop knows when to exit.
 #[cfg(unix)]
 static PROTECT_GEN: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
+const POLLIN: core::ffi::c_short = 1;
+
+#[cfg(unix)]
+#[repr(C)]
+struct PollFd {
+    fd: core::ffi::c_int,
+    events: core::ffi::c_short,
+    revents: core::ffi::c_short,
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn poll(
+        fds: *mut PollFd,
+        nfds: core::ffi::c_ulong,
+        timeout: core::ffi::c_int,
+    ) -> core::ffi::c_int;
+    fn pipe(fds: *mut core::ffi::c_int) -> core::ffi::c_int;
+    fn write(
+        fd: core::ffi::c_int,
+        buf: *const core::ffi::c_void,
+        count: usize,
+    ) -> isize;
+}
+
+#[cfg(unix)]
+fn wake_protect_pipe() {
+    use std::os::fd::AsRawFd as _;
+    if let Some(wake_write) = PROTECT_WAKE_WRITE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
+        let byte = [1u8; 1];
+        let _ = unsafe { write(wake_write.as_raw_fd(), byte.as_ptr().cast(), 1) };
+    }
+}
+
+#[cfg(unix)]
 fn open_protect(path: &str) -> jint {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
     use std::os::unix::net::UnixListener;
     // A crashed run leaves the socket file behind; the path is ours alone.
     let _ = std::fs::remove_file(path);
     match UnixListener::bind(path) {
         Ok(listener) => {
+            let mut pipe_fds = [-1 as core::ffi::c_int; 2];
+            if unsafe { pipe(pipe_fds.as_mut_ptr()) } < 0 {
+                set_last_error(format!(
+                    "protect pipe {path}: {}",
+                    std::io::Error::last_os_error()
+                ));
+                return -1;
+            }
+            let wake_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+            let wake_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+
             let generation = PROTECT_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+            wake_protect_pipe();
+            *PROTECT_WAKE_READ
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(wake_read);
+            *PROTECT_WAKE_WRITE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(wake_write);
             *PROTECT.lock().unwrap_or_else(PoisonError::into_inner) = Some((generation, listener));
             0
         }
@@ -547,24 +613,72 @@ fn serve_loop(
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
     let _ = listener.set_nonblocking(true);
+    let wake_read = PROTECT_WAKE_READ
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    let mut pfds = [
+        PollFd {
+            fd: listener.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+        PollFd {
+            fd: wake_read.as_ref().map_or(-1, OwnedFd::as_raw_fd),
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
+    let mut nfds = if wake_read.is_some() { 2 } else { 1 };
     let mut acked = 0usize;
+
     while PROTECT_GEN.load(Ordering::SeqCst) == my_gen {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if let Ok(fd) = core_runtime::protect::recv_fd(&stream) {
-                    let dup = unsafe { OwnedFd::from_raw_fd(fd) };
-                    let accepted = decide(dup.as_raw_fd());
-                    drop(dup);
-                    if accepted {
-                        let _ = stream.write_all(&[1u8]);
-                        acked += 1;
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    if let Ok(fd) = core_runtime::protect::recv_fd(&stream) {
+                        let dup = unsafe { OwnedFd::from_raw_fd(fd) };
+                        let accepted = decide(dup.as_raw_fd());
+                        drop(dup);
+                        if accepted {
+                            let _ = stream.write_all(&[1u8]);
+                            acked += 1;
+                        }
                     }
                 }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return acked,
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        if PROTECT_GEN.load(Ordering::SeqCst) != my_gen {
+            break;
+        }
+
+        loop {
+            for pfd in &mut pfds[..nfds] {
+                pfd.revents = 0;
             }
-            Err(_) => break,
+            let rc = unsafe { poll(pfds.as_mut_ptr(), nfds as core::ffi::c_ulong, -1) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return acked;
+            }
+            break;
+        }
+
+        if nfds == 2 && pfds[1].revents != 0 {
+            if PROTECT_GEN.load(Ordering::SeqCst) != my_gen {
+                break;
+            }
+            // Avoid spinning if the pipe was closed externally without bumping PROTECT_GEN.
+            if (pfds[1].revents & POLLIN) == 0 {
+                nfds = 1;
+            }
         }
     }
     acked
@@ -607,8 +721,8 @@ fn serve(_env: &mut Env, _service: &JObject) -> jint {
     -1
 }
 
-/// Retire the current generation: any running loop leaves within one poll
-/// tick and the listener drops with it.
+/// Retire the current generation: wake any blocked `poll` via the wakeup
+/// pipe and drop the listener.
 fn close_protect() -> jint {
     #[cfg(unix)]
     {
@@ -617,6 +731,11 @@ fn close_protect() -> jint {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        PROTECT_WAKE_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        wake_protect_pipe();
     }
     0
 }
@@ -816,10 +935,10 @@ mod tests {
         core_runtime::protect::protect(path, mine.as_raw_fd())
             .expect("an accepted descriptor is acked with one byte");
 
-        PROTECT_GEN.fetch_add(1, Ordering::SeqCst); // what protectClose does
+        assert_eq!(close_protect(), 0, "retires generation and wakes poll loop");
         assert_eq!(server.join().unwrap(), 1, "one ack for two attempts");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(close_protect(), 0, "listener already taken: clean no-op");
+        assert_eq!(close_protect(), 0, "second close is a clean no-op");
         let _ = std::fs::remove_file(path);
     }
 }

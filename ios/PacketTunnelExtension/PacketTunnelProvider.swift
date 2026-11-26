@@ -191,6 +191,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     tachyon_core_reload(cstr)
                 }
                 let err = rc == 0 ? "" : (Self.consumeCoreLastError() ?? "reload failed")
+                self.lastErrorMessage = err
+                if rc == 0 {
+                    try? newConfig.write(
+                        to: workDir.appendingPathComponent("active_config.json"),
+                        atomically: true,
+                        encoding: .utf8
+                    )
+                }
                 let reply: [String: Any] = ["ok": rc == 0, "error": err]
                 let data = try? JSONSerialization.data(withJSONObject: reply)
                 completionHandler(data)

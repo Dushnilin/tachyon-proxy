@@ -348,7 +348,7 @@ class AppSettings {
           : (sub != null ? (Uri.tryParse(sub.url)?.host ?? 'подписка') : 'все серверы');
       return Profile(
         id: selectedProfileId,
-        name: '⚡ Автовыбор ($subLabel)',
+        name: 'Автовыбор ($subLabel)',
         type: 'urltest',
         server: sub?.url ?? 'auto',
         port: 443,

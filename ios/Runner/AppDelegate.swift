@@ -17,6 +17,7 @@ import UIKit
 
     private var vpnManager: NETunnelProviderManager?
     private var currentServerName: String = ""
+    private var currentProxyOnly: Bool = false
     private var lastTunnelError: String = ""
     private var pendingLaunchLink: String?
 
@@ -283,6 +284,10 @@ import UIKit
             }
             if let first = managers?.first {
                 self.vpnManager = first
+                if let proto = first.protocolConfiguration as? NETunnelProviderProtocol,
+                   let savedProxyOnly = proto.providerConfiguration?["proxyOnly"] as? Bool {
+                    self.currentProxyOnly = savedProxyOnly
+                }
                 completion(first)
             } else {
                 completion(nil)
@@ -314,25 +319,57 @@ import UIKit
             return
         }
 
-        // Проверяем конфигурацию ядром до запуска NetworkExtension
-        let checkRc = config.withCString { cstr in
-            tachyon_core_check(cstr)
-        }
-        if checkRc != 0 {
-            let err = Self.consumeCoreLastError() ?? "Конфигурация отклонена ядром tachyon-core"
-            result(err)
-            return
-        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
 
+            // Проверяем конфигурацию ядром до запуска NetworkExtension
+            let checkRc = config.withCString { cstr in
+                tachyon_core_check(cstr)
+            }
+            if checkRc != 0 {
+                let err = Self.consumeCoreLastError() ?? "Конфигурация отклонена ядром tachyon-core"
+                DispatchQueue.main.async {
+                    result(err)
+                }
+                return
+            }
+
+            let hasAppGroup = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupId) != nil
+            let workDir = self.workingDirectory
+            let activeConfigURL = workDir.appendingPathComponent("active_config.json")
+            try? config.write(to: activeConfigURL, atomically: true, encoding: .utf8)
+
+            let trsFiles: [String: Data]
+            if hasAppGroup {
+                self.ensureReferencedTrsFilesInListsDir(from: config, workDir: workDir)
+                trsFiles = [:]
+            } else {
+                trsFiles = self.collectReferencedTrsFiles(from: config)
+            }
+
+            DispatchQueue.main.async {
+                self.applyAndStartVpnManager(
+                    config: config,
+                    serverName: serverName,
+                    mtu: mtu,
+                    proxyOnly: proxyOnly,
+                    trsFiles: trsFiles,
+                    result: result
+                )
+            }
+        }
+    }
+
+    private func applyAndStartVpnManager(
+        config: String,
+        serverName: String,
+        mtu: Int,
+        proxyOnly: Bool,
+        trsFiles: [String: Data],
+        result: @escaping FlutterResult
+    ) {
         currentServerName = serverName
         lastTunnelError = ""
-
-        // Сохраняем конфиг в общий контейнер
-        let activeConfigURL = workingDirectory.appendingPathComponent("active_config.json")
-        try? config.write(to: activeConfigURL, atomically: true, encoding: .utf8)
-
-        // Собираем используемые бинарные списки .trs для передачи в providerConfiguration
-        let trsFiles = collectReferencedTrsFiles(from: config)
 
         getOrCreateVpnManager { [weak self] manager, error in
             guard let self = self else { return }
@@ -343,6 +380,14 @@ import UIKit
             guard let manager = manager else {
                 result("Не удалось создать NETunnelProviderManager")
                 return
+            }
+
+            let previousProxyOnly: Bool
+            if let existingProto = manager.protocolConfiguration as? NETunnelProviderProtocol,
+               let savedProxyOnly = existingProto.providerConfiguration?["proxyOnly"] as? Bool {
+                previousProxyOnly = savedProxyOnly
+            } else {
+                previousProxyOnly = self.currentProxyOnly
             }
 
             let baseBundleId = Bundle.main.bundleIdentifier ?? "app.tachyon.tachyonProxy"
@@ -374,28 +419,45 @@ import UIKit
                         result("Не удалось перезагрузить VPN-профиль iOS: \(loadError.localizedDescription)")
                         return
                     }
-                    do {
-                        let startOpts: [String: NSObject] = [
-                            "config": config as NSString,
-                            "mtu": NSNumber(value: mtu),
-                            "proxyOnly": NSNumber(value: proxyOnly),
-                        ]
-                        if manager.connection.status == .connected || manager.connection.status == .connecting {
-                            manager.connection.stopVPNTunnel()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                do {
-                                    try manager.connection.startVPNTunnel(options: startOpts)
-                                    result(nil)
-                                } catch {
-                                    result("Не удалось перезапустить туннель iOS: \(error.localizedDescription)")
-                                }
+                    let startOpts: [String: NSObject] = [
+                        "config": config as NSString,
+                        "mtu": NSNumber(value: mtu),
+                        "proxyOnly": NSNumber(value: proxyOnly),
+                    ]
+                    let stopAndStart = {
+                        manager.connection.stopVPNTunnel()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            do {
+                                try manager.connection.startVPNTunnel(options: startOpts)
+                                self.currentProxyOnly = proxyOnly
+                                result(nil)
+                            } catch {
+                                result("Не удалось перезапустить туннель iOS: \(error.localizedDescription)")
                             }
-                        } else {
-                            try manager.connection.startVPNTunnel(options: startOpts)
-                            result(nil)
                         }
-                    } catch {
-                        result("Не удалось запустить туннель iOS: \(error.localizedDescription)")
+                    }
+
+                    if manager.connection.status == .connected,
+                       previousProxyOnly == proxyOnly,
+                       let session = manager.connection as? NETunnelProviderSession {
+                        self.sendExtensionCommand(["cmd": "reload", "config": config], session: session) { reply in
+                            if (reply?["ok"] as? Bool) == true {
+                                self.currentProxyOnly = proxyOnly
+                                result(nil)
+                            } else {
+                                stopAndStart()
+                            }
+                        }
+                    } else if manager.connection.status == .connected || manager.connection.status == .connecting {
+                        stopAndStart()
+                    } else {
+                        do {
+                            try manager.connection.startVPNTunnel(options: startOpts)
+                            self.currentProxyOnly = proxyOnly
+                            result(nil)
+                        } catch {
+                            result("Не удалось запустить туннель iOS: \(error.localizedDescription)")
+                        }
                     }
                 }
             }
@@ -543,6 +605,41 @@ import UIKit
         } catch {
             DispatchQueue.main.async {
                 completion(nil)
+            }
+        }
+    }
+
+    private func ensureReferencedTrsFilesInListsDir(from configJson: String, workDir: URL) {
+        guard let data = configJson.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let route = root["route"] as? [String: Any],
+              let ruleSets = route["rule_set"] as? [[String: Any]] else {
+            return
+        }
+        let listsDir = workDir.appendingPathComponent("lists", isDirectory: true)
+        try? FileManager.default.createDirectory(at: listsDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        for rs in ruleSets where (rs["type"] as? String) == "local" {
+            guard let path = rs["path"] as? String, !path.isEmpty else { continue }
+            let srcURL = URL(fileURLWithPath: path)
+            let dstURL = listsDir.appendingPathComponent(srcURL.lastPathComponent)
+            if srcURL.standardizedFileURL == dstURL.standardizedFileURL {
+                continue
+            }
+            if fm.fileExists(atPath: path) {
+                if fm.fileExists(atPath: dstURL.path) {
+                    let srcAttrs = try? fm.attributesOfItem(atPath: path)
+                    let dstAttrs = try? fm.attributesOfItem(atPath: dstURL.path)
+                    let srcSize = srcAttrs?[.size] as? NSNumber
+                    let dstSize = dstAttrs?[.size] as? NSNumber
+                    let srcDate = srcAttrs?[.modificationDate] as? Date
+                    let dstDate = dstAttrs?[.modificationDate] as? Date
+                    if srcSize == dstSize, srcDate == dstDate {
+                        continue
+                    }
+                    try? fm.removeItem(at: dstURL)
+                }
+                try? fm.copyItem(at: srcURL, to: dstURL)
             }
         }
     }

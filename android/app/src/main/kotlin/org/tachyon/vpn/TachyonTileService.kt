@@ -111,7 +111,7 @@ class TachyonTileService : TileService() {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val pausedWifi = TunnelStateHolder.pausedByWifiSsid
                     tile.subtitle = if (pausedWifi.isNotEmpty()) {
-                        "🏠 Пауза ($pausedWifi)"
+                        "Пауза ($pausedWifi)"
                     } else {
                         "Отключено"
                     }

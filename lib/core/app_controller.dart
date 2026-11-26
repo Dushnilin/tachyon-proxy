@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'models/app_rules.dart';
@@ -144,7 +145,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.3';
+  static const String appVersion = '0.1.4';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -156,6 +157,9 @@ class AppController extends ChangeNotifier {
   String _latestCoreVersion = '';
   String _latestAppVersion = '';
   String _latestCoreSoUrl = '';
+  String _latestCoreSha256 = '';
+  String _latestApkSha256 = '';
+  String _latestIpaSha256 = '';
 
   AppSettings get settings => _settings;
   TunnelState get tunnel => _tunnel;
@@ -4081,12 +4085,11 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Возвращает разобранный список недавних соединений из журнала ядра.
-  List<ConnectionEntry> get parsedConnections {
+  static List<ConnectionEntry> _parseConnectionsFromLogs(List<String> lines) {
     final result = <ConnectionEntry>[];
     final seen = <String>{};
-    for (var i = _logs.length - 1; i >= 0; i--) {
-      final line = _logs[i];
+    for (var i = lines.length - 1; i >= 0; i--) {
+      final line = lines[i];
       if (!line.contains('CONNECT') && !line.contains('hijack-dns')) continue;
       final entry = ConnectionEntry.tryParse(line);
       if (entry != null && seen.add('${entry.network}|${entry.target}')) {
@@ -4095,6 +4098,104 @@ class AppController extends ChangeNotifier {
       }
     }
     return result;
+  }
+
+  /// Возвращает разобранный список недавних соединений из журнала ядра.
+  List<ConnectionEntry> get parsedConnections =>
+      _parseConnectionsFromLogs(_logs);
+
+  /// Получает список активных соединений через Clash API или из журнала ядра
+  /// без вызова глобального `notifyListeners()`.
+  Future<List<ConnectionEntry>> fetchLiveConnections() async {
+    if (_tunnel.status.isActive) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(milliseconds: 800)
+        ..idleTimeout = const Duration(milliseconds: 800);
+      try {
+        final req = await client
+            .getUrl(Uri.parse('http://127.0.0.1:19090/connections'))
+            .timeout(const Duration(milliseconds: 800));
+        final resp = await req.close().timeout(const Duration(milliseconds: 800));
+        if (resp.statusCode == 200) {
+          final body = await resp
+              .transform(utf8.decoder)
+              .join()
+              .timeout(const Duration(milliseconds: 800));
+          final decoded = jsonDecode(body);
+          if (decoded is Map && decoded['connections'] is List) {
+            final result = <ConnectionEntry>[];
+            final seen = <String>{};
+            for (final item in decoded['connections'] as List) {
+              if (item is! Map) continue;
+              final meta =
+                  item['metadata'] is Map ? item['metadata'] as Map : const {};
+              final rawHost = (meta['host'] ?? '').toString().trim();
+              final rawIp = (meta['destinationIP'] ?? '').toString().trim();
+              final host = rawHost.isNotEmpty ? rawHost : rawIp;
+              if (host.isEmpty) continue;
+              final rawNet = (meta['network'] ?? 'tcp').toString().trim().toUpperCase();
+              final network = rawNet.isEmpty ? 'TCP' : rawNet;
+              final rawPort = meta['destinationPort'];
+              final port = rawPort is num
+                  ? rawPort.toInt()
+                  : (int.tryParse(rawPort?.toString() ?? '') ?? 0);
+              final target = '$host:$port';
+              if (!seen.add('$network|$target')) continue;
+              final startRaw = (item['start'] ?? '').toString().trim();
+              final parsedStart = DateTime.tryParse(startRaw);
+              final timestamp = parsedStart != null
+                  ? () {
+                      final dt = parsedStart.toLocal();
+                      return '${dt.hour.toString().padLeft(2, '0')}:'
+                          '${dt.minute.toString().padLeft(2, '0')}:'
+                          '${dt.second.toString().padLeft(2, '0')}';
+                    }()
+                  : startRaw;
+              final chainsRaw = item['chains'] is List
+                  ? (item['chains'] as List).join(' ').toLowerCase()
+                  : '';
+              final ruleRaw = (item['rule'] ?? '').toString().toLowerCase();
+              final routeHint = '$chainsRaw $ruleRaw';
+              var route = 'proxy';
+              if (routeHint.contains('hijack-dns') || routeHint.contains('dns')) {
+                route = 'dns';
+              } else if (routeHint.contains('direct')) {
+                route = 'direct';
+              } else if (routeHint.contains('desync')) {
+                route = 'desync';
+              } else if (routeHint.contains('block') || routeHint.contains('reject')) {
+                route = 'block';
+              }
+              result.add(
+                ConnectionEntry(
+                  timestamp: timestamp,
+                  network: network,
+                  target: target,
+                  host: host,
+                  port: port,
+                  route: route,
+                ),
+              );
+              if (result.length >= 120) break;
+            }
+            if (result.isNotEmpty) return result;
+          }
+        } else {
+          await resp.drain<void>();
+        }
+      } catch (_) {
+        // Clash API недоступен — переходим на чтение журнала ядра.
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    try {
+      final rawLogs = await bridge.logs(limit: 400);
+      return _parseConnectionsFromLogs(rawLogs);
+    } catch (_) {
+      return const [];
+    }
   }
 
   /// Назначает приложению конкретный outbound: proxy / direct / desync / block.
@@ -4648,9 +4749,7 @@ class AppController extends ChangeNotifier {
       false,
     ];
     for (final useProxy in modes) {
-      final client = HttpClient()
-        ..connectionTimeout = timeout
-        ..badCertificateCallback = (_, _, _) => true;
+      final client = HttpClient()..connectionTimeout = timeout;
       if (useProxy) {
         client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
       }
@@ -4690,6 +4789,9 @@ class AppController extends ChangeNotifier {
     if (_checkingUpdates) return;
     _checkingUpdates = true;
     _updateStatusText = 'Проверка релизов на GitHub...';
+    _latestCoreSha256 = '';
+    _latestApkSha256 = '';
+    _latestIpaSha256 = '';
     notifyListeners();
 
     try {
@@ -4759,6 +4861,21 @@ class AppController extends ChangeNotifier {
                   _compareSemver(cv, _latestCoreVersion) > 0)) {
             _latestCoreVersion = cv;
           }
+          _latestCoreSha256 = _extractSha256FromVersionJson(
+            json,
+            abiSuffix,
+            kind: 'core',
+          );
+          _latestApkSha256 = _extractSha256FromVersionJson(
+            json,
+            abiSuffix,
+            kind: 'apk',
+          );
+          _latestIpaSha256 = _extractSha256FromVersionJson(
+            json,
+            abiSuffix,
+            kind: 'ipa',
+          );
         }
       } else {
         final appBody = await _fetchTextWithFallback(
@@ -4797,13 +4914,111 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  static String _normalizeSha256Hex(Object? raw) {
+    if (raw is! String) return '';
+    final s = raw.trim().toLowerCase();
+    return RegExp(r'^[0-9a-f]{64}$').hasMatch(s) ? s : '';
+  }
+
+  static String _extractSha256FromVersionJson(
+    Map json,
+    String abiSuffix, {
+    required String kind,
+  }) {
+    final shortAbi = switch (abiSuffix) {
+      'armeabi-v7a' => 'armv7',
+      'x86_64' => 'x86_64',
+      _ => 'arm64',
+    };
+    final candidateKeys = switch (kind) {
+      'core' => <String>[
+        'core_sha256',
+        'so_sha256',
+        'core_sha256_$abiSuffix',
+        'core_sha256_$shortAbi',
+        'so_sha256_$abiSuffix',
+        'so_sha256_$shortAbi',
+      ],
+      'ipa' => <String>[
+        'ipa_sha256',
+        'ios_sha256',
+        'ipa_sha256_ios',
+        'sha256',
+      ],
+      _ => <String>[
+        'apk_sha256',
+        'apk_sha256_$abiSuffix',
+        'apk_sha256_$shortAbi',
+        'sha256',
+      ],
+    };
+    final mapLookupKeys = switch (kind) {
+      'core' => <String>[
+        'core_$abiSuffix',
+        'core_$shortAbi',
+        'so_$abiSuffix',
+        'so_$shortAbi',
+        abiSuffix,
+        shortAbi,
+        'core',
+        'so',
+      ],
+      'ipa' => <String>['ipa_ios', 'ipa', 'ios'],
+      _ => <String>[
+        'apk_$abiSuffix',
+        'apk_$shortAbi',
+        abiSuffix,
+        shortAbi,
+        'apk',
+      ],
+    };
+    for (final key in candidateKeys) {
+      final val = json[key];
+      final direct = _normalizeSha256Hex(val);
+      if (direct.isNotEmpty) return direct;
+      if (val is Map) {
+        for (final mk in mapLookupKeys) {
+          final nested = _normalizeSha256Hex(val[mk]);
+          if (nested.isNotEmpty) return nested;
+        }
+      }
+    }
+    if (kind == 'core' && json['sha256'] is Map) {
+      final m = json['sha256'] as Map;
+      for (final mk in <String>[
+        'core_$abiSuffix',
+        'core_$shortAbi',
+        'so_$abiSuffix',
+        'so_$shortAbi',
+        'core',
+        'so',
+      ]) {
+        final nested = _normalizeSha256Hex(m[mk]);
+        if (nested.isNotEmpty) return nested;
+      }
+    }
+    return '';
+  }
+
+  static Future<bool> _verifyFileSha256(
+    File file,
+    String? expectedSha256,
+  ) async {
+    final expected = expectedSha256?.trim().toLowerCase() ?? '';
+    if (expected.isEmpty) return true;
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expected)) return false;
+    final digest = await sha256.bind(file.openRead()).first;
+    return digest.toString().toLowerCase() == expected;
+  }
+
   /// Вспомогательный загрузчик файлов с поддержкой GitHub-редиректов,
   /// автоматическим переключением туннель/напрямую и прогресс-баром.
   Future<bool> _downloadUpdateFile(
     String url,
     File targetFile,
-    String label,
-  ) async {
+    String label, {
+    String? expectedSha256,
+  }) async {
     _updateStatusText = '$label...';
     _updateProgress = 0.05;
     notifyListeners();
@@ -4814,9 +5029,7 @@ class AppController extends ChangeNotifier {
     ];
 
     for (final useProxy in proxyModes) {
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 15)
-        ..badCertificateCallback = (_, _, _) => true;
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
       if (useProxy) {
         client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
       }
@@ -4892,7 +5105,8 @@ class AppController extends ChangeNotifier {
           continue;
         }
         if (partFile.existsSync() &&
-            _verifyDownloadedBinary(partFile, targetFile.path)) {
+            _verifyDownloadedBinary(partFile, targetFile.path) &&
+            await _verifyFileSha256(partFile, expectedSha256)) {
           if (targetFile.existsSync()) {
             targetFile.deleteSync();
           }
@@ -5017,6 +5231,7 @@ class AppController extends ChangeNotifier {
           soUrl,
           soFile,
           'Скачивание ядра libtachyon ($abiSuffix)',
+          expectedSha256: _latestCoreSha256,
         );
         if (downloaded) break;
       }
@@ -5096,6 +5311,7 @@ class AppController extends ChangeNotifier {
             ipaUrl,
             ipaFile,
             'Скачивание IPA приложения (iOS arm64)',
+            expectedSha256: _latestIpaSha256,
           );
           if (okIpa) break;
         }
@@ -5143,6 +5359,7 @@ class AppController extends ChangeNotifier {
           apkUrl,
           apkFile,
           'Скачивание APK приложения ($abiSuffix)',
+          expectedSha256: _latestApkSha256,
         );
         if (okApk) break;
       }

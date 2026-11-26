@@ -4076,8 +4076,9 @@ class LinkParser {
     final tls = rawTls is Map ? Map<String, dynamic>.from(rawTls) : null;
     final reality = tls?['reality'] is Map ? Map<String, dynamic>.from(tls!['reality'] as Map) : null;
     final utls = tls?['utls'] is Map ? Map<String, dynamic>.from(tls!['utls'] as Map) : null;
-    if (tls?['certificate_sha256'] is List) {
-      rest['certificate_sha256'] = tls!['certificate_sha256'];
+    final pins = sanitizeCertificateSha256Pins(tls?['certificate_sha256']);
+    if (pins.isNotEmpty) {
+      rest['certificate_sha256'] = pins;
     }
 
     Map<String, dynamic>? transportMap;
@@ -4470,21 +4471,14 @@ class LinkParser {
   }
 
   void _extractCertPin(Map<String, dynamic> extra, String? rawPin) {
-    if (rawPin == null || rawPin.trim().isEmpty) return;
-    var pin = rawPin.trim().replaceFirst(RegExp(r'^sha256/', caseSensitive: false), '');
-    final hexCandidate = pin.replaceAll(':', '');
-    if (hexCandidate.length == 64 && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hexCandidate)) {
-      final bytes = <int>[];
-      for (var i = 0; i < 64; i += 2) {
-        bytes.add(int.parse(hexCandidate.substring(i, i + 2), radix: 16));
-      }
-      final b64 = base64.encode(bytes);
-      extra['certificate_sha256'] = [b64];
-      extra['pcs'] = hexCandidate.toLowerCase();
-      return;
-    }
-    if (pin.isNotEmpty) {
-      extra['certificate_sha256'] = [pin];
+    final pins = sanitizeCertificateSha256Pins(rawPin);
+    if (pins.isEmpty) return;
+    extra['certificate_sha256'] = pins;
+    if (pins.length == 1) {
+      final bytes = base64.decode(pins.first);
+      extra['pcs'] = bytes
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
     }
   }
 

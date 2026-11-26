@@ -21,6 +21,8 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
   Timer? _timer;
   String _query = '';
   String _netFilter = 'ALL'; // ALL, TCP, UDP
+  List<ConnectionEntry> _entries = const [];
+  bool _refreshing = false;
 
   @override
   void initState() {
@@ -32,8 +34,15 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
   }
 
   Future<void> _refresh() async {
-    if (!mounted) return;
-    await AppScope.read(context).refreshLogs();
+    if (!mounted || _refreshing) return;
+    _refreshing = true;
+    try {
+      final entries = await AppScope.read(context).fetchLiveConnections();
+      if (!mounted) return;
+      setState(() => _entries = entries);
+    } finally {
+      _refreshing = false;
+    }
   }
 
   @override
@@ -44,12 +53,10 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final controller = AppScope.of(context);
+    final controller = AppScope.read(context);
     final tokens = context.tokens;
-    final activeCount = controller.traffic?.connections ?? 0;
-    final allEntries = controller.parsedConnections;
     final q = _query.trim().toLowerCase();
-    final filtered = allEntries.where((e) {
+    final filtered = _entries.where((e) {
       if (_netFilter != 'ALL' && e.network != _netFilter) return false;
       if (q.isNotEmpty && !e.target.toLowerCase().contains(q)) return false;
       return true;
@@ -62,10 +69,16 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
           children: [
             const Text('Соединения'),
             const SizedBox(width: Space.sm),
-            Pill(
-              label: '$activeCount актив.',
-              color: activeCount > 0 ? tokens.success : tokens.muted,
-              filled: true,
+            ValueListenableBuilder<int>(
+              valueListenable: controller.trafficRevision,
+              builder: (context, _, _) {
+                final activeCount = controller.traffic?.connections ?? 0;
+                return Pill(
+                  label: '$activeCount актив.',
+                  color: activeCount > 0 ? tokens.success : tokens.muted,
+                  filled: true,
+                );
+              },
             ),
           ],
         ),
@@ -96,7 +109,7 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
                   children: [
                     for (final net in ['ALL', 'TCP', 'UDP']) ...[
                       ChoiceChip(
-                        label: Text(net == 'ALL' ? 'Все (${allEntries.length})' : net),
+                        label: Text(net == 'ALL' ? 'Все (${_entries.length})' : net),
                         selected: _netFilter == net,
                         onSelected: (_) => setState(() => _netFilter = net),
                       ),
@@ -134,7 +147,7 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
                           final ruleVal = isIp ? '${entry.host}/32' : _rootDomain(entry.host);
                           final ruleType = isIp ? 'ip_cidr' : 'domain_suffix';
                           final id = 'cr-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
-                          await controller.addCustomRule(
+                          await AppScope.read(context).addCustomRule(
                             CustomRule(
                               id: id,
                               type: ruleType,
@@ -264,7 +277,7 @@ class _ConnectionTile extends StatelessWidget {
               ),
               ListTile(
                 leading: Icon(Icons.bolt_outlined, color: tokens.warning),
-                title: const Text('Через DPI-обход (Desync)'),
+                title: const Text('Через десинхронизацию (Desync)'),
                 onTap: () {
                   Navigator.pop(ctx);
                   onCreateRule('desync');

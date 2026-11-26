@@ -2301,6 +2301,125 @@ tun-mtu 1480
       );
       expect(tt.toShareUri(), startsWith('trusttunnel://u:p@tt.example.com:443?'));
     });
+
+    test('sanitizeCertificateSha256Pins нормализует валидные hex/base64 пины и отбрасывает битые', () {
+      const hexPin =
+          '4cd2d695b2fb7deeb9a3ca479b73a5337da7a11635ed942fb79de36f45529b1c';
+      final expectedBytes = List<int>.generate(
+        32,
+        (i) => int.parse(hexPin.substring(i * 2, i * 2 + 2), radix: 16),
+      );
+      final expectedB64 = base64.encode(expectedBytes);
+      final expectedUrlSafeNoPad =
+          base64Url.encode(expectedBytes).replaceAll('=', '');
+
+      final colonHex = List<String>.generate(
+        32,
+        (i) => hexPin.substring(i * 2, i * 2 + 2).toUpperCase(),
+      ).join(':');
+      final dashHex = List<String>.generate(
+        32,
+        (i) => hexPin.substring(i * 2, i * 2 + 2),
+      ).join('-');
+
+      expect(sanitizeCertificateSha256Pins(hexPin), [expectedB64]);
+      expect(sanitizeCertificateSha256Pins('sha256:$colonHex'), [expectedB64]);
+      expect(sanitizeCertificateSha256Pins('SHA256/$dashHex'), [expectedB64]);
+      expect(
+        sanitizeCertificateSha256Pins('pin-sha256="$expectedB64"'),
+        [expectedB64],
+      );
+      expect(
+        sanitizeCertificateSha256Pins('pin-sha256:$expectedUrlSafeNoPad'),
+        [expectedB64],
+      );
+      expect(
+        sanitizeCertificateSha256Pins(
+          '"$hexPin"; $expectedUrlSafeNoPad, invalid_pin',
+        ),
+        [expectedB64],
+      );
+
+      // Битый пин с обратным апострофом и неверной длины/типа должен отбрасываться.
+      expect(
+        sanitizeCertificateSha256Pins(
+          '3ca3ca52aa08b48`0b6249708f63f977365a223ee2f39f4b805df3f7f13bfc4',
+        ),
+        isEmpty,
+      );
+      expect(sanitizeCertificateSha256Pins('abcd'), isEmpty);
+      expect(sanitizeCertificateSha256Pins(base64.encode([1, 2, 3])), isEmpty);
+      expect(sanitizeCertificateSha256Pins(12345), isEmpty);
+      expect(sanitizeCertificateSha256Pins(null), isEmpty);
+    });
+
+    test('LinkParser и Profile.toOutbound валидируют pinSHA256 и отбрасывают битый пин', () {
+      final parser = LinkParser();
+      const validHex =
+          '4cd2d695b2fb7deeb9a3ca479b73a5337da7a11635ed942fb79de36f45529b1c';
+      final validB64 = base64.encode(
+        List<int>.generate(
+          32,
+          (i) => int.parse(validHex.substring(i * 2, i * 2 + 2), radix: 16),
+        ),
+      );
+      final validB64NoPad = validB64.replaceAll('=', '');
+      const brokenPin =
+          '3ca3ca52aa08b48`0b6249708f63f977365a223ee2f39f4b805df3f7f13bfc4';
+
+      final hy2Hex = parser
+          .parse(
+            'hy2://pw@hy.example.com:443?sni=hy.example.com&pinSHA256=sha256%2F$validHex#HyHex',
+          )!;
+      expect(hy2Hex.extra['certificate_sha256'], [validB64]);
+      expect((hy2Hex.toOutbound()['tls'] as Map)['certificate_sha256'], [validB64]);
+
+      final hy2B64 = parser
+          .parse(
+            'hy2://pw@hy.example.com:443?sni=hy.example.com&pinSHA256=${Uri.encodeComponent(validB64NoPad)}#HyB64',
+          )!;
+      expect(hy2B64.extra['certificate_sha256'], [validB64]);
+      expect((hy2B64.toOutbound()['tls'] as Map)['certificate_sha256'], [validB64]);
+
+      final hy2Broken = parser
+          .parse(
+            'hy2://pw@hy.example.com:443?sni=hy.example.com&pinSHA256=${Uri.encodeComponent(brokenPin)}#HyBroken',
+          )!;
+      expect(hy2Broken.extra.containsKey('certificate_sha256'), isFalse);
+      expect(
+        (hy2Broken.toOutbound()['tls'] as Map).containsKey('certificate_sha256'),
+        isFalse,
+      );
+
+      // Прямой Profile с битым пином в extra также не должен пропустить его в outbound.
+      const manualBroken = Profile(
+        id: 'hy-broken',
+        name: 'HyBroken',
+        type: 'hysteria2',
+        server: 'hy.example.com',
+        port: 443,
+        password: 'pw',
+        sni: 'hy.example.com',
+        extra: {
+          'certificate_sha256': [brokenPin],
+        },
+      );
+      final outTls = manualBroken.toOutbound()['tls'] as Map<String, dynamic>;
+      expect(outTls.containsKey('certificate_sha256'), isFalse);
+
+      final normalized = normalizeOutboundNode({
+        'type': 'hysteria2',
+        'tag': 'proxy',
+        'tls': {
+          'enabled': true,
+          'certificate_sha256': [brokenPin],
+        },
+      });
+      expect(
+        (normalized['tls'] as Map).containsKey('certificate_sha256'),
+        isFalse,
+      );
+    });
   });
 }
 

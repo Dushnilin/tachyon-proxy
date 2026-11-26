@@ -134,7 +134,7 @@ class _AppsScreenState extends State<AppsScreen> {
                       ActionChip(
                         avatar: Icon(Icons.bolt_outlined,
                             size: 15, color: const Color(0xFFFF8C00)),
-                        label: const Text('YouTube / Discord → DPI',
+                        label: const Text('YouTube / Discord → Desync',
                             style: TextStyle(fontSize: 11.5)),
                         onPressed: () async {
                           final n = await controller.applyAppPreset(
@@ -144,8 +144,8 @@ class _AppsScreenState extends State<AppsScreen> {
                           if (!context.mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content:
-                                  Text('Переведено в DPI-обход приложений: $n'),
+                              content: Text(
+                                  'Переведено в режим десинхронизации приложений: $n'),
                             ),
                           );
                         },
@@ -353,7 +353,7 @@ class _AppTile extends StatelessWidget {
   static const _labels = {
     'proxy': 'Прокси',
     'direct': 'Напрямую',
-    'desync': 'DPI-обход',
+    'desync': 'Desync',
     'block': 'Блок',
   };
   static const _icons = {

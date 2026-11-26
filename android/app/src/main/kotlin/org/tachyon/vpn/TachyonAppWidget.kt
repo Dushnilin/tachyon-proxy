@@ -80,6 +80,15 @@ class TachyonAppWidget : AppWidgetProvider() {
     companion object {
         const val ACTION_WIDGET_TOGGLE = "org.tachyon.vpn.action.WIDGET_TOGGLE"
 
+        fun hasActiveWidgets(context: Context): Boolean {
+            return try {
+                val mgr = AppWidgetManager.getInstance(context)
+                mgr.getAppWidgetIds(ComponentName(context, TachyonAppWidget::class.java)).isNotEmpty()
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
         fun updateAll(context: Context, trafficLine: String? = null) {
             try {
                 val mgr = AppWidgetManager.getInstance(context)
@@ -102,7 +111,7 @@ class TachyonAppWidget : AppWidgetProvider() {
 
             views.setTextViewText(
                 R.id.widget_status,
-                if (connected) "⚡ TACHYON · ПОДКЛЮЧЕНО" else "⚡ TACHYON · ОТКЛЮЧЕНО",
+                if (connected) "TACHYON · ПОДКЛЮЧЕНО" else "TACHYON · ОТКЛЮЧЕНО",
             )
             views.setTextColor(
                 R.id.widget_status,

@@ -3060,10 +3060,11 @@ class RuntimeConfig {
     }
 
     var effective = baseMtu;
-    if (profile.type == 'wireguard') {
+    bool needsConservativeMtu(String type) => type == 'wireguard' || type == 'wdtt';
+    if (needsConservativeMtu(profile.type)) {
       effective = capWgMtu(profile, effective);
     }
-    if (detourProfile?.type == 'wireguard') {
+    if (detourProfile != null && needsConservativeMtu(detourProfile!.type)) {
       effective = capWgMtu(detourProfile!, effective);
     }
     if (profile.type == 'urltest' || profile.id.startsWith('auto:')) {
@@ -3075,7 +3076,7 @@ class RuntimeConfig {
         balancer: balancer,
       );
       for (final candidate in candidates) {
-        if (candidate.type == 'wireguard') {
+        if (needsConservativeMtu(candidate.type)) {
           effective = capWgMtu(candidate, effective);
         }
       }
@@ -3142,6 +3143,9 @@ class RuntimeConfig {
 
   /// Тег прямого резолвера — для доменов, которые идут без туннеля.
   static const directTag = 'dns-direct';
+
+  /// Тег локального системного резолвера (DNS сети / оператора через ОС).
+  static const localDnsTag = 'dns-local';
 
   /// Возвращает упорядоченный список профилей-кандидатов для активного балансировщика (`auto-srv-0`, `auto-srv-1`, ...).
   static List<Profile> resolveAutoCandidates(
@@ -3460,12 +3464,29 @@ class RuntimeConfig {
         ? const ['77.88.8.8']
         : dns.bootstrap;
 
-    final usedDnsTags = <String>{bootstrapTag, directTag};
+    final usedDnsTags = <String>{bootstrapTag, directTag, localDnsTag};
+    // Системный резолвер (Android netd / DNS сети оператора): приложение исключено из TUN,
+    // поэтому при ограничениях на внешний UDP 53 он остаётся рабочим резервом для bootstrap.
+    dnsServers.add({
+      'type': 'local',
+      'tag': localDnsTag,
+    });
+    final bootstrapMemberTags = <String>[];
     for (var i = 0; i < bootstrapServers.length; i++) {
-      final tag = i == 0 ? bootstrapTag : '$bootstrapTag-${i + 1}';
+      final tag = '$bootstrapTag-${i + 1}';
       usedDnsTags.add(tag);
+      bootstrapMemberTags.add(tag);
       dnsServers.add(_dnsServer(bootstrapServers[i], tag: tag));
     }
+    dnsServers.add({
+      'type': 'group',
+      'tag': bootstrapTag,
+      'mode': 'fastest',
+      'timeout': '4s',
+      'error_ttl': '60s',
+      'win_ttl': '3m',
+      'servers': [...bootstrapMemberTags, localDnsTag],
+    });
 
     final primary = dns.servers.isEmpty ? const <String>[] : dns.servers;
     for (final address in primary) {
@@ -3482,8 +3503,16 @@ class RuntimeConfig {
     }
 
     // Прямой резолвер нужен спискам с действием `direct`: их домены должны
-    // разрешаться мимо туннеля, иначе они не попадут в правило.
-    dnsServers.add(_dnsServer(bootstrapServers.first, tag: directTag));
+    // разрешаться мимо туннеля с резервом на системный DNS, иначе они не попадут в правило.
+    dnsServers.add({
+      'type': 'group',
+      'tag': directTag,
+      'mode': 'fastest',
+      'timeout': '4s',
+      'error_ttl': '60s',
+      'win_ttl': '3m',
+      'servers': [...bootstrapMemberTags, localDnsTag],
+    });
 
     if (dns.fakeIp) {
       dnsServers.add({
@@ -3721,6 +3750,7 @@ class RuntimeConfig {
               (tag) =>
                   !tag.startsWith(bootstrapTag) &&
                   tag != directTag &&
+                  tag != localDnsTag &&
                   tag != 'dns-fakeip',
               orElse: () => bootstrapTag,
             );

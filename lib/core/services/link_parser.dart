@@ -210,6 +210,83 @@ class LinkParser {
     return false;
   }
 
+  static final RegExp _wdttSchemeInBodyRe = RegExp(
+    r'(?:wdtt|qwdtt|csqtt):+/{1,2}',
+    caseSensitive: false,
+  );
+
+  /// Проверяет, содержит ли сырой или Base64-кодированный текст ссылки `wdtt`/`qwdtt`/`csqtt`.
+  static bool bodyHasWdttScheme(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return false;
+    if (_wdttSchemeInBodyRe.hasMatch(trimmed)) return true;
+    if (!trimmed.contains('{') && !trimmed.contains('[') && !trimmed.contains('://')) {
+      final norm = _normalizeBase64Static(trimmed);
+      if (norm.isNotEmpty) {
+        try {
+          final decoded = utf8.decode(base64.decode(norm), allowMalformed: true);
+          if (_wdttSchemeInBodyRe.hasMatch(decoded)) return true;
+        } catch (_) {}
+      }
+    }
+    return false;
+  }
+
+  static String _normalizeWdttScheme(String value) {
+    final match = RegExp(
+      r'^(wdtt|qwdtt|csqtt):+/{1,2}',
+      caseSensitive: false,
+    ).firstMatch(value);
+    if (match == null) return value;
+    final scheme = match.group(1)!.toLowerCase();
+    return '$scheme://${value.substring(match.end)}';
+  }
+
+  static bool _hasKnownQwdttKeysAfter(String tail) {
+    final lower = tail.toLowerCase();
+    const keys = [
+      '&ip=',
+      '&host=',
+      '&peer=',
+      '&server=',
+      '&addr=',
+      '&dtls=',
+      '&port=',
+      '&peer_port=',
+      '&raw=',
+      '&raw_port=',
+      '&hashes=',
+      '&hash=',
+      '&vk=',
+      '&call=',
+      '&calls=',
+      '&join_link=',
+      '&mode=',
+      '&vpn=',
+      '&obfs=',
+      '&media=',
+      '&streams=',
+      '&workers=',
+      '&mtu=',
+      '&name=',
+      '&srtp=',
+      '&srtp_mode=',
+      '&turn_tcp=',
+      '&turn_transport=',
+      '&no_dtls=',
+      '&notls=',
+      '&did=',
+      '&device_id=',
+      '&vk_auth=',
+      '&vk_auth_mode=',
+      '&vk_token=',
+      '&token=',
+      '&vk_cookie=',
+      '&vk_client_ids=',
+    ];
+    return keys.any(lower.contains);
+  }
+
   static String _deduplicateTag(String base, Set<String> used) {
     final clean = base.trim().isEmpty ? 'node' : base.trim();
     if (!used.contains(clean)) return clean;
@@ -486,10 +563,12 @@ class LinkParser {
     if (lower.startsWith('openconnect://') || lower.startsWith('anyconnect://')) {
       return _parseOpenConnect(value, subscriptionId: subscriptionId);
     }
-    if (lower.startsWith('wdtt://') ||
-        lower.startsWith('qwdtt://') ||
-        lower.startsWith('csqtt://')) {
-      return _parseWdtt(value, subscriptionId: subscriptionId);
+    final wdttNormalized = _normalizeWdttScheme(value);
+    final wdttLower = wdttNormalized.toLowerCase();
+    if (wdttLower.startsWith('wdtt://') ||
+        wdttLower.startsWith('qwdtt://') ||
+        wdttLower.startsWith('csqtt://')) {
+      return _parseWdtt(wdttNormalized, subscriptionId: subscriptionId);
     }
     if (lower.startsWith('sudoku://')) {
       return _parseSudoku(value, subscriptionId: subscriptionId);
@@ -2317,7 +2396,7 @@ class LinkParser {
   }
 
   Profile? _parseWdtt(String link, {String subscriptionId = ''}) {
-    final trimmed = link.trim();
+    final trimmed = _normalizeWdttScheme(link.trim());
     final schemeSep = trimmed.indexOf('://');
     if (schemeSep <= 0) return null;
     final scheme = trimmed.substring(0, schemeSep).toLowerCase();
@@ -2332,6 +2411,60 @@ class LinkParser {
       } catch (_) {
         fragTag = rawFrag;
       }
+    }
+
+    (String, int?) splitHostOptionalPort(String raw) {
+      final s = raw.trim();
+      if (s.isEmpty) return ('', null);
+      if (s.startsWith('[')) {
+        final close = s.indexOf(']');
+        if (close > 1) {
+          final host = s.substring(1, close).trim();
+          final rest = s.substring(close + 1).trim();
+          if (rest.startsWith(':')) {
+            final parsedPort = int.tryParse(rest.substring(1).trim());
+            if (parsedPort != null && parsedPort > 0 && parsedPort <= 65535) {
+              return (host, parsedPort);
+            }
+          }
+          return (host, null);
+        }
+      }
+      final colon = s.lastIndexOf(':');
+      if (colon > 0 && !s.substring(0, colon).contains(':')) {
+        final parsedPort = int.tryParse(s.substring(colon + 1).trim());
+        if (parsedPort != null && parsedPort > 0 && parsedPort <= 65535) {
+          return (s.substring(0, colon).trim(), parsedPort);
+        }
+      }
+      return (s, null);
+    }
+
+    String normalizeMode(String raw, {required bool defaultCsqtt, bool v1 = false}) {
+      switch (raw.trim().toLowerCase()) {
+        case 'raw':
+        case 'rawtun':
+          return 'raw';
+        case 'csqtt':
+          return 'csqtt';
+        case 'csqtt_v1':
+          return 'csqtt_v1';
+        case 'wg':
+        case 'vpn':
+        case 'wireguard':
+          return 'wg';
+        default:
+          if (defaultCsqtt) return v1 ? 'csqtt_v1' : 'csqtt';
+          return 'wg';
+      }
+    }
+
+    String? resolveTurnTransport(Map<String, String> m) {
+      final explicit = (m['turn_transport'] ?? '').trim();
+      if (explicit.isNotEmpty) return explicit;
+      final turnTcp = (m['turn_tcp'] ?? '').trim().toLowerCase();
+      if (turnTcp == '1' || turnTcp == 'true' || turnTcp == 'yes') return 'tcp';
+      return null;
     }
 
     Profile? buildWdtt({
@@ -2388,81 +2521,137 @@ class LinkParser {
       );
     }
 
-    // 1. csqtt://connect?...
-    if (scheme == 'csqtt' && body.toLowerCase().startsWith('connect?')) {
-      final params = _parseQuerySafe(body.substring(8));
-      final server = params['host'] ?? params['ip'] ?? params['server'] ?? '';
-      final pass = params['password'] ?? params['pass'] ?? params['id'] ?? '';
-      final port = _toInt(params['peer'] ?? params['port'] ?? params['dtls']) ?? 46000;
+    // 1. csqtt://connect?... / qwdtt://connect?... / wdtt://connect?...
+    if (body.toLowerCase().startsWith('connect?')) {
+      final params = _parseQuerySafe(body.substring(8))
+          .map((k, v) => MapEntry(k.toLowerCase(), v));
+      final rawServer = params['host'] ??
+          params['ip'] ??
+          params['server'] ??
+          params['peer'] ??
+          params['addr'] ??
+          '';
+      final (serverHost, hostPort) = splitHostOptionalPort(rawServer);
+      final pass = params['password'] ??
+          params['pass'] ??
+          params['p'] ??
+          params['pwd'] ??
+          params['id'] ??
+          '';
       final rawMode = (params['vpn'] ?? params['mode'] ?? '').trim().toLowerCase();
-      final mode = const {'csqtt', 'csqtt_v1', 'wg', 'raw'}.contains(rawMode)
-          ? rawMode
-          : (params['v'] == '1' ? 'csqtt_v1' : 'csqtt');
+      final mode = normalizeMode(
+        rawMode,
+        defaultCsqtt: scheme == 'csqtt',
+        v1: params['v'] == '1',
+      );
+      final port = _toInt(params['peer_port'] ?? params['dtls'] ?? params['port']) ??
+          hostPort ??
+          _toInt(params['peer']) ??
+          ((mode == 'csqtt' || mode == 'csqtt_v1') ? 46000 : 56000);
       final tag = fragTag.isNotEmpty ? fragTag : (params['name'] ?? '').trim();
-      return buildWdtt(
-        server: server,
+      final hashesRaw = params['hashes'] ??
+          params['hash'] ??
+          params['vk'] ??
+          params['call'] ??
+          params['calls'] ??
+          params['join_link'];
+      final res = buildWdtt(
+        server: serverHost,
         port: port,
         pass: pass,
         mode: mode,
         name: tag,
-        obfs: params['obfs'],
+        rawPort: _toInt(params['raw_port'] ?? params['raw']),
+        obfs: params['obfs'] ?? params['media'],
         did: params['did'] ?? params['device_id'],
-        hashes: _splitWdttHashes(params['hashes'] ?? params['hash']),
+        hashes: _splitWdttHashes(hashesRaw),
         workers: _toInt(params['workers'] ?? params['streams']),
+        mtu: _toInt(params['mtu']),
         vkToken: params['token'] ?? params['vk_token'],
-        vkAuthMode: params['vk_auth_mode'],
+        vkAuthMode: params['vk_auth_mode'] ?? params['vk_auth'],
         vkCookie: params['vk_cookie'],
         vkClientIds: _splitCsv(params['vk_client_ids']),
         srtpMode: params['srtp_mode'] ?? params['srtp'],
-        turnTransport: params['turn_transport'],
+        turnTransport: resolveTurnTransport(params),
       );
+      if (res != null) return res;
     }
 
-    // 2. qwdtt://config?ip=...&dtls=...&hashes=...&pass=<tail>
+    // 2. qwdtt://config?ip=...&dtls=...&hashes=...&pass=<tail> (и без ? если сразу query-строка)
     if (scheme == 'qwdtt') {
       final qIdx = body.indexOf('?');
-      final qRaw = qIdx >= 0 ? body.substring(qIdx + 1) : body;
-      final passIdx = qRaw.indexOf('&pass=');
-      String headQ;
-      String? rawTailPass;
-      if (passIdx >= 0) {
-        headQ = qRaw.substring(0, passIdx);
-        rawTailPass = qRaw.substring(passIdx + 6);
-      } else if (qRaw.startsWith('pass=')) {
-        headQ = '';
-        rawTailPass = qRaw.substring(5);
-      } else {
-        headQ = qRaw;
-      }
-      final params = _parseQuerySafe(headQ).map((k, v) => MapEntry(k.toLowerCase(), v));
-      if (rawTailPass != null) {
-        try {
-          params['pass'] = Uri.decodeComponent(rawTailPass);
-        } catch (_) {
-          params['pass'] = rawTailPass;
+      final looksLikeQuery = qIdx >= 0 || (body.contains('=') && !body.contains('@'));
+      if (looksLikeQuery) {
+        final qRaw = qIdx >= 0 ? body.substring(qIdx + 1) : body;
+        final passIdx = qRaw.indexOf('&pass=');
+        String headQ;
+        String? rawTailPass;
+        if (passIdx >= 0 && !_hasKnownQwdttKeysAfter(qRaw.substring(passIdx + 6))) {
+          headQ = qRaw.substring(0, passIdx);
+          rawTailPass = qRaw.substring(passIdx + 6);
+        } else if (qRaw.startsWith('pass=') && !_hasKnownQwdttKeysAfter(qRaw.substring(5))) {
+          headQ = '';
+          rawTailPass = qRaw.substring(5);
+        } else {
+          headQ = qRaw;
         }
+        final params = _parseQuerySafe(headQ).map((k, v) => MapEntry(k.toLowerCase(), v));
+        if (rawTailPass != null) {
+          try {
+            params['pass'] = Uri.decodeComponent(rawTailPass);
+          } catch (_) {
+            params['pass'] = rawTailPass;
+          }
+        }
+        final rawServer = params['ip'] ??
+            params['server'] ??
+            params['host'] ??
+            params['peer'] ??
+            params['addr'] ??
+            '';
+        final (serverHost, hostPort) = splitHostOptionalPort(rawServer);
+        final mode = normalizeMode(params['mode'] ?? params['vpn'] ?? '', defaultCsqtt: false);
+        final dtlsPort = _toInt(params['dtls'] ?? params['port'] ?? params['peer_port']) ??
+            hostPort ??
+            _toInt(params['peer']) ??
+            ((mode == 'csqtt' || mode == 'csqtt_v1') ? 46000 : 56000);
+        final rawPort = _toInt(params['raw_port'] ?? params['raw']);
+        final serverPort = mode == 'raw' ? (rawPort ?? dtlsPort) : dtlsPort;
+        final hashesRaw = params['hashes'] ??
+            params['hash'] ??
+            params['vk'] ??
+            params['call'] ??
+            params['calls'] ??
+            params['join_link'];
+        final res = buildWdtt(
+          server: serverHost,
+          port: serverPort,
+          pass: params['pass'] ??
+              params['password'] ??
+              params['p'] ??
+              params['pwd'] ??
+              params['id'] ??
+              '',
+          mode: mode,
+          name: fragTag.isNotEmpty ? fragTag : (params['name'] ?? '').trim(),
+          rawPort: rawPort,
+          obfs: params['obfs'] ?? params['media'],
+          did: params['did'] ?? params['device_id'],
+          hashes: _splitWdttHashes(hashesRaw),
+          workers: _toInt(params['streams'] ?? params['workers']),
+          mtu: _toInt(params['mtu']),
+          vkToken: params['vk_token'] ?? params['token'],
+          vkAuthMode: params['vk_auth_mode'] ?? params['vk_auth'],
+          vkCookie: params['vk_cookie'],
+          vkClientIds: _splitCsv(params['vk_client_ids']),
+          srtpMode: params['srtp_mode'] ?? params['srtp'],
+          turnTransport: resolveTurnTransport(params),
+        );
+        if (res != null) return res;
       }
-      final rawMode = (params['mode'] ?? params['vpn'] ?? '').trim().toLowerCase();
-      final mode = const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg';
-      final dtlsPort = _toInt(params['dtls'] ?? params['port']) ??
-          (mode == 'csqtt' || mode == 'csqtt_v1' ? 46000 : 56000);
-      final rawPort = _toInt(params['raw']);
-      final serverPort = mode == 'raw' ? (rawPort ?? dtlsPort) : dtlsPort;
-      return buildWdtt(
-        server: params['ip'] ?? params['server'] ?? params['host'] ?? '',
-        port: serverPort,
-        pass: params['pass'] ?? params['password'] ?? '',
-        mode: mode,
-        name: fragTag.isNotEmpty ? fragTag : (params['name'] ?? '').trim(),
-        rawPort: rawPort,
-        obfs: params['obfs'],
-        hashes: _splitWdttHashes(params['hashes'] ?? params['hash']),
-        workers: _toInt(params['streams'] ?? params['workers']),
-        srtpMode: params['srtp_mode'] ?? params['srtp'],
-      );
     }
 
-    // 3. Base64 JSON format: wdtt://eyJ... / csqtt://eyJ...
+    // 3. Base64 JSON format: wdtt://eyJ... / qwdtt://eyJ... / csqtt://eyJ...
     final b64Candidate = body.replaceAll(RegExp(r'/+$'), '');
     if (!b64Candidate.contains(':') && !b64Candidate.contains('?') && !b64Candidate.contains('@')) {
       final norm = _normalizeBase64(b64Candidate);
@@ -2473,31 +2662,49 @@ class LinkParser {
           if (obj is Map) {
             final jmap = Map<String, dynamic>.from(obj);
             final rawMode = (jmap['vpn'] ?? jmap['mode'] ?? '').toString().trim().toLowerCase();
-            final mode = scheme == 'csqtt'
-                ? (rawMode == 'csqtt_v1' ? 'csqtt_v1' : 'csqtt')
-                : (const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg');
-            final dtlsPort = _toInt(jmap['dtls'] ?? jmap['port']) ??
-                (mode == 'csqtt' || mode == 'csqtt_v1' ? 46000 : 56000);
-            final rawPort = _toInt(jmap['raw']);
+            final mode = normalizeMode(rawMode, defaultCsqtt: scheme == 'csqtt');
+            final rawServer = (jmap['ip'] ??
+                    jmap['add'] ??
+                    jmap['server'] ??
+                    jmap['host'] ??
+                    jmap['peer'] ??
+                    jmap['addr'] ??
+                    '')
+                .toString();
+            final (serverHost, hostPort) = splitHostOptionalPort(rawServer);
+            final dtlsPort = _toInt(jmap['dtls'] ?? jmap['port'] ?? jmap['peer_port']) ??
+                hostPort ??
+                _toInt(jmap['peer']) ??
+                ((mode == 'csqtt' || mode == 'csqtt_v1') ? 46000 : 56000);
+            final rawPort = _toInt(jmap['raw_port'] ?? jmap['raw']);
             final serverPort = mode == 'raw' ? (rawPort ?? (dtlsPort + 3)) : dtlsPort;
-            final hRaw = jmap['hash'] ?? jmap['hashes'];
+            final hRaw = jmap['hash'] ?? jmap['hashes'] ?? jmap['vk'] ?? jmap['calls'];
             final hashes = hRaw is List
                 ? hRaw.expand((e) => _splitWdttHashes(e.toString())).toList()
                 : _splitWdttHashes(hRaw?.toString());
+            final rawTurnTcp = (jmap['turn_tcp'] ?? '').toString().trim().toLowerCase();
+            final turnTransport = (jmap['turn_transport']?.toString().trim().isNotEmpty == true)
+                ? jmap['turn_transport'].toString().trim()
+                : ((rawTurnTcp == '1' || rawTurnTcp == 'true') ? 'tcp' : null);
             final p = buildWdtt(
-              server: (jmap['ip'] ?? jmap['add'] ?? jmap['server'] ?? '').toString(),
+              server: serverHost,
               port: serverPort,
-              pass: (jmap['pass'] ?? jmap['id'] ?? jmap['password'] ?? '').toString(),
+              pass: (jmap['pass'] ?? jmap['id'] ?? jmap['password'] ?? jmap['p'] ?? '').toString(),
               mode: mode,
               name: fragTag.isNotEmpty
                   ? fragTag
                   : (jmap['name'] ?? jmap['ps'] ?? '').toString().trim(),
               rawPort: rawPort,
-              obfs: jmap['obfs']?.toString(),
+              obfs: (jmap['obfs'] ?? jmap['media'])?.toString(),
               did: (jmap['did'] ?? jmap['device_id'])?.toString(),
               hashes: hashes,
               workers: _toInt(jmap['workers'] ?? jmap['streams']),
+              mtu: _toInt(jmap['mtu']),
+              vkToken: (jmap['vk_token'] ?? jmap['token'])?.toString(),
+              vkAuthMode: (jmap['vk_auth_mode'] ?? jmap['vk_auth'])?.toString(),
+              vkCookie: jmap['vk_cookie']?.toString(),
               srtpMode: (jmap['srtp_mode'] ?? jmap['srtp'])?.toString(),
+              turnTransport: turnTransport,
             );
             if (p != null) return p;
           }
@@ -2545,20 +2752,30 @@ class LinkParser {
       }
     }
 
-    // 5. Standard URI: wdtt://[pass@]host[:port]?pass=...&hashes=...&mode=...#remark
-    final normalized = trimmed.replaceFirst(RegExp(r'^(wdtt|csqtt)://', caseSensitive: false), 'https://');
+    // 5. Standard URI: wdtt|qwdtt|csqtt://[pass@]host[:port]?pass=...&hashes=...&mode=...#remark
+    final normalized =
+        trimmed.replaceFirst(RegExp(r'^(wdtt|qwdtt|csqtt)://', caseSensitive: false), 'https://');
     final uri = Uri.tryParse(normalized);
     if (uri == null || uri.host.isEmpty) return null;
-    final query = uri.queryParameters;
-    final defaultPort = scheme == 'csqtt' ? 46000 : 56000;
+    final query = uri.queryParameters.map((k, v) => MapEntry(k.toLowerCase(), v));
+    final rawMode = (query['mode'] ?? query['vpn'] ?? '').trim().toLowerCase();
+    final mode = normalizeMode(rawMode, defaultCsqtt: scheme == 'csqtt');
+    final defaultPort = (mode == 'csqtt' || mode == 'csqtt_v1') ? 46000 : 56000;
     final port = uri.port == 0 ? defaultPort : uri.port;
     final pass = uri.userInfo.isNotEmpty
         ? Uri.decodeComponent(uri.userInfo)
-        : (query['pass'] ?? query['password'] ?? query['id'] ?? '');
-    final rawMode = (query['mode'] ?? query['vpn'] ?? '').trim().toLowerCase();
-    final mode = scheme == 'csqtt'
-        ? (rawMode == 'csqtt_v1' ? 'csqtt_v1' : 'csqtt')
-        : (const {'raw', 'csqtt', 'csqtt_v1'}.contains(rawMode) ? rawMode : 'wg');
+        : (query['pass'] ??
+            query['password'] ??
+            query['p'] ??
+            query['pwd'] ??
+            query['id'] ??
+            '');
+    final hashesRaw = query['hashes'] ??
+        query['hash'] ??
+        query['vk'] ??
+        query['call'] ??
+        query['calls'] ??
+        query['join_link'];
     return buildWdtt(
       server: uri.host,
       port: port,
@@ -2566,17 +2783,17 @@ class LinkParser {
       mode: mode,
       name: _name(query, uri.fragment, ''),
       rawPort: _toInt(query['raw_port'] ?? query['raw']),
-      obfs: query['obfs'],
+      obfs: query['obfs'] ?? query['media'],
       did: query['did'] ?? query['device_id'],
-      hashes: _splitWdttHashes(query['hashes'] ?? query['hash']),
+      hashes: _splitWdttHashes(hashesRaw),
       workers: _toInt(query['workers'] ?? query['streams']),
       mtu: _toInt(query['mtu']),
       vkToken: query['token'] ?? query['vk_token'],
-      vkAuthMode: query['vk_auth_mode'],
+      vkAuthMode: query['vk_auth_mode'] ?? query['vk_auth'],
       vkCookie: query['vk_cookie'],
       vkClientIds: _splitCsv(query['vk_client_ids']),
       srtpMode: query['srtp_mode'] ?? query['srtp'],
-      turnTransport: query['turn_transport'],
+      turnTransport: resolveTurnTransport(query),
     );
   }
 

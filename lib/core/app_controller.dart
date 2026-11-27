@@ -145,7 +145,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.6';
+  static const String appVersion = '0.1.7';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -907,7 +907,7 @@ class AppController extends ChangeNotifier {
     // извлекаем https:// ссылку, если в тексте нет прямых URI серверов (vless://, hy2:// и т.д.).
     if (!payload.startsWith('http://') && !payload.startsWith('https://')) {
       final hasDirectProxyScheme = RegExp(
-        r'\b(vless|vmess|trojan(-go)?|ss|shadowsocks|hy2|hysteria2?|tuic5?|wg|wireguard|amneziawg|awg|anytls|naive(\+https|\+http2|\+h2|\+quic|\+h3)?|snell|shadowtls|stls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|anyconnect|wdtt|qwdtt|csqtt|sudoku|socks5h?|socks4|socks|ssh|mtproto|tg)://',
+        r'\b(?:(?:vless|vmess|trojan(?:-go)?|ss|shadowsocks|hy2|hysteria2?|tuic5?|wg|wireguard|amneziawg|awg|anytls|naive(?:\+https|\+http2|\+h2|\+quic|\+h3)?|snell|shadowtls|stls|fptns?|tewfai|mierus?|masque|trusttunnel|openconnect|anyconnect|sudoku|socks5h?|socks4|socks|ssh|mtproto|tg)://|(?:wdtt|qwdtt|csqtt):+/{1,2})',
         caseSensitive: false,
       ).hasMatch(payload);
       if (!hasDirectProxyScheme) {
@@ -958,6 +958,7 @@ class AppController extends ChangeNotifier {
         nativeParsed['nodes'] as List,
         (nativeParsed['primary_tags'] as List?) ?? const [],
       );
+      profiles = await _mergeFallbackWdttProfiles(profiles, payload, '', parser);
     }
     if (profiles.isEmpty) {
       profiles = parser.parseSubscription(payload);
@@ -1301,9 +1302,9 @@ class AppController extends ChangeNotifier {
       }
     }
 
-    // 2. Проверяем прямые URI протоколов (vless://, hy2://, trojan://, ss://, vmess:// и др.) внутри HTML
+    // 2. Проверяем прямые URI протоколов (vless://, hy2://, trojan://, qwdtt://, qwdtt:/ и др.) внутри HTML
     final directMatches = RegExp(
-      r"""(vless|vmess|trojan|ss|hy2|hysteria2|tuic|amneziawg|awg|wg|anytls|tewfai)://[^\s"'<>\\]+""",
+      r"""(?:(?:vless|vmess|trojan|ss|hy2|hysteria2|tuic|amneziawg|awg|wg|anytls|tewfai|mierus?|masque|trusttunnel|openconnect|sudoku)://|(?:wdtt|qwdtt|csqtt):+/{1,2})[^\s"'<>\\]+""",
       caseSensitive: false,
     ).allMatches(html);
     if (directMatches.isNotEmpty) {
@@ -1394,6 +1395,52 @@ class AppController extends ChangeNotifier {
         subscriptionId: subId,
       ),
     );
+  }
+
+  /// Добирает профили `wdtt` из сырого тела подписки, если нативный парсер пропустил ссылки
+  /// формата `qwdtt:/` или `qwdtt://` в смешанной подписке.
+  static Future<List<Profile>> _mergeFallbackWdttProfiles(
+    List<Profile> existing,
+    String? rawBody,
+    String subId,
+    LinkParser parser,
+  ) async {
+    final raw = rawBody?.trim() ?? '';
+    if (raw.isEmpty || !LinkParser.bodyHasWdttScheme(raw)) {
+      return existing;
+    }
+    final fallbackAll = raw.length > 24 * 1024
+        ? await _parseSubTextIsolated(raw, subId)
+        : parser.parseSubscription(raw, subscriptionId: subId);
+    final wdttFallback = fallbackAll.where((p) => p.type == 'wdtt').toList(growable: false);
+    if (wdttFallback.isEmpty) return existing;
+
+    final out = List<Profile>.from(existing);
+    final seen = <String>{};
+    String wdttKey(Profile p) {
+      final mode = (p.extra['mode'] ?? 'wg').toString().trim().toLowerCase();
+      return '${p.server.trim().toLowerCase()}|${p.port}|${p.password}|$mode';
+    }
+
+    void trackProfile(Profile p) {
+      if (p.type == 'wdtt') {
+        seen.add(wdttKey(p));
+      } else if (p.isSubscriptionBalancer) {
+        for (final m in p.subscriptionBalancerMembers) {
+          trackProfile(m);
+        }
+      }
+    }
+
+    for (final p in out) {
+      trackProfile(p);
+    }
+    for (final p in wdttFallback) {
+      if (seen.add(wdttKey(p))) {
+        out.add(p);
+      }
+    }
+    return out;
   }
 
   static int _parseIntOr(Object? raw, int fallback) {
@@ -1566,6 +1613,12 @@ class AppController extends ChangeNotifier {
               (nativeRes!['primary_tags'] as List?) ?? const [],
               subId,
             );
+            fresh = await _mergeFallbackWdttProfiles(
+              fresh,
+              nativeRes!['body']?.toString(),
+              subId,
+              parser,
+            );
           } catch (_) {}
           if (nativeRes!['user_info'] is Map) {
             nativeUserInfo = Map<String, dynamic>.from(nativeRes!['user_info'] as Map);
@@ -1730,6 +1783,7 @@ class AppController extends ChangeNotifier {
                     (nativeBodyParsed['primary_tags'] as List?) ?? const [],
                     subId,
                   );
+                  parsed = await _mergeFallbackWdttProfiles(parsed, body, subId, parser);
                 } catch (_) {}
               } else if (nativeBodyParsed != null &&
                   nativeBodyParsed['error'] != null) {
@@ -4540,6 +4594,19 @@ class AppController extends ChangeNotifier {
           hopType == 'masque' ||
           hopTransport == 'quic' ||
           (hopType == 'naive' && hopQuic);
+
+      // WDTT / CSQTT / qWDTT устанавливает сессию поверх DTLS/TURN/VK API, поэтому
+      // прямой TCP connect до IP сервера (особенно в мобильной сети с белыми списками)
+      // даёт ложный отказ: при активном туннеле измеряем через Clash API, оффлайн — не рисуем X.
+      if (hopType == 'wdtt') {
+        if (_tunnel.status.isActive) {
+          final clashTag = _resolveLoadedClashProxyTag(profile.id);
+          if (clashTag != null) {
+            result = await _probeClashProxyDelay(clashTag);
+          }
+        }
+        return (rtt: result, recordPing: result >= 0);
+      }
 
       // Резолвим IP заранее вне замера RTT (IPv4 приоритетнее IPv6 для dual-stack сетей)
       final targetAddresses = <InternetAddress>[];

@@ -1202,6 +1202,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
             .contains(rawWdttTurn)
         ? (rawWdttTurn == 'tls' ? 'tcp_tls' : rawWdttTurn)
         : 'auto';
+    final rawWdttVkAuth = (edit?.extra['vk_auth_mode'] ?? '').toString().trim().toLowerCase();
+    var wdttVkAuthMode = const {'', 'auto', 'vkcalls', 'legacy', 'cookie', 'oneme', 'yandex'}
+            .contains(rawWdttVkAuth)
+        ? (rawWdttVkAuth == 'auto' ? '' : rawWdttVkAuth)
+        : '';
     final wdttHashes = TextEditingController(
       text: edit?.extra['hashes'] is List
           ? (edit!.extra['hashes'] as List).join(', ')
@@ -2018,6 +2023,23 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                           ),
                           children: [
+                            DropdownButtonFormField<String>(
+                              isExpanded: true,
+                              initialValue: wdttVkAuthMode,
+                              decoration: const InputDecoration(
+                                labelText: 'Режим авторизации звонков (vk_auth_mode)',
+                              ),
+                              items: const [
+                                DropdownMenuItem(value: '', child: Text('Авто (по умолчанию)')),
+                                DropdownMenuItem(value: 'vkcalls', child: Text('VK Calls')),
+                                DropdownMenuItem(value: 'legacy', child: Text('Legacy')),
+                                DropdownMenuItem(value: 'cookie', child: Text('Cookie')),
+                                DropdownMenuItem(value: 'oneme', child: Text('Oneme')),
+                                DropdownMenuItem(value: 'yandex', child: Text('Yandex')),
+                              ],
+                              onChanged: (v) => setState(() => wdttVkAuthMode = v ?? ''),
+                            ),
+                            const SizedBox(height: Space.sm),
                             TextField(
                               controller: wdttVkToken,
                               decoration: const InputDecoration(
@@ -2542,9 +2564,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
                             hostLower.startsWith('tg://proxy') ||
                             hostLower.startsWith('mieru://') ||
                             hostLower.startsWith('mierus://') ||
-                            hostLower.startsWith('wdtt://') ||
-                            hostLower.startsWith('csqtt://') ||
-                            hostLower.startsWith('qwdtt://') ||
+                            RegExp(r'^(wdtt|qwdtt|csqtt):+/').hasMatch(hostLower) ||
                             hostLower.startsWith('sudoku://'))) {
                       Navigator.of(dialogContext).pop();
                       final added = await controller.importProfiles(host);
@@ -2659,6 +2679,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         nextExtra['device_id'] = wdttDeviceId.text.trim();
                       } else {
                         nextExtra.remove('device_id');
+                      }
+                      if (wdttVkAuthMode.isNotEmpty) {
+                        nextExtra['vk_auth_mode'] = wdttVkAuthMode;
+                      } else {
+                        nextExtra.remove('vk_auth_mode');
                       }
                     }
                     if (type == 'openconnect') {

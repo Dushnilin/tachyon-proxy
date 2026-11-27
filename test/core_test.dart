@@ -2947,6 +2947,158 @@ tun-mtu 1480
       expect(rtt, greaterThanOrEqualTo(0));
       expect(controller.pingOf(grp.id), rtt);
     });
+
+    test('qwdtt:/ одиночный слеш, host:port, pass не в конце, Base64 JSON и userinfo URI', () {
+      const parser = LinkParser();
+
+      final singleSlash = parser.parse(
+        'qwdtt:/config?host=95.81.101.212:5800&pass=Xmrmv2dgPFYLLQXZ&hashes=Xxls7-IQ7b8y59PJ65YKG_BtlvJHaXUaORmHI4Fr2Lc&mode=wg&obfs=audio&workers=16&turn_tcp=1#BS-Single',
+      );
+      expect(singleSlash, isNotNull);
+      expect(singleSlash!.type, 'wdtt');
+      expect(singleSlash.server, '95.81.101.212');
+      expect(singleSlash.port, 5800);
+      expect(singleSlash.password, 'Xmrmv2dgPFYLLQXZ');
+      expect(singleSlash.name, 'BS-Single');
+      expect(singleSlash.extra['hashes'], ['Xxls7-IQ7b8y59PJ65YKG_BtlvJHaXUaORmHI4Fr2Lc']);
+      expect(singleSlash.extra['workers'], 16);
+      expect(singleSlash.extra['obfs'], 'audio');
+      expect(singleSlash.extra['turn_transport'], 'tcp');
+
+      final doubleColon = parser.parse(
+        'qwdtt::/config?peer=n2-k8v.it-realms.com:5800&p=pw123&vk=callA,callB&mode=vpn#DoubleColon',
+      );
+      expect(doubleColon, isNotNull);
+      expect(doubleColon!.server, 'n2-k8v.it-realms.com');
+      expect(doubleColon.port, 5800);
+      expect(doubleColon.password, 'pw123');
+      expect(doubleColon.extra['hashes'], ['callA', 'callB']);
+
+      final b64Payload = base64Encode(
+        utf8.encode(
+          jsonEncode({
+            'host': '198.51.100.44:5800',
+            'pass': 'secret-b64',
+            'hashes': ['hA', 'hB'],
+            'mode': 'wg',
+            'obfs': 'audio',
+            'mtu': 1320,
+          }),
+        ),
+      );
+      final fromB64 = parser.parse('qwdtt://$b64Payload#B64Node');
+      expect(fromB64, isNotNull);
+      expect(fromB64!.server, '198.51.100.44');
+      expect(fromB64.port, 5800);
+      expect(fromB64.password, 'secret-b64');
+      expect(fromB64.extra['mtu'], 1320);
+
+      final userInfoUri = parser.parse(
+        'qwdtt://rawPass@95.81.101.212:5800?hashes=h1&mode=raw&raw=5801#RawNode',
+      );
+      expect(userInfoUri, isNotNull);
+      expect(userInfoUri!.server, '95.81.101.212');
+      expect(userInfoUri.port, 5800);
+      expect(userInfoUri.password, 'rawPass');
+      expect(userInfoUri.extra['mode'], 'raw');
+      expect(userInfoUri.extra['raw_port'], 5801);
+    });
+
+    test('смешанная подписка добирает qwdtt:/ при пропуске нативным парсером и WDTT оффлайн не ставит -1', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      const channel = MethodChannel('app.tachyon.proxy/vpn');
+      const mixedPayload =
+          'vless://00000000-0000-0000-0000-000000000001@198.51.100.10:443?security=none#VLESS-1\n'
+          'qwdtt:/config?host=95.81.101.212:5800&pass=Xmrmv2dgPFYLLQXZ&hashes=h1&mode=wg#BS-WDTT\n';
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'parseSubscription') {
+          return jsonEncode({
+            'ok': true,
+            'nodes': [
+              {
+                'type': 'vless',
+                'tag': 'VLESS-1',
+                'server': '198.51.100.10',
+                'server_port': 443,
+                'uuid': '00000000-0000-0000-0000-000000000001',
+              },
+            ],
+            'primary_tags': ['VLESS-1'],
+          });
+        }
+        return null;
+      });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+
+      final tmpDir = await Directory.systemTemp.createTemp('tachyon_qwdtt_sub_test_');
+      addTearDown(() async {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      });
+
+      final store = SettingsStore(directory: tmpDir.path);
+      final controller = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      addTearDown(controller.dispose);
+      await controller.bootstrap();
+
+      final added = await controller.importProfiles(mixedPayload);
+      expect(added, 2);
+      final wdttProf = controller.settings.profiles.firstWhere((p) => p.type == 'wdtt');
+      expect(wdttProf.server, '95.81.101.212');
+      expect(wdttProf.port, 5800);
+
+      final ping = await controller.pingProfile(wdttProf.id);
+      expect(ping, -1);
+      expect(controller.pingOf(wdttProf.id), isNull);
+    });
+
+    test('RuntimeConfig включает local fallback в dns-bootstrap/dns-direct и ограничивает MTU для wdtt', () {
+      const wdttProfile = Profile(
+        id: 'wdtt-1',
+        name: 'BS WDTT',
+        type: 'wdtt',
+        server: '95.81.101.212',
+        port: 5800,
+        password: 'pw',
+        extra: {'hashes': ['h1']},
+      );
+
+      final cfg = RuntimeConfig(
+        profile: wdttProfile,
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(bootstrap: ['77.88.8.8'], servers: ['https://1.1.1.1/dns-query']),
+        ruleSets: const [],
+        mtu: 1400,
+      );
+
+      expect(cfg.effectiveTunMtu, 1280);
+      final json = cfg.toJson();
+      final dns = json['dns'] as Map<String, dynamic>;
+      final servers = (dns['servers'] as List).cast<Map<String, dynamic>>();
+
+      final localSrv = servers.firstWhere((s) => s['tag'] == RuntimeConfig.localDnsTag);
+      expect(localSrv['type'], 'local');
+
+      final bootstrapGrp = servers.firstWhere((s) => s['tag'] == RuntimeConfig.bootstrapTag);
+      expect(bootstrapGrp['type'], 'group');
+      expect(bootstrapGrp['servers'], contains(RuntimeConfig.localDnsTag));
+
+      final directGrp = servers.firstWhere((s) => s['tag'] == RuntimeConfig.directTag);
+      expect(directGrp['type'], 'group');
+      expect(directGrp['servers'], contains(RuntimeConfig.localDnsTag));
+
+      expect(dns['final'], isNot(RuntimeConfig.localDnsTag));
+    });
   });
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7]
+
+### Исправления
+- **Разбор ссылок `qwdtt:/` и `qwdtt://` (`LinkParser`, `AppController`, `ProfilesTab`)**: добавлена нормализация схем с одиночным слешем и лишним двоеточием (`qwdtt:/`, `qwdtt::/`, `wdtt:/`, `csqtt:/`); устранено преждевременное поглощение параметров в `&pass=`, когда за ним следуют известные ключи (`&hashes=`, `&mode=`, `&obfs=`, `&workers=` и др.); добавлены разделение `host:port` в полях `ip`/`server`/`host`/`peer`/`addr`, поддержка `qwdtt://eyJ...` (Base64 JSON), `qwdtt://pass@host:port?...` и параметров `vk`/`call`/`turn_tcp`/`vk_auth`/`mtu`.
+- **Добор `wdtt`-узлов из смешанных подписок (`AppController`)**: при пропуске строк `wdtt`/`qwdtt`/`csqtt` нативным парсером `_mergeFallbackWdttProfiles` добирает их из сырого или Base64-кодированного тела ответа без дублирования в `importProfiles` и `fetchSubscription`.
+- **Резервный системный DNS и параметры WDTT (`RuntimeConfig`, `AppController`, `ProfilesTab`)**: добавлен системный резолвер `dns-local` (`type: "local"`), а `dns-bootstrap` и `dns-direct` переведены на группы `type: "group"` (`mode: "fastest"`, `timeout: "4s"`) для сохранения разрешения доменов при ограничениях внешнего UDP 53; для профилей `wdtt` добавлено ограничение `effectiveTunMtu` до `1280` (или `extra['mtu']`), оффлайн-проверка RTT не выполняет ложный прямой TCP `Socket.connect`, а в форме редактирования добавлен выбор `vk_auth_mode`.
+
 ## [0.1.6]
 
 ### Исправления

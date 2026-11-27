@@ -1,10 +1,18 @@
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tachyon_proxy/app/app.dart';
+import 'package:tachyon_proxy/app/theme/app_theme.dart';
+import 'package:tachyon_proxy/core/app_controller.dart';
 import 'package:tachyon_proxy/core/models/runtime_config.dart';
 import 'package:tachyon_proxy/core/services/core_bridge.dart';
 import 'package:tachyon_proxy/core/services/link_parser.dart';
+import 'package:tachyon_proxy/core/services/lists_repository.dart';
 import 'package:tachyon_proxy/core/services/settings_store.dart';
+import 'package:tachyon_proxy/features/profiles/profiles_tab.dart';
 
 void main() {
   const profile = Profile(
@@ -492,5 +500,97 @@ amneziawg://W0ludGVyZmFjZV0KUHJpdmF0ZUtleSA9IGdHNEJ4T01yUDhuV1dIelZ6VGt2OXJ6T1lG
     final restoredSettings = AppSettings.fromJson(settings.toJson());
     expect(restoredSettings.wifiProfileId, 'auto:sub-wifi');
     expect(restoredSettings.cellularProfileId, 'auto:sub-lte');
+  });
+
+  testWidgets('свёрнутые подписки в ProfilesTab поддерживают перетаскивание', (tester) async {
+    final tmpDir = Directory.systemTemp.createTempSync('tachyon_widget_sub_');
+    addTearDown(() => tmpDir.deleteSync(recursive: true));
+
+    // Отключаем сетевые вызовы в bootstrap (store.load / _refreshStale), чтобы FakeAsync не завис на реальных I/O.
+    final controller = await tester.runAsync(() async {
+      const vpnChannel = MethodChannel('app.tachyon.proxy/vpn');
+      const eventsChannel = MethodChannel('app.tachyon.proxy/events');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(vpnChannel, (call) async {
+        return switch (call.method) {
+          'status' => <String, dynamic>{'status': 'disconnected', 'error': '', 'server': ''},
+          'filesDir' => tmpDir.path,
+          'networkInfo' => 'none',
+          'wifiInfo' => <String, dynamic>{'ssid': '', 'isWifi': false},
+          _ => null,
+        };
+      });
+      messenger.setMockMethodCallHandler(eventsChannel, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(vpnChannel, null);
+        messenger.setMockMethodCallHandler(eventsChannel, null);
+      });
+
+      final store = SettingsStore(directory: tmpDir.path);
+      await store.save(
+        AppSettings(
+          dns: DnsSettings(checkedAt: DateTime.now().millisecondsSinceEpoch),
+          serviceRoutes: const {},
+          autoUpdateSubs: false,
+          subscriptions: const [
+            SubscriptionEntry(id: 'sub-1', url: 'https://one.example/sub', name: 'Sub One'),
+            SubscriptionEntry(id: 'sub-2', url: 'https://two.example/sub', name: 'Sub Two'),
+          ],
+          profiles: const [
+            Profile(
+              id: 'p-1',
+              name: 'P1',
+              type: 'vless',
+              server: 'one.example',
+              port: 443,
+              uuid: 'u1',
+              subscriptionId: 'sub-1',
+            ),
+            Profile(
+              id: 'p-2',
+              name: 'P2',
+              type: 'vless',
+              server: 'two.example',
+              port: 443,
+              uuid: 'u2',
+              subscriptionId: 'sub-2',
+            ),
+          ],
+          collapsedSubs: const ['sub-1', 'sub-2'],
+        ),
+      );
+      final ctrl = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      await ctrl.bootstrap();
+      return ctrl;
+    });
+    addTearDown(() => controller!.dispose());
+
+    await tester.pumpWidget(
+      AppScope(
+        controller: controller!,
+        child: MaterialApp(
+          theme: TachyonTheme.dark(),
+          home: const ProfilesTab(),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(SliverReorderableList), findsOneWidget);
+    expect(find.byIcon(Icons.drag_indicator_rounded), findsNWidgets(2));
+
+    // Разворачиваем обе подписки — ручки перетаскивания должны скрыться.
+    await tester.runAsync(() async {
+      await controller.toggleSubCollapsed('sub-1');
+      await controller.toggleSubCollapsed('sub-2');
+    });
+    await tester.pump();
+
+    expect(find.byType(SliverReorderableList), findsNothing);
+    expect(find.byIcon(Icons.drag_indicator_rounded), findsNothing);
   });
 }

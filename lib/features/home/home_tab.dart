@@ -316,58 +316,227 @@ class _HomeTabState extends State<HomeTab> {
 
     if (visibleProfiles.isNotEmpty) {
       if (visibleSubs.isNotEmpty) {
-        for (final sub in visibleSubs) {
-          final isCollapsed =
-              controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
-          final rawSubProfiles = controller.settings.profilesForSubscription(sub.id);
-          final subProfiles = isCollapsed
-              ? rawSubProfiles
-              : _filter(
-                  controller.sortProfiles(rawSubProfiles),
-                  controller,
-                  contextSub: sub,
-                );
+        final canReorderSubs =
+            visibleSubs.length >= 2 && _searchQuery.trim().isEmpty;
+        final allSubsCollapsed = canReorderSubs &&
+            visibleSubs.every((s) => controller.isSubCollapsed(s.id));
 
+        if (allSubsCollapsed) {
           slivers.add(
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.only(
-                  bottom: (!isCollapsed && subProfiles.isNotEmpty) ? 4 : Space.md,
-                ),
-                child: _buildSubscriptionHeaderCard(
-                  context,
-                  controller,
-                  sub,
-                  rawCount: rawSubProfiles.length,
-                  hasVisibleServers: subProfiles.isNotEmpty,
-                  isCollapsed: isCollapsed,
-                ),
-              ),
+            SliverReorderableList(
+              itemCount: visibleSubs.length,
+              onReorderStart: (_) => HapticFeedback.mediumImpact(),
+              onReorderItem: (oldIndex, newIndex) {
+                HapticFeedback.selectionClick();
+                unawaited(
+                  controller.reorderSubscriptions(
+                    oldIndex,
+                    newIndex > oldIndex ? newIndex + 1 : newIndex,
+                  ),
+                );
+              },
+              proxyDecorator: (child, index, animation) {
+                return Material(
+                  color: Colors.transparent,
+                  child: DecoratedBox(
+                    position: DecorationPosition.foreground,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(Radii.card),
+                      border: Border.all(color: tokens.accent, width: 1.5),
+                    ),
+                    child: child,
+                  ),
+                );
+              },
+              itemBuilder: (context, index) {
+                final sub = visibleSubs[index];
+                final rawSubProfiles =
+                    controller.settings.profilesForSubscription(sub.id);
+                return ReorderableDelayedDragStartListener(
+                  key: ValueKey<String>('home-sub-reorder-${sub.id}'),
+                  index: index,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: Space.md),
+                    child: _buildSubscriptionHeaderCard(
+                      context,
+                      controller,
+                      sub,
+                      rawCount: rawSubProfiles.length,
+                      hasVisibleServers: rawSubProfiles.isNotEmpty,
+                      isCollapsed: true,
+                      dragHandle: ReorderableDragStartListener(
+                        index: index,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 2,
+                            vertical: 4,
+                          ),
+                          child: Icon(
+                            Icons.drag_indicator_rounded,
+                            size: 18,
+                            color: tokens.faint,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           );
+        } else {
+          for (final sub in visibleSubs) {
+            final isCollapsed =
+                controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
+            final rawSubProfiles =
+                controller.settings.profilesForSubscription(sub.id);
+            final subProfiles = isCollapsed
+                ? rawSubProfiles
+                : _filter(
+                    controller.sortProfiles(rawSubProfiles),
+                    controller,
+                    contextSub: sub,
+                  );
 
-          if (!isCollapsed && subProfiles.isNotEmpty) {
-            slivers.add(
-              SliverList.builder(
-                itemCount: subProfiles.length,
-                itemBuilder: (context, index) {
-                  final p = subProfiles[index];
-                  return Padding(
-                    key: ValueKey<String>('home-sub-${sub.id}-${p.id}'),
-                    padding: EdgeInsets.only(
-                      bottom: index == subProfiles.length - 1 ? Space.md : 4,
+            Widget headerCard;
+            if (canReorderSubs) {
+              headerCard = LayoutBuilder(
+                builder: (context, constraints) {
+                  Widget makeFeedbackCard() => Material(
+                        color: Colors.transparent,
+                        child: SizedBox(
+                          width: constraints.maxWidth,
+                          child: DecoratedBox(
+                            position: DecorationPosition.foreground,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(Radii.card),
+                              border: Border.all(
+                                color: tokens.accent,
+                                width: 1.5,
+                              ),
+                            ),
+                            child: _buildSubscriptionHeaderCard(
+                              context,
+                              controller,
+                              sub,
+                              rawCount: rawSubProfiles.length,
+                              hasVisibleServers: subProfiles.isNotEmpty,
+                              isCollapsed: true,
+                            ),
+                          ),
+                        ),
+                      );
+
+                  final handleIcon = Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 2,
+                      vertical: 4,
                     ),
-                    child: _DashboardServerTile(
-                      profile: p,
-                      controller: controller,
-                      selected: p.id == selectedId,
-                      onSelect: () => controller.selectProfile(p.id),
-                      onPing: () => controller.pingProfile(p.id),
+                    child: Icon(
+                      Icons.drag_indicator_rounded,
+                      size: 18,
+                      color: tokens.faint,
                     ),
                   );
+
+                  final dragHandle = isCollapsed
+                      ? Draggable<String>(
+                          data: sub.id,
+                          axis: Axis.vertical,
+                          onDragStarted: () => HapticFeedback.mediumImpact(),
+                          feedback: makeFeedbackCard(),
+                          childWhenDragging:
+                              Opacity(opacity: 0.35, child: handleIcon),
+                          child: handleIcon,
+                        )
+                      : null;
+
+                  final inner = _buildSubscriptionHeaderCard(
+                    context,
+                    controller,
+                    sub,
+                    rawCount: rawSubProfiles.length,
+                    hasVisibleServers: subProfiles.isNotEmpty,
+                    isCollapsed: isCollapsed,
+                    dragHandle: dragHandle,
+                  );
+
+                  final targetCard = DragTarget<String>(
+                    onWillAcceptWithDetails: (d) => d.data != sub.id,
+                    onAcceptWithDetails: (d) {
+                      HapticFeedback.selectionClick();
+                      unawaited(controller.moveSubscriptionTo(d.data, sub.id));
+                    },
+                    builder: (context, candidateData, rejectedData) {
+                      if (candidateData.isEmpty) return inner;
+                      return DecoratedBox(
+                        position: DecorationPosition.foreground,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          border: Border.all(color: tokens.accent, width: 1.5),
+                        ),
+                        child: inner,
+                      );
+                    },
+                  );
+
+                  if (!isCollapsed) return targetCard;
+                  return LongPressDraggable<String>(
+                    data: sub.id,
+                    axis: Axis.vertical,
+                    onDragStarted: () => HapticFeedback.mediumImpact(),
+                    feedback: makeFeedbackCard(),
+                    childWhenDragging: Opacity(opacity: 0.35, child: targetCard),
+                    child: targetCard,
+                  );
                 },
+              );
+            } else {
+              headerCard = _buildSubscriptionHeaderCard(
+                context,
+                controller,
+                sub,
+                rawCount: rawSubProfiles.length,
+                hasVisibleServers: subProfiles.isNotEmpty,
+                isCollapsed: isCollapsed,
+              );
+            }
+
+            slivers.add(
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    bottom:
+                        (!isCollapsed && subProfiles.isNotEmpty) ? 4 : Space.md,
+                  ),
+                  child: headerCard,
+                ),
               ),
             );
+
+            if (!isCollapsed && subProfiles.isNotEmpty) {
+              slivers.add(
+                SliverList.builder(
+                  itemCount: subProfiles.length,
+                  itemBuilder: (context, index) {
+                    final p = subProfiles[index];
+                    return Padding(
+                      key: ValueKey<String>('home-sub-${sub.id}-${p.id}'),
+                      padding: EdgeInsets.only(
+                        bottom: index == subProfiles.length - 1 ? Space.md : 4,
+                      ),
+                      child: _DashboardServerTile(
+                        profile: p,
+                        controller: controller,
+                        selected: p.id == selectedId,
+                        onSelect: () => controller.selectProfile(p.id),
+                        onPing: () => controller.pingProfile(p.id),
+                      ),
+                    );
+                  },
+                ),
+              );
+            }
           }
         }
 
@@ -477,6 +646,7 @@ class _HomeTabState extends State<HomeTab> {
     required int rawCount,
     required bool hasVisibleServers,
     required bool isCollapsed,
+    Widget? dragHandle,
   }) {
     final tokens = context.tokens;
     final title =
@@ -493,6 +663,10 @@ class _HomeTabState extends State<HomeTab> {
               padding: const EdgeInsets.symmetric(horizontal: Space.sm, vertical: Space.xs),
               child: Row(
                 children: [
+                  if (dragHandle != null) ...[
+                    dragHandle,
+                    const SizedBox(width: 2),
+                  ],
                   Icon(
                     isCollapsed ? Icons.chevron_right : Icons.expand_more,
                     color: tokens.muted,

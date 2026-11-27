@@ -2420,6 +2420,119 @@ tun-mtu 1480
         isFalse,
       );
     });
+
+    test('reorderSubscriptions и moveSubscriptionTo меняют порядок и сохраняют настройки', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tmpDir = await Directory.systemTemp.createTemp('tachyon_sub_order_');
+      addTearDown(() => tmpDir.delete(recursive: true));
+
+      const vpnChannel = MethodChannel('app.tachyon.proxy/vpn');
+      const eventsChannel = MethodChannel('app.tachyon.proxy/events');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(vpnChannel, (call) async {
+        return switch (call.method) {
+          'status' => <String, dynamic>{'status': 'disconnected', 'error': '', 'server': ''},
+          'filesDir' => tmpDir.path,
+          'networkInfo' => 'none',
+          'wifiInfo' => <String, dynamic>{'ssid': '', 'isWifi': false},
+          _ => null,
+        };
+      });
+      messenger.setMockMethodCallHandler(eventsChannel, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(vpnChannel, null);
+        messenger.setMockMethodCallHandler(eventsChannel, null);
+      });
+
+      final store = SettingsStore(directory: tmpDir.path);
+      await store.save(
+        AppSettings(
+          dns: DnsSettings(checkedAt: DateTime.now().millisecondsSinceEpoch),
+          serviceRoutes: const {},
+          subscriptions: const [
+            SubscriptionEntry(id: 'sub-a', url: 'https://a.example/sub', name: 'A'),
+            SubscriptionEntry(id: 'sub-b', url: 'https://b.example/sub', name: 'B'),
+            SubscriptionEntry(id: 'sub-c', url: 'https://c.example/sub', name: 'C'),
+          ],
+          profiles: const [
+            Profile(
+              id: 'p-a',
+              name: 'PA',
+              type: 'vless',
+              server: 'a.example',
+              port: 443,
+              uuid: 'u1',
+              subscriptionId: 'sub-a',
+            ),
+            Profile(
+              id: 'p-b',
+              name: 'PB',
+              type: 'vless',
+              server: 'b.example',
+              port: 443,
+              uuid: 'u2',
+              subscriptionId: 'sub-b',
+            ),
+            Profile(
+              id: 'p-c',
+              name: 'PC',
+              type: 'vless',
+              server: 'c.example',
+              port: 443,
+              uuid: 'u3',
+              subscriptionId: 'sub-c',
+            ),
+          ],
+        ),
+      );
+      final controller = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      addTearDown(controller.dispose);
+      await controller.bootstrap();
+
+      expect(
+        controller.settings.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-a', 'sub-b', 'sub-c'],
+      );
+
+      // Перенос вниз (SliverReorderableList передаёт newIndex = 3 при переносе 0 -> конец)
+      await controller.reorderSubscriptions(0, 3);
+      expect(
+        controller.settings.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-b', 'sub-c', 'sub-a'],
+      );
+
+      // Перенос вверх
+      await controller.reorderSubscriptions(2, 0);
+      expect(
+        controller.settings.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-a', 'sub-b', 'sub-c'],
+      );
+
+      // Граничные / некорректные индексы не меняют порядок
+      await controller.reorderSubscriptions(-1, 2);
+      await controller.reorderSubscriptions(1, 1);
+      expect(
+        controller.settings.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-a', 'sub-b', 'sub-c'],
+      );
+
+      // Перемещение по идентификаторам
+      await controller.moveSubscriptionTo('sub-c', 'sub-a');
+      expect(
+        controller.settings.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-c', 'sub-a', 'sub-b'],
+      );
+
+      final reloaded = await store.load();
+      expect(
+        reloaded.visibleSubscriptions.map((s) => s.id).toList(),
+        ['sub-c', 'sub-a', 'sub-b'],
+      );
+    });
   });
 }
 

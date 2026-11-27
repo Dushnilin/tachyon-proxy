@@ -345,112 +345,273 @@ class _ProfilesTabState extends State<ProfilesTab> {
       ),
     ];
 
-    for (final sub in subs) {
-      final isCollapsed =
-          controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
-      final subProfiles = _filter(
-        controller.sortProfiles(
-          controller.settings.profilesForSubscription(sub.id),
-        ),
-        controller,
-        contextSub: sub,
-      );
+    final canReorderSubs = subs.length >= 2 && _searchQuery.trim().isEmpty;
+    final allSubsCollapsed =
+        canReorderSubs && subs.every((s) => controller.isSubCollapsed(s.id));
 
-      slivers.add(
-        SliverPadding(
-          padding: const EdgeInsets.symmetric(horizontal: Space.lg),
-          sliver: SliverToBoxAdapter(
-            child: _CollapsibleSubCard(
-              sub: sub,
-              controller: controller,
-              isCollapsed: isCollapsed,
-              profiles: subProfiles,
-              selectedId: selectedId,
-              onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
-              onToggleSub: () => controller.toggleSubscription(sub.id),
-              onRemoveSub: () => controller.removeSubscription(sub.id),
-              onRefreshSub: () async {
-                if (sub.isFptnToken) {
-                  await showFptnTokenDialog(
+    Widget buildSubCard(
+      SubscriptionEntry sub,
+      List<Profile> subProfiles,
+      bool isCollapsed, {
+      Widget? dragHandle,
+    }) {
+      return _CollapsibleSubCard(
+        sub: sub,
+        controller: controller,
+        isCollapsed: isCollapsed,
+        profiles: subProfiles,
+        selectedId: selectedId,
+        dragHandle: dragHandle,
+        onToggleCollapse: () => controller.toggleSubCollapsed(sub.id),
+        onToggleSub: () => controller.toggleSubscription(sub.id),
+        onRemoveSub: () => controller.removeSubscription(sub.id),
+        onRefreshSub: () async {
+          if (sub.isFptnToken) {
+            await showFptnTokenDialog(
+              context,
+              controller,
+              sub.url,
+              existingSub: sub,
+            );
+            return;
+          }
+          final count = await controller.refreshSubscription(sub.id);
+          if (!context.mounted) return;
+          final msg = count > 0
+              ? 'Подписка обновлена (серверов: $count)'
+              : (controller.lastError.isNotEmpty
+                  ? controller.lastError
+                  : 'Не удалось обновить подписку');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msg),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        },
+        onPingAllSub: () =>
+            controller.pingAllProfiles(subscriptionId: sub.id),
+        onSelectProfile: (id) => controller.selectProfile(id),
+        onEditSub: () => sub.isCombinedGroup
+            ? showCombinedGroupDialog(
+                context,
+                controller,
+                existingGroup: sub,
+              )
+            : (sub.isFptnToken
+                ? showFptnTokenDialog(
                     context,
                     controller,
                     sub.url,
                     existingSub: sub,
-                  );
-                  return;
-                }
-                final count = await controller.refreshSubscription(sub.id);
-                if (!context.mounted) return;
-                final msg = count > 0
-                    ? 'Подписка обновлена (серверов: $count)'
-                    : (controller.lastError.isNotEmpty
-                        ? controller.lastError
-                        : 'Не удалось обновить подписку');
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(msg),
-                    duration: const Duration(seconds: 2),
+                  )
+                : _showEditSubDialog(context, controller, sub)),
+      );
+    }
+
+    if (allSubsCollapsed) {
+      final tokens = context.tokens;
+      slivers.add(
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+          sliver: SliverReorderableList(
+            itemCount: subs.length,
+            onReorderStart: (_) => HapticFeedback.mediumImpact(),
+            onReorderItem: (oldIndex, newIndex) {
+              HapticFeedback.selectionClick();
+              unawaited(
+                controller.reorderSubscriptions(
+                  oldIndex,
+                  newIndex > oldIndex ? newIndex + 1 : newIndex,
+                ),
+              );
+            },
+            proxyDecorator: (child, index, animation) {
+              return Material(
+                color: Colors.transparent,
+                child: DecoratedBox(
+                  position: DecorationPosition.foreground,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(Radii.card),
+                    border: Border.all(color: tokens.accent, width: 1.5),
                   ),
-                );
-              },
-              onPingAllSub: () =>
-                  controller.pingAllProfiles(subscriptionId: sub.id),
-              onSelectProfile: (id) => controller.selectProfile(id),
-              onEditSub: () => sub.isCombinedGroup
-                  ? showCombinedGroupDialog(
-                      context,
-                      controller,
-                      existingGroup: sub,
-                    )
-                  : (sub.isFptnToken
-                      ? showFptnTokenDialog(
-                          context,
-                          controller,
-                          sub.url,
-                          existingSub: sub,
-                        )
-                      : _showEditSubDialog(context, controller, sub)),
-            ),
+                  child: child,
+                ),
+              );
+            },
+            itemBuilder: (context, index) {
+              final sub = subs[index];
+              final subProfiles = _filter(
+                controller.sortProfiles(
+                  controller.settings.profilesForSubscription(sub.id),
+                ),
+                controller,
+                contextSub: sub,
+              );
+              return ReorderableDelayedDragStartListener(
+                key: ValueKey<String>('prof-sub-reorder-${sub.id}'),
+                index: index,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: Space.md),
+                  child: buildSubCard(
+                    sub,
+                    subProfiles,
+                    true,
+                    dragHandle: ReorderableDragStartListener(
+                      index: index,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                        child: Icon(
+                          Icons.drag_indicator_rounded,
+                          size: 18,
+                          color: tokens.faint,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
       );
+    } else {
+      final tokens = context.tokens;
+      for (final sub in subs) {
+        final isCollapsed =
+            controller.isSubCollapsed(sub.id) && _searchQuery.trim().isEmpty;
+        final subProfiles = _filter(
+          controller.sortProfiles(
+            controller.settings.profilesForSubscription(sub.id),
+          ),
+          controller,
+          contextSub: sub,
+        );
 
-      if (!isCollapsed && subProfiles.isNotEmpty) {
+        Widget headerCard;
+        if (canReorderSubs) {
+          headerCard = LayoutBuilder(
+            builder: (context, constraints) {
+              Widget makeFeedbackCard() => Material(
+                    color: Colors.transparent,
+                    child: SizedBox(
+                      width: constraints.maxWidth,
+                      child: DecoratedBox(
+                        position: DecorationPosition.foreground,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(Radii.card),
+                          border: Border.all(color: tokens.accent, width: 1.5),
+                        ),
+                        child: buildSubCard(sub, subProfiles, true),
+                      ),
+                    ),
+                  );
+
+              final handleIcon = Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                child: Icon(
+                  Icons.drag_indicator_rounded,
+                  size: 18,
+                  color: tokens.faint,
+                ),
+              );
+
+              final dragHandle = isCollapsed
+                  ? Draggable<String>(
+                      data: sub.id,
+                      axis: Axis.vertical,
+                      onDragStarted: () => HapticFeedback.mediumImpact(),
+                      feedback: makeFeedbackCard(),
+                      childWhenDragging: Opacity(opacity: 0.35, child: handleIcon),
+                      child: handleIcon,
+                    )
+                  : null;
+
+              final inner = buildSubCard(
+                sub,
+                subProfiles,
+                isCollapsed,
+                dragHandle: dragHandle,
+              );
+
+              final targetCard = DragTarget<String>(
+                onWillAcceptWithDetails: (d) => d.data != sub.id,
+                onAcceptWithDetails: (d) {
+                  HapticFeedback.selectionClick();
+                  unawaited(controller.moveSubscriptionTo(d.data, sub.id));
+                },
+                builder: (context, candidateData, rejectedData) {
+                  if (candidateData.isEmpty) return inner;
+                  return DecoratedBox(
+                    position: DecorationPosition.foreground,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(Radii.card),
+                      border: Border.all(color: tokens.accent, width: 1.5),
+                    ),
+                    child: inner,
+                  );
+                },
+              );
+
+              if (!isCollapsed) return targetCard;
+              return LongPressDraggable<String>(
+                data: sub.id,
+                axis: Axis.vertical,
+                onDragStarted: () => HapticFeedback.mediumImpact(),
+                feedback: makeFeedbackCard(),
+                childWhenDragging: Opacity(opacity: 0.35, child: targetCard),
+                child: targetCard,
+              );
+            },
+          );
+        } else {
+          headerCard = buildSubCard(sub, subProfiles, isCollapsed);
+        }
+
         slivers.add(
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(Space.lg, 4, Space.lg, 0),
-            sliver: SliverList.builder(
-              itemCount: subProfiles.length,
-              itemBuilder: (context, index) {
-                final p = subProfiles[index];
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: _ProfileTile(
-                    controller: controller,
-                    profile: p,
-                    selected: p.id == selectedId,
-                    ping: controller.pingOf(p.id),
-                    isPinging: controller.isPinging(p.id),
-                    telemetry: controller.balancerTelemetryOf(p.id),
-                    isBalancerWinner: winnerId == p.id,
-                    onSelect: () => controller.selectProfile(p.id),
-                    onDelete: () => controller.removeProfile(p.id),
-                    onEdit: () => _showManualDialog(context, controller, edit: p),
-                    onShare: () => _showQrDialog(context, controller, p),
-                    onPing: () => controller.pingProfile(p.id),
-                    onChangeNetworkScope: (scope) =>
-                        controller.setProfileNetworkScope(p.id, scope),
-                  ),
-                );
-              },
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+            sliver: SliverToBoxAdapter(child: headerCard),
           ),
         );
-      }
 
-      slivers.add(
-        const SliverToBoxAdapter(child: SizedBox(height: Space.md)),
-      );
+        if (!isCollapsed && subProfiles.isNotEmpty) {
+          slivers.add(
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(Space.lg, 4, Space.lg, 0),
+              sliver: SliverList.builder(
+                itemCount: subProfiles.length,
+                itemBuilder: (context, index) {
+                  final p = subProfiles[index];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: _ProfileTile(
+                      controller: controller,
+                      profile: p,
+                      selected: p.id == selectedId,
+                      ping: controller.pingOf(p.id),
+                      isPinging: controller.isPinging(p.id),
+                      telemetry: controller.balancerTelemetryOf(p.id),
+                      isBalancerWinner: winnerId == p.id,
+                      onSelect: () => controller.selectProfile(p.id),
+                      onDelete: () => controller.removeProfile(p.id),
+                      onEdit: () => _showManualDialog(context, controller, edit: p),
+                      onShare: () => _showQrDialog(context, controller, p),
+                      onPing: () => controller.pingProfile(p.id),
+                      onChangeNetworkScope: (scope) =>
+                          controller.setProfileNetworkScope(p.id, scope),
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        }
+
+        slivers.add(
+          const SliverToBoxAdapter(child: SizedBox(height: Space.md)),
+        );
+      }
     }
 
     if (subs.isNotEmpty) {
@@ -3996,6 +4157,7 @@ class _CollapsibleSubCard extends StatelessWidget {
     required this.onPingAllSub,
     required this.onSelectProfile,
     required this.onEditSub,
+    this.dragHandle,
   });
 
   final SubscriptionEntry sub;
@@ -4010,6 +4172,7 @@ class _CollapsibleSubCard extends StatelessWidget {
   final VoidCallback onPingAllSub;
   final VoidCallback onEditSub;
   final void Function(String id) onSelectProfile;
+  final Widget? dragHandle;
 
   static String _fmtBytes(int b) {
     if (b <= 0) return '0 Б';
@@ -4075,6 +4238,10 @@ class _CollapsibleSubCard extends StatelessWidget {
                 children: [
                   Row(
                     children: [
+                      if (dragHandle != null) ...[
+                        dragHandle!,
+                        const SizedBox(width: 2),
+                      ],
                       Icon(
                         isCollapsed ? Icons.chevron_right : Icons.expand_more,
                         color: tokens.muted,

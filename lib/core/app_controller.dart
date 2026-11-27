@@ -145,7 +145,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.4';
+  static const String appVersion = '0.1.5';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -2139,6 +2139,37 @@ class AppController extends ChangeNotifier {
           if (sub.id == id) sub.copyWith(enabled: !sub.enabled) else sub,
       ],
     ));
+  }
+
+  /// Меняет порядок видимых подписок при перетаскивании в списке.
+  Future<void> reorderSubscriptions(int oldIndex, int newIndex) async {
+    final visible = [..._settings.visibleSubscriptions];
+    if (oldIndex < 0 || oldIndex >= visible.length) return;
+    var target = newIndex;
+    if (target > oldIndex) target -= 1;
+    target = target.clamp(0, visible.length - 1);
+    if (target == oldIndex) return;
+    final moved = visible.removeAt(oldIndex);
+    visible.insert(target, moved);
+    final hidden = _settings.subscriptions
+        .where((s) => AppSettings.isFreeSubId(s.id))
+        .toList(growable: false);
+    await _update(_settings.copyWith(subscriptions: [...visible, ...hidden]));
+  }
+
+  /// Перемещает подписку [draggedId] на позицию подписки [targetId].
+  Future<void> moveSubscriptionTo(String draggedId, String targetId) async {
+    if (draggedId == targetId) return;
+    final visible = [..._settings.visibleSubscriptions];
+    final oldIndex = visible.indexWhere((s) => s.id == draggedId);
+    final targetIndex = visible.indexWhere((s) => s.id == targetId);
+    if (oldIndex < 0 || targetIndex < 0 || oldIndex == targetIndex) return;
+    final moved = visible.removeAt(oldIndex);
+    visible.insert(targetIndex, moved);
+    final hidden = _settings.subscriptions
+        .where((s) => AppSettings.isFreeSubId(s.id))
+        .toList(growable: false);
+    await _update(_settings.copyWith(subscriptions: [...visible, ...hidden]));
   }
 
   /// Меняет тему оформления: `dark` или `light`.

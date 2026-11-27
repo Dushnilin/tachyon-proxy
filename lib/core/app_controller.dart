@@ -145,7 +145,7 @@ class AppController extends ChangeNotifier {
   List<String> _nearbyWifiSsids = const [];
 
   /// Версия приложения и состояние встроенного загрузчика обновлений (отдельно ядро, APK, списки).
-  static const String appVersion = '0.1.5';
+  static const String appVersion = '0.1.6';
   static const String minRequiredCoreVersion = '0.3.9';
   bool _checkingUpdates = false;
   bool _updatingEngine = false;
@@ -353,8 +353,7 @@ class AppController extends ChangeNotifier {
           try {
             final cacheFile = File('$filesDirPath/subs/${sub.id}.txt');
             await cacheFile.parent.create(recursive: true);
-            final outboundsList = subProfiles.map((p) => p.toOutbound(tag: p.name)).toList();
-            await cacheFile.writeAsString(jsonEncode(outboundsList));
+            await cacheFile.writeAsString(jsonEncode(buildSubOutboundsForCache(subProfiles)));
           } catch (_) {}
         }
       }
@@ -612,11 +611,25 @@ class AppController extends ChangeNotifier {
     final result = <Profile>[];
     for (final p in ordered) {
       final subId = resolveSubId(p);
+      final hasPorts = (p.extra['server_ports'] is List &&
+              (p.extra['server_ports'] as List).isNotEmpty) ||
+          (p.extra['server_ports'] is String &&
+              (p.extra['server_ports'] as String).trim().isNotEmpty);
+      if (subId.isNotEmpty &&
+          !p.isSubscriptionBalancer &&
+          p.type != 'urltest' &&
+          p.type != 'tailscale' &&
+          p.extra['token'] == null &&
+          isDummyOrStubServer(p.server, p.port, hasServerPorts: hasPorts)) {
+        continue;
+      }
       final baseKey = '$subId|${p.name}|${p.server}|${p.port}|${p.type}';
       final dedupKey = p.type == 'wireguard'
           ? '$baseKey|${p.password}|${p.publicKey}|'
               '${normalizeWgReserved(p.extra['reserved'])?.join(',') ?? p.extra['reserved'] ?? ''}'
-          : baseKey;
+          : (p.isSubscriptionBalancer
+              ? '$baseKey|${p.subscriptionBalancerMembers.map((m) => m.id).join(',')}'
+              : baseKey);
       if (!seenKeys.add(dedupKey)) continue;
 
       var id = p.id;
@@ -1390,6 +1403,70 @@ class AppController extends ChangeNotifier {
     return fallback;
   }
 
+  /// Сериализует профили подписки в плоский список аутбаундов для кэша ядра `subs/<id>.txt`,
+  /// разворачивая `isSubscriptionBalancer` в участников + `urltest`-группу.
+  static List<Map<String, dynamic>> buildSubOutboundsForCache(List<Profile> list) {
+    final out = <Map<String, dynamic>>[];
+    final usedTags = <String>{};
+    String uniqueTag(String raw) {
+      final base = raw.trim().isEmpty ? 'proxy-node' : raw.trim();
+      var cand = base;
+      var n = 2;
+      while (!usedTags.add(cand)) {
+        cand = '$base #$n';
+        n++;
+      }
+      return cand;
+    }
+
+    void appendSingle(Profile p, String tag) {
+      final node = p.toOutbound(tag: tag);
+      final rawChain = p.extra['chain_outbounds'];
+      if (rawChain is List && rawChain.isNotEmpty) {
+        final chainTags = <String>{};
+        for (final hop in rawChain.whereType<Map>()) {
+          final h = normalizeOutboundNode(Map<String, dynamic>.from(hop));
+          final ht = (h['tag'] ?? '').toString().trim();
+          if (ht.isNotEmpty && usedTags.add(ht)) {
+            chainTags.add(ht);
+            out.add(h);
+          }
+        }
+        if (chainTags.isEmpty && !usedTags.contains(node['detour'])) {
+          node.remove('detour');
+        }
+      } else {
+        node.remove('detour');
+      }
+      out.add(node);
+    }
+
+    for (final p in list) {
+      if (p.isSubscriptionBalancer) {
+        final memberTags = <String>[];
+        for (final member in p.subscriptionBalancerMembers) {
+          final mTag = uniqueTag(member.name);
+          appendSingle(member, mTag);
+          memberTags.add(mTag);
+        }
+        if (memberTags.isNotEmpty) {
+          final url = (p.extra['urltest_url'] ?? '').toString().trim();
+          final interval = (p.extra['urltest_interval'] ?? '').toString().trim();
+          out.add({
+            'type': 'urltest',
+            'tag': uniqueTag(p.name),
+            'outbounds': memberTags,
+            if (url.isNotEmpty) 'url': url,
+            if (interval.isNotEmpty) 'interval': interval,
+          });
+        }
+        continue;
+      }
+      appendSingle(p, uniqueTag(p.name));
+    }
+    return out;
+  }
+
   /// Загружает содержимое подписки по сети, парсит серверы и кладёт в профили.
   Future<int> fetchSubscription(String subId) async {
     final sub = _settings.subscriptions.where((s) => s.id == subId).firstOrNull;
@@ -1452,9 +1529,10 @@ class AppController extends ChangeNotifier {
 
       final userAgents = [
         'Tachyon/$appVersion (Android; compatible; sing-box 1.14.3; HiddifyNext)',
+        'Happ/4.6.2',
         'HiddifyNext/2.5.7 (android) like ClashMeta v2ray',
         'v2rayNG/1.9.34 (Linux; Android)',
-        'Happ/3.9.2 (Android; compatible; sing-box; Mihomo)',
+        'Happ',
         'ClashMetaForAndroid/2.11.2.Meta',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
       ];
@@ -1506,6 +1584,7 @@ class AppController extends ChangeNotifier {
           client.findProxy = (_) => 'PROXY 127.0.0.1:2080';
         }
         try {
+          (List<Profile>, HttpClientResponse, String)? degradedBest;
           for (final ua in userAgents) {
             if (fresh.isNotEmpty) break;
             try {
@@ -1660,6 +1739,13 @@ class AppController extends ChangeNotifier {
                 parsed = await _parseSubTextIsolated(body, subId);
               }
               if (parsed.isNotEmpty) {
+                final isHappUa = ua.toLowerCase().startsWith('happ/');
+                if (!isHappUa && LinkParser.bodyHasInvalidStubHost(body)) {
+                  if (degradedBest == null || parsed.length > degradedBest.$1.length) {
+                    degradedBest = (parsed, attemptResp, body);
+                  }
+                  continue;
+                }
                 fresh = parsed;
                 response = attemptResp;
                 fetchedBody = body;
@@ -1682,6 +1768,11 @@ class AppController extends ChangeNotifier {
               debugPrint('[tachyon-sub] http error (viaProxy=$viaProxy, ua=$ua): $e');
               continue;
             }
+          }
+          if (fresh.isEmpty && degradedBest != null) {
+            fresh = degradedBest.$1;
+            response = degradedBest.$2;
+            fetchedBody = degradedBest.$3;
           }
         } finally {
           client.close(force: false);
@@ -1853,44 +1944,6 @@ class AppController extends ChangeNotifier {
                 else
                   p,
             ];
-
-      List<Map<String, dynamic>> buildSubOutboundsForCache(List<Profile> list) {
-        final out = <Map<String, dynamic>>[];
-        final usedTags = <String>{};
-        String uniqueTag(String raw) {
-          final base = raw.trim().isEmpty ? 'proxy-node' : raw.trim();
-          var cand = base;
-          var n = 2;
-          while (!usedTags.add(cand)) {
-            cand = '$base #$n';
-            n++;
-          }
-          return cand;
-        }
-
-        for (final p in list) {
-          final node = p.toOutbound(tag: uniqueTag(p.name));
-          final rawChain = p.extra['chain_outbounds'];
-          if (rawChain is List && rawChain.isNotEmpty) {
-            final chainTags = <String>{};
-            for (final hop in rawChain.whereType<Map>()) {
-              final h = normalizeOutboundNode(Map<String, dynamic>.from(hop));
-              final ht = (h['tag'] ?? '').toString().trim();
-              if (ht.isNotEmpty && usedTags.add(ht)) {
-                chainTags.add(ht);
-                out.add(h);
-              }
-            }
-            if (chainTags.isEmpty && !usedTags.contains(node['detour'])) {
-              node.remove('detour');
-            }
-          } else {
-            node.remove('detour');
-          }
-          out.add(node);
-        }
-        return out;
-      }
 
       final prevSubOutboundsJson = jsonEncode(
         buildSubOutboundsForCache(_settings.profiles.where((p) => p.subscriptionId == subId).toList()),
@@ -2749,6 +2802,24 @@ class AppController extends ChangeNotifier {
         }
       }
     }
+    if (sel.isSubscriptionBalancer) {
+      var bestMs = _activeBalancerWinner != null ? (_pings[_activeBalancerWinner!.id] ?? -1) : -1;
+      if (bestMs <= 0) {
+        for (final cand in candidates) {
+          final p = _pings[cand.id] ?? -1;
+          if (p > 0 && (bestMs <= 0 || p < bestMs)) {
+            bestMs = p;
+          }
+        }
+      }
+      if (bestMs > 0) {
+        final prevGroupPing = _pings[sel.id];
+        _pings[sel.id] = bestMs;
+        if (prevGroupPing != bestMs) {
+          _bumpServerRevision(sel.id);
+        }
+      }
+    }
     return _activeBalancerWinner?.id != prevWinnerId;
   }
 
@@ -3469,6 +3540,10 @@ class AppController extends ChangeNotifier {
             _pings[sel.id] = result;
             _bumpServerRevision(sel.id);
           } else {
+            if (sel.isSubscriptionBalancer) {
+              _pings[sel.id] = result;
+              _bumpServerRevision(sel.id);
+            }
             if (_activeBalancerWinner == null && _tunnel.status.isActive) {
               unawaited(bridge.stats().then((st) {
                 if (_syncBalancerTelemetry(st?.balancer) && _activeBalancerWinner != null) {
@@ -4320,13 +4395,12 @@ class AppController extends ChangeNotifier {
     return record.takeBytes();
   }
 
-  /// Проверяет доступность и задержку до сервера профиля.
-  /// Для TLS/Reality-профилей после TCP-рукопожатия отправляет TLS ClientHello
-  /// с фактическим SNI профиля и проверяет приход ServerHello, чтобы выявлять
-  /// фильтрацию и сброс соединения после SYN-ACK на транзитных узлах.
+  /// Проверяет доступность и задержку до сервера профиля или участников балансировщика подписки.
   Future<int> pingProfile(String id, {bool coalesce = false}) async {
     final profile = _settings.profiles.where((p) => p.id == id).firstOrNull;
-    if (profile == null || profile.server.isEmpty) return -1;
+    if (profile == null || (profile.server.isEmpty && !profile.isSubscriptionBalancer)) {
+      return -1;
+    }
     _pingingIds.add(id);
     _bumpServerRevision(id);
     if (!coalesce && _sortByPing) {
@@ -4334,20 +4408,87 @@ class AppController extends ChangeNotifier {
     }
     var result = -1;
     var recordPing = true;
-    Socket? socket;
     try {
-      if (_tunnel.status.isActive && _nodeTelemetry.containsKey(id)) {
-        final tel = _nodeTelemetry[id]!;
-        final anyAlive = _nodeTelemetry.values.any((t) => t.rttMs > 0 && !t.quarantined);
-        if (tel.rttMs > 0 && !tel.quarantined) {
-          result = tel.rttMs;
-          return result;
-        } else if (anyAlive && (tel.quarantined || tel.lossPenaltyMs > 0)) {
-          result = -1;
-          return result;
+      if (profile.isSubscriptionBalancer) {
+        if (_tunnel.status.isActive && _settings.selectedProfileId == id) {
+          final winnerId = _activeBalancerWinner?.id;
+          if (winnerId != null) {
+            final tel = _nodeTelemetry[winnerId];
+            if (tel != null && tel.rttMs > 0 && !tel.quarantined) {
+              result = tel.rttMs;
+            }
+          }
+          if (result < 0) {
+            result = await _probeClashProxyDelay('proxy');
+          }
+        }
+        if (result < 0) {
+          final members = profile.subscriptionBalancerMembers.take(6).toList(growable: false);
+          if (members.isNotEmpty) {
+            final probes = await Future.wait([
+              for (final member in members) _probeSingleProfile(member),
+            ]);
+            var best = -1;
+            for (final probe in probes) {
+              if (probe.rtt > 0 && (best < 0 || probe.rtt < best)) {
+                best = probe.rtt;
+              }
+            }
+            result = best;
+          }
+        }
+      } else {
+        if (_tunnel.status.isActive && _nodeTelemetry.containsKey(id)) {
+          final tel = _nodeTelemetry[id]!;
+          final anyAlive = _nodeTelemetry.values.any((t) => t.rttMs > 0 && !t.quarantined);
+          if (tel.rttMs > 0 && !tel.quarantined) {
+            result = tel.rttMs;
+            return result;
+          } else if (anyAlive && (tel.quarantined || tel.lossPenaltyMs > 0)) {
+            result = -1;
+            return result;
+          }
+        }
+        final probe = await _probeSingleProfile(profile);
+        result = probe.rtt;
+        recordPing = probe.recordPing;
+        if (!recordPing) {
+          _pings.remove(id);
         }
       }
+    } catch (_) {
+      result = -1;
+    } finally {
+      if (result < 0 && _tunnel.status.isActive && (_urlTestPing ?? -1) > 0) {
+        if (_settings.selectedProfileId == id || _activeBalancerWinner?.id == id) {
+          result = _urlTestPing!;
+          recordPing = true;
+        }
+      }
+      if (recordPing) {
+        _pings[id] = result;
+      }
+      _pingingIds.remove(id);
+      _bumpServerRevision(id);
+      if (_settings.balancer.multiServiceEnabled) {
+        _refreshMultiServicePreview();
+      }
+      if (coalesce) {
+        _schedulePingCoalescedNotify();
+      } else if (_sortByPing) {
+        notifyListeners();
+      }
+    }
+    return result;
+  }
 
+  /// Выполняет изолированный замер RTT до одиночного узла (TCP+TLS ClientHello / QUIC / Clash API).
+  Future<({int rtt, bool recordPing})> _probeSingleProfile(Profile profile) async {
+    if (profile.server.isEmpty) return (rtt: -1, recordPing: true);
+    var result = -1;
+    var recordPing = true;
+    Socket? socket;
+    try {
       // Если профиль использует цепочку прокси (detour), проверяем первый входной узел цепочки
       var targetHost = profile.server.trim();
       var targetPort = profile.port;
@@ -4457,10 +4598,8 @@ class AppController extends ChangeNotifier {
       }
 
       if (hopType == 'wireguard') {
-        // WireGuard / AmneziaWG не отвечает без криптографического рукопожатия:
-        // при активном туннеле замеряем через Clash API, а без туннеля не ставим ложный TCP-таймаут.
         if (_tunnel.status.isActive) {
-          final clashTag = _resolveLoadedClashProxyTag(id);
+          final clashTag = _resolveLoadedClashProxyTag(profile.id);
           if (clashTag != null) {
             result = await _probeClashProxyDelay(clashTag);
           }
@@ -4470,7 +4609,6 @@ class AppController extends ChangeNotifier {
             result = -1;
           } else {
             recordPing = false;
-            _pings.remove(id);
           }
         }
       } else if (isQuicProbe && targetAddresses.isNotEmpty) {
@@ -4479,8 +4617,6 @@ class AppController extends ChangeNotifier {
           result = await probeTcpTls();
         }
       } else if (hopType == 'naive' && targetAddresses.isNotEmpty) {
-        // Для NaiveProxy запускаем QUIC (UDP) и TCP+TLS пробу параллельно:
-        // первый успешный ответ побеждает без ожидания таймаута второго стека.
         final completer = Completer<int>();
         var pending = 2;
         void handleProbe(int r) {
@@ -4499,7 +4635,7 @@ class AppController extends ChangeNotifier {
         result = await probeTcpTls();
       }
       if (hopType != 'wireguard' && result < 0 && _tunnel.status.isActive) {
-        final clashTag = _resolveLoadedClashProxyTag(id);
+        final clashTag = _resolveLoadedClashProxyTag(profile.id);
         if (clashTag != null) {
           result = await _probeClashProxyDelay(clashTag);
         }
@@ -4508,35 +4644,19 @@ class AppController extends ChangeNotifier {
       result = -1;
     } finally {
       socket?.destroy();
-      if (result < 0 && _tunnel.status.isActive && (_urlTestPing ?? -1) > 0) {
-        if (_settings.selectedProfileId == id || _activeBalancerWinner?.id == id) {
-          result = _urlTestPing!;
-          recordPing = true;
-        }
-      }
-      if (recordPing) {
-        _pings[id] = result;
-      }
-      _pingingIds.remove(id);
-      _bumpServerRevision(id);
-      if (_settings.balancer.multiServiceEnabled) {
-        _refreshMultiServicePreview();
-      }
-      if (coalesce) {
-        _schedulePingCoalescedNotify();
-      } else if (_sortByPing) {
-        notifyListeners();
-      }
     }
-    return result;
+    return (rtt: result, recordPing: recordPing);
   }
 
   String? _resolveLoadedClashProxyTag(String profileId) {
     final sel = selectedProfile;
     if (sel != null) {
-      if (!sel.id.startsWith('auto:') && sel.type != 'urltest') {
-        if (sel.id == profileId) return 'proxy';
-      } else {
+      if (sel.id == profileId &&
+          ((!sel.id.startsWith('auto:') && sel.type != 'urltest') ||
+              sel.isSubscriptionBalancer)) {
+        return 'proxy';
+      }
+      if (sel.id.startsWith('auto:') || sel.type == 'urltest') {
         final candidates = RuntimeConfig.resolveAutoCandidates(
           sel,
           _settings.visibleProfiles,

@@ -3175,7 +3175,7 @@ class _ProfileTile extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '${profile.fullTransportLabel} · ${profile.server}:${profile.port}$telSuffix',
+                  '${profile.displayMetaLine}$telSuffix',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(

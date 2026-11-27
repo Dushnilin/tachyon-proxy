@@ -2024,7 +2024,9 @@ class _ProfileCard extends StatelessWidget {
                   isAutoBalancer
                       ? (winner != null
                           ? 'Активен: ${winner.name}'
-                          : 'Пул Top-${controller.settings.balancer.pool}')
+                          : (profile.isSubscriptionBalancer
+                              ? 'Узлов: ${profile.subscriptionBalancerMembers.length}'
+                              : 'Пул Top-${controller.settings.balancer.pool}'))
                       : '${profile.server}:${profile.port}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -2302,7 +2304,7 @@ class _DashboardServerTile extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '${profile.fullTransportLabel} · ${profile.server}:${profile.port}',
+                  profile.displayMetaLine,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(

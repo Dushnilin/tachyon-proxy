@@ -2534,6 +2534,420 @@ tun-mtu 1480
       );
     });
   });
+
+  group('балансировщики подписок и .invalid заглушки', () {
+    const parser = LinkParser();
+
+    test('parseEngineNodes сохраняет urltest-группу подписки со скрытыми участниками и отдельный узел', () {
+      final rawNodes = [
+        {
+          'type': 'urltest',
+          'tag': '🇪🇺 Автовыбор',
+          'remark': '🇪🇺 Автовыбор',
+          'url': 'https://cp.cloudflare.com/generate_204',
+          'interval': '3m',
+          'outbounds': ['bal-1-hysteria', 'bal-1-vless'],
+          '__tachyon_allow_group': true,
+        },
+        {
+          'type': 'hysteria2',
+          'tag': 'bal-1-hysteria',
+          'server': 'nl.example.org',
+          'server_port': 31337,
+          'password': 'pw1',
+          'tls': {
+            'enabled': true,
+            'server_name': 'nl.example.org',
+            'alpn': ['h3'],
+          },
+          '__tachyon_hidden': true,
+        },
+        {
+          'type': 'vless',
+          'tag': 'bal-1-vless',
+          'server': 'de.example.org',
+          'server_port': 443,
+          'uuid': 'e3e1a852-b8ed-bc84-a451-577ba0a45ec1',
+          'tls': {'enabled': true, 'server_name': 'de.example.org'},
+          'transport': {'type': 'xhttp', 'mode': 'auto', 'path': '/xh'},
+          '__tachyon_hidden': true,
+        },
+        {
+          'type': 'vless',
+          'tag': '🇫🇮 Финляндия · XHTTP',
+          'server': 'fi.example.org',
+          'server_port': 443,
+          'uuid': 'e3e1a852-b8ed-bc84-a451-577ba0a45ec1',
+          'tls': {'enabled': true, 'server_name': 'fi.example.org'},
+        },
+      ];
+
+      final profiles = parser.parseEngineNodes(
+        rawNodes,
+        ['🇪🇺 Автовыбор', '🇫🇮 Финляндия · XHTTP'],
+        subscriptionId: 'sub-arblaze',
+      );
+      expect(profiles, hasLength(2));
+      final grp = profiles[0];
+      expect(grp.type, 'urltest');
+      expect(grp.name, '🇪🇺 Автовыбор');
+      expect(grp.isSubscriptionBalancer, isTrue);
+      expect(grp.subscriptionBalancerMembers, hasLength(2));
+      expect(grp.subscriptionBalancerMembers.map((m) => m.server).toList(), [
+        'nl.example.org',
+        'de.example.org',
+      ]);
+      expect(grp.displayMetaLine, 'URLTEST · БАЛАНСИРОВЩИК · 2 сервера');
+      expect(profiles[1].name, '🇫🇮 Финляндия · XHTTP');
+      expect(profiles[1].isSubscriptionBalancer, isFalse);
+    });
+
+    test('parseSubscription разбирает Xray JSON массив с routing.balancers, плоскими settings и hysteria gecko', () {
+      const payload = '''
+[
+  {
+    "remarks": "🇩🇪 Германия Авто",
+    "routing": {
+      "balancers": [{ "tag": "b1", "selector": ["bal-de-"] }]
+    },
+    "burstObservatory": {
+      "pingConfig": { "destination": "https://example.org/204", "interval": "2m" }
+    },
+    "outbounds": [
+      {
+        "tag": "bal-de-hy2",
+        "protocol": "hysteria",
+        "settings": { "address": "de-hy.example.org", "port": 31337, "version": 2 },
+        "streamSettings": {
+          "network": "hysteria",
+          "security": "tls",
+          "tlsSettings": { "serverName": "de-hy.example.org", "alpn": ["h3"] },
+          "hysteriaSettings": { "auth": "pw-de", "version": 2 },
+          "finalmask": {
+            "udp": [{
+              "type": "salamander",
+              "settings": { "password": "obfs-pw", "packetSize": "512-1200" }
+            }]
+          }
+        }
+      },
+      {
+        "tag": "bal-de-vless",
+        "protocol": "vless",
+        "settings": {
+          "address": "de-vless.example.org",
+          "port": 443,
+          "id": "e3e1a852-b8ed-bc84-a451-577ba0a45ec1",
+          "encryption": "none"
+        },
+        "streamSettings": {
+          "network": "xhttp",
+          "security": "tls",
+          "tlsSettings": { "serverName": "de-vless.example.org" },
+          "xhttpSettings": { "path": "/xh", "mode": "auto" }
+        }
+      }
+    ]
+  },
+  {
+    "remarks": "🇳🇱 Нидерланды Авто",
+    "routing": {
+      "balancers": [{ "tag": "b1", "selector": ["bal-nl-"] }]
+    },
+    "outbounds": [
+      {
+        "tag": "bal-nl-h1",
+        "protocol": "hysteria",
+        "settings": { "address": "nl-1.example.org", "port": 443, "version": 2 },
+        "streamSettings": {
+          "network": "hysteria",
+          "security": "tls",
+          "hysteriaSettings": { "auth": "pw-nl", "version": 2 }
+        }
+      },
+      {
+        "tag": "bal-nl-h2",
+        "protocol": "trojan",
+        "settings": { "address": "nl-2.example.org", "port": 443, "password": "tr-pw" },
+        "streamSettings": { "security": "tls", "tlsSettings": { "serverName": "nl-2.example.org" } }
+      }
+    ]
+  }
+]
+''';
+      final profiles = parser.parseSubscription(payload, subscriptionId: 'sub1');
+      expect(profiles, hasLength(2));
+      expect(profiles.every((p) => p.isSubscriptionBalancer), isTrue);
+      expect(profiles[0].name, '🇩🇪 Германия Авто');
+      expect(profiles[0].extra['urltest_url'], 'https://example.org/204');
+      expect(profiles[0].subscriptionBalancerMembers, hasLength(2));
+      expect(profiles[0].subscriptionBalancerMembers[0].type, 'hysteria2');
+      expect(profiles[0].subscriptionBalancerMembers[0].password, 'pw-de');
+      expect(profiles[0].subscriptionBalancerMembers[0].extra['obfs']['type'], 'gecko');
+      expect(profiles[1].name, '🇳🇱 Нидерланды Авто');
+      expect(
+        profiles[1].subscriptionBalancerMembers.map((m) => m.server).toList(),
+        ['nl-1.example.org', 'nl-2.example.org'],
+      );
+    });
+
+    test('отсев .invalid, invalid и 0.0.0.0 заглушек в URI, JSON и bodyHasInvalidStubHost', () {
+      const uriBundle =
+          'vless://11111111-2222-3333-4444-555555555555@super-auto.invalid:4659?security=tls#Auto-Stub\n'
+          'vless://11111111-2222-3333-4444-555555555555@invalid:443?security=tls#Bare-Invalid\n'
+          'vless://11111111-2222-3333-4444-555555555555@0.0.0.0:443?security=tls#Zero-IP\n'
+          'vless://11111111-2222-3333-4444-555555555555@127.0.0.1:1080#Обновите клиент!\n'
+          'vless://11111111-2222-3333-4444-555555555555@valid.example.org:443?security=tls#Valid\n';
+
+      expect(LinkParser.bodyHasInvalidStubHost(uriBundle), isTrue);
+      expect(LinkParser.bodyHasInvalidStubHost(base64Encode(utf8.encode(uriBundle))), isTrue);
+      expect(
+        LinkParser.bodyHasInvalidStubHost(
+          'vless://11111111-2222-3333-4444-555555555555@valid.example.org:443#Valid',
+        ),
+        isFalse,
+      );
+
+      final parsedUri = parser.parseSubscription(uriBundle);
+      expect(parsedUri, hasLength(1));
+      expect(parsedUri.single.server, 'valid.example.org');
+
+      const jsonBundle = '''
+[
+  {"type":"vless","tag":"Stub","server":"node.invalid","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555"},
+  {"type":"vless","tag":"Good","server":"ok.example.org","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555"}
+]
+''';
+      expect(LinkParser.bodyHasInvalidStubHost(jsonBundle), isTrue);
+      final parsedJson = parser.parseSubscription(jsonBundle);
+      expect(parsedJson, hasLength(1));
+      expect(parsedJson.single.server, 'ok.example.org');
+    });
+
+    test('RuntimeConfig.toJson строит proxy, serviceRoutes (profile:) и auto:<subId> для балансировщиков подписки', () {
+      const m1 = Profile(
+        id: 'm1',
+        name: 'Member-1',
+        type: 'vless',
+        server: 'm1.example.org',
+        port: 443,
+        uuid: 'u1',
+        subscriptionId: 'sub-bal',
+      );
+      const m2 = Profile(
+        id: 'm2',
+        name: 'Member-2',
+        type: 'hysteria2',
+        server: 'm2.example.org',
+        port: 8443,
+        password: 'pw2',
+        subscriptionId: 'sub-bal',
+      );
+      final balMain = Profile(
+        id: 'urltest-de',
+        name: '🇩🇪 Германия Авто',
+        type: 'urltest',
+        server: 'balancer',
+        port: 0,
+        subscriptionId: 'sub-bal',
+        extra: {
+          'urltest_members': [m1.toJson(), m2.toJson()],
+          'urltest_url': 'https://custom.example.org/204',
+        },
+      );
+      final balPinned = Profile(
+        id: 'urltest-nl',
+        name: '🇳🇱 Нидерланды Авто',
+        type: 'urltest',
+        server: 'balancer',
+        port: 0,
+        subscriptionId: 'sub-bal',
+        extra: {
+          'urltest_members': [m1.toJson(), m2.toJson()],
+        },
+      );
+
+      final cfgDirect = RuntimeConfig(
+        profile: balMain,
+        routingMode: RoutingMode.rules,
+        ruleSets: const [],
+        extraProfiles: [balMain, balPinned],
+        serviceRoutes: const {'youtube': 'profile:urltest-nl'},
+        dns: const DnsSettings(bootstrap: ['77.88.8.8'], servers: ['77.88.8.8']),
+      ).toJson();
+
+      final outbounds = (cfgDirect['outbounds'] as List).cast<Map<String, dynamic>>();
+      final proxy = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      expect(proxy['type'], 'urltest');
+      expect(proxy['url'], 'https://custom.example.org/204');
+      expect(proxy['outbounds'], ['auto-srv-0', 'auto-srv-1']);
+      expect(outbounds.any((o) => o['server'] == 'balancer'), isFalse);
+
+      final dedicated = outbounds.firstWhere((o) => o['tag'] == 'srv-urltest-nl');
+      expect(dedicated['type'], 'urltest');
+      expect(dedicated['outbounds'], ['srv-urltest-nl-m-0', 'srv-urltest-nl-m-1']);
+
+      final cfgAuto = RuntimeConfig(
+        profile: const Profile(
+          id: 'auto:sub-bal',
+          name: 'Авто',
+          type: 'urltest',
+          server: 'auto',
+          port: 0,
+          subscriptionId: 'sub-bal',
+        ),
+        routingMode: RoutingMode.rules,
+        ruleSets: const [],
+        extraProfiles: [balMain, balPinned],
+        subscriptions: const [
+          SubscriptionEntry(id: 'sub-bal', url: 'https://example.org/sub', name: 'SubBal'),
+        ],
+        dns: const DnsSettings(bootstrap: ['77.88.8.8'], servers: ['77.88.8.8']),
+      ).toJson();
+      final autoProxy = (cfgAuto['outbounds'] as List)
+          .cast<Map<String, dynamic>>()
+          .firstWhere((o) => o['tag'] == 'proxy');
+      expect(autoProxy['type'], 'urltest');
+      expect(autoProxy['outbounds'], ['auto-srv-0', 'auto-srv-1']);
+    });
+
+    test('fetchSubscription переключается на Happ/4.6.2 при .invalid заглушке и pingProfile пингует участников балансировщика', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final tmpDir = await Directory.systemTemp.createTemp('tachyon_sub_bal_test_');
+      addTearDown(() async {
+        if (await tmpDir.exists()) {
+          await tmpDir.delete(recursive: true);
+        }
+      });
+
+      final targetSocket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(targetSocket.close);
+      final sub1 = targetSocket.listen((client) => client.destroy());
+      addTearDown(sub1.cancel);
+
+      final tmpClosed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final deadPort = tmpClosed.port;
+      await tmpClosed.close();
+
+      final requestedUas = <String>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(server.close);
+      final subHttp = server.listen((HttpRequest req) async {
+        final ua = req.headers.value('user-agent') ?? '';
+        requestedUas.add(ua);
+        req.response.statusCode = 200;
+        if (ua.toLowerCase().startsWith('happ/')) {
+          req.response.write(jsonEncode([
+            {
+              'remarks': '🇩🇪 Германия Авто',
+              'routing': {
+                'balancers': [
+                  {
+                    'tag': 'b-de',
+                    'selector': ['bal-de-'],
+                  },
+                ],
+              },
+              'outbounds': [
+                {
+                  'tag': 'bal-de-dead',
+                  'protocol': 'vless',
+                  'settings': {
+                    'address': '127.0.0.1',
+                    'port': deadPort,
+                    'id': '11111111-2222-3333-4444-555555555555',
+                    'encryption': 'none',
+                  },
+                  'streamSettings': {'security': 'none'},
+                },
+                {
+                  'tag': 'bal-de-live',
+                  'protocol': 'vless',
+                  'settings': {
+                    'address': '127.0.0.1',
+                    'port': targetSocket.port,
+                    'id': '11111111-2222-3333-4444-555555555555',
+                    'encryption': 'none',
+                  },
+                  'streamSettings': {'security': 'none'},
+                },
+              ],
+            },
+          ]));
+        } else {
+          final stubBundle =
+              'vless://11111111-2222-3333-4444-555555555555@super-auto.invalid:4659?security=tls#Автовыбор\n'
+              'vless://11111111-2222-3333-4444-555555555555@fallback.example.org:443?security=tls#Fallback';
+          req.response.write(base64Encode(utf8.encode(stubBundle)));
+        }
+        await req.response.close();
+      });
+      addTearDown(subHttp.cancel);
+
+      const vpnChannel = MethodChannel('app.tachyon.proxy/vpn');
+      const eventsChannel = MethodChannel('app.tachyon.proxy/events');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(vpnChannel, (call) async {
+        return switch (call.method) {
+          'status' => <String, dynamic>{'status': 'disconnected', 'error': '', 'server': ''},
+          'filesDir' => tmpDir.path,
+          'networkInfo' => 'wifi',
+          'wifiInfo' => <String, dynamic>{'ssid': '', 'isWifi': false},
+          'fetchSubscription' => '{"ok":false,"error":"native disabled"}',
+          'parseSubscription' => '{"ok":false,"error":"native disabled"}',
+          _ => null,
+        };
+      });
+      messenger.setMockMethodCallHandler(eventsChannel, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(vpnChannel, null);
+        messenger.setMockMethodCallHandler(eventsChannel, null);
+      });
+
+      final prevOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = prevOverrides);
+
+      final store = SettingsStore(directory: tmpDir.path);
+      final subUrl = 'http://127.0.0.1:${server.port}/sub';
+      await store.save(
+        AppSettings(
+          dns: DnsSettings(checkedAt: DateTime.now().millisecondsSinceEpoch),
+          subscriptions: [
+            SubscriptionEntry(
+              id: 'sub1',
+              name: 'Тест',
+              url: subUrl,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          ],
+        ),
+      );
+
+      final controller = AppController(
+        store: store,
+        bridge: CoreBridge.instance,
+        lists: ListsRepository(directory: tmpDir.path),
+      );
+      addTearDown(controller.dispose);
+      await controller.bootstrap();
+
+      final count = await controller.fetchSubscription('sub1');
+      expect(count, 1);
+      expect(requestedUas.length, greaterThanOrEqualTo(2));
+      expect(requestedUas.any((u) => u == 'Happ/4.6.2'), isTrue);
+      expect(controller.settings.profiles.any((p) => p.server.contains('invalid')), isFalse);
+
+      final grp = controller.settings.profiles.single;
+      expect(grp.isSubscriptionBalancer, isTrue);
+      expect(grp.name, '🇩🇪 Германия Авто');
+      expect(grp.subscriptionBalancerMembers, hasLength(2));
+
+      final rtt = await controller.pingProfile(grp.id);
+      expect(rtt, greaterThanOrEqualTo(0));
+      expect(controller.pingOf(grp.id), rtt);
+    });
+  });
 }
 
 DnsResult _result(

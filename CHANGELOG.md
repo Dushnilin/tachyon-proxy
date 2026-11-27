@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6]
+
+### Исправления
+- **Балансировщики на стороне подписки (`urltest`)**: `LinkParser.parseEngineNodes`, `RuntimeConfig`, кэш `subs/<id>.txt` и UI (`HomeTab`, `ProfilesTab`) сохраняют группы `urltest` со скрытыми участниками (`urltest_members`) и разворачивают их для основного прокси, правил `profile:` и `auto:`.
+- **Пинг балансировщиков**: `AppController.pingProfile` измеряет задержку участников `urltest`-группы (или берёт RTT активного узла через Clash API при запущенном туннеле), обновляя телеметрию в списке серверов.
+- **Фильтрация заглушек `.invalid` и профиль `Happ/4.6.2`**: `LinkParser` и `AppController.dedupProfiles` отсеивают узлы-заглушки (`.invalid`, `invalid`, `0.0.0.0`, `::`, `127.0.0.1` с маркерами неподдерживаемого клиента), а HTTP-каскад `fetchSubscription` при обнаружении `.invalid` в ответе продолжает перебор до `Happ/4.6.2`.
+- **Xray JSON парсер**: добавлена поддержка `routing.balancers`, плоских полей `settings` (`vless`, `vmess`, `trojan`, `shadowsocks`), протокола `hysteria` v2 (`hysteriaSettings.auth` и `finalmask.udp` `gecko`/`salamander`) и дедупликации тегов в массивах конфигураций.
+
 ## [0.1.5]
 
 ### Изменения

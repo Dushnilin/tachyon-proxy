@@ -1,6 +1,46 @@
 import 'dart:convert';
 import 'dart:io';
 
+/// Проверяет, является ли сервер заглушкой/нерабочим плейсхолдером
+/// (`.invalid`, `invalid`, `0.0.0.0`, `::`, пустой хост, нулевой/фиктивный порт).
+bool isDummyOrStubServer(
+  String server,
+  int port, {
+  bool hasServerPorts = false,
+  bool allowPortZero = false,
+}) {
+  var host = server.trim().toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']') && host.length >= 2) {
+    host = host.substring(1, host.length - 1).trim();
+  }
+  while (host.endsWith('.')) {
+    host = host.substring(0, host.length - 1);
+  }
+  if (host.isEmpty) return true;
+  if (host == '0.0.0.0' ||
+      host == '0.0.0.1' ||
+      host == '::' ||
+      host == '0:0:0:0:0:0:0:0' ||
+      host == 'invalid' ||
+      host == 'example.invalid' ||
+      host.endsWith('.invalid')) {
+    return true;
+  }
+  if (!allowPortZero && !hasServerPorts && (port == 0 || port == 1)) {
+    return true;
+  }
+  return false;
+}
+
+bool _hasPortRangesInMap(Map<String, dynamic> map) {
+  for (final key in const ['server_ports', 'listen_ports']) {
+    final v = map[key];
+    if (v is List && v.isNotEmpty) return true;
+    if (v is String && v.trim().isNotEmpty) return true;
+  }
+  return false;
+}
+
 /// Профиль подключения: сервер и параметры исходящего соединения.
 ///
 /// Минимальный набор MVP — `vless` и `shadowsocks`: оба умещаются в одну
@@ -61,6 +101,52 @@ class Profile {
   String get networkScope {
     final raw = (extra['network_scope'] as String?)?.trim().toLowerCase() ?? '';
     return (raw == 'wifi' || raw == 'cellular') ? raw : 'all';
+  }
+
+  /// Участники `urltest`-балансировщика, импортированного со стороны подписки.
+  List<Profile> get subscriptionBalancerMembers {
+    final raw = extra['urltest_members'];
+    if (raw is! List || raw.isEmpty) return const [];
+    final out = <Profile>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final p = Profile.fromJson(Map<String, dynamic>.from(item));
+      if (p.type == 'urltest') continue;
+      final skipStub = p.type != 'tailscale' &&
+          p.extra['token'] == null &&
+          isDummyOrStubServer(
+            p.server,
+            p.port,
+            hasServerPorts: _hasPortRangesInMap(p.extra),
+          );
+      if (skipStub) continue;
+      out.add(p);
+    }
+    return out;
+  }
+
+  /// Является ли профиль готовым `urltest`-балансировщиком из подписки.
+  bool get isSubscriptionBalancer =>
+      type == 'urltest' &&
+      !id.startsWith('auto:') &&
+      subscriptionBalancerMembers.isNotEmpty;
+
+  static String _pluralServers(int count) {
+    final mod10 = count % 10;
+    final mod100 = count % 100;
+    if (mod10 == 1 && mod100 != 11) return '$count сервер';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+      return '$count сервера';
+    }
+    return '$count серверов';
+  }
+
+  /// Короткая строка с протоколом и адресом для списков серверов.
+  String get displayMetaLine {
+    if (isSubscriptionBalancer) {
+      return 'URLTEST · БАЛАНСИРОВЩИК · ${_pluralServers(subscriptionBalancerMembers.length)}';
+    }
+    return '$fullTransportLabel · $server:$port';
   }
 
   bool get isReality =>
@@ -537,7 +623,17 @@ class Profile {
     cleanExtra
       ..remove('pcs')
       ..remove('chain_outbounds')
-      ..remove('network_scope');
+      ..remove('network_scope')
+      ..remove('urltest_members')
+      ..remove('urltest_url')
+      ..remove('urltest_interval');
+    if (type == 'urltest') {
+      return {
+        'type': 'urltest',
+        'tag': tag,
+        'outbounds': const <String>[],
+      };
+    }
     final certSha256Pins = sanitizeCertificateSha256Pins(
       cleanExtra.remove('certificate_sha256'),
     );
@@ -3058,6 +3154,10 @@ class RuntimeConfig {
     if (profile.type != 'urltest' && !profile.id.startsWith('auto:')) {
       return const <Profile>[];
     }
+    final embeddedMembers = profile.subscriptionBalancerMembers;
+    if (embeddedMembers.isNotEmpty) {
+      return embeddedMembers.take(256).toList(growable: false);
+    }
     final subById = <String, SubscriptionEntry>{
       for (final s in subscriptions)
         if (s.id.isNotEmpty) s.id: s,
@@ -3065,18 +3165,58 @@ class RuntimeConfig {
     final targetSub =
         profile.subscriptionId.isNotEmpty ? subById[profile.subscriptionId] : null;
 
-    final basePool = extraProfiles
+    bool matchesSubScope(Profile p) {
+      if (profile.subscriptionId.isEmpty) return true;
+      if (targetSub != null && targetSub.isCombinedGroup) {
+        return targetSub.containsProfile(p);
+      }
+      return p.subscriptionId == profile.subscriptionId;
+    }
+
+    var basePool = extraProfiles
         .where((p) {
           if (p.server.isEmpty || p.type == 'urltest' || p.type == 'direct') {
             return false;
           }
-          if (profile.subscriptionId.isEmpty) return true;
-          if (targetSub != null && targetSub.isCombinedGroup) {
-            return targetSub.containsProfile(p);
-          }
-          return p.subscriptionId == profile.subscriptionId;
+          return matchesSubScope(p);
         })
         .toList(growable: false);
+    if (basePool.isEmpty) {
+      final fallback = <Profile>[];
+      final seen = <String>{};
+      for (final p in extraProfiles) {
+        if (!p.isSubscriptionBalancer || !matchesSubScope(p)) continue;
+        for (final m in p.subscriptionBalancerMembers) {
+          final key = '${m.type}|${m.server}|${m.port}|${m.uuid}|${m.password}';
+          if (seen.add(key)) {
+            fallback.add(
+              m.subscriptionId.isEmpty && p.subscriptionId.isNotEmpty
+                  ? Profile(
+                      id: m.id,
+                      name: m.name,
+                      type: m.type,
+                      server: m.server,
+                      port: m.port,
+                      uuid: m.uuid,
+                      password: m.password,
+                      method: m.method,
+                      transport: m.transport,
+                      sni: m.sni,
+                      alpn: m.alpn,
+                      allowInsecure: m.allowInsecure,
+                      flow: m.flow,
+                      publicKey: m.publicKey,
+                      shortId: m.shortId,
+                      subscriptionId: p.subscriptionId,
+                      extra: m.extra,
+                    )
+                  : m,
+            );
+          }
+        }
+      }
+      basePool = fallback;
+    }
     if (basePool.isEmpty) return const <Profile>[];
 
     // 1. Применяем фильтры исключения стран, протоколов и регулярных выражений (подписки + объединённой группы + глобального балансировщика)
@@ -3188,6 +3328,23 @@ class RuntimeConfig {
     }
 
     void registerDedicatedProfile(Profile p, String tag) {
+      if (p.isSubscriptionBalancer) {
+        if (dedicatedOutbounds.containsKey(tag)) return;
+        final members = p.subscriptionBalancerMembers;
+        final memberTags = <String>[];
+        for (var i = 0; i < members.length; i++) {
+          final mTag = '$tag-m-$i';
+          registerDedicatedProfile(members[i], mTag);
+          memberTags.add(mTag);
+        }
+        final urlOverride = p.extra['urltest_url']?.toString().trim();
+        dedicatedOutbounds[tag] = balancer.toUrltestOutbound(
+          tag: tag,
+          outbounds: memberTags,
+          urlOverride: (urlOverride != null && urlOverride.isNotEmpty) ? urlOverride : null,
+        );
+        return;
+      }
       final isEp = p.isEndpoint;
       if (!isEp && dedicatedOutbounds.containsKey(tag)) return;
       if (isEp && dedicatedEndpoints.containsKey(tag)) return;
@@ -3246,7 +3403,7 @@ class RuntimeConfig {
       if (target.startsWith('profile:')) {
         final profId = target.substring('profile:'.length);
         for (final p in extraProfiles) {
-          if (p.id == profId && p.server.isNotEmpty) {
+          if (p.id == profId && (p.server.isNotEmpty || p.isSubscriptionBalancer)) {
             final tag = 'srv-${p.id}';
             registerDedicatedProfile(p, tag);
             return tag;
@@ -3686,6 +3843,10 @@ class RuntimeConfig {
         balancer.toUrltestOutbound(
           tag: 'proxy',
           outbounds: autoMemberTags,
+          urlOverride: profile.isSubscriptionBalancer &&
+                  (profile.extra['urltest_url']?.toString().trim().isNotEmpty ?? false)
+              ? profile.extra['urltest_url'].toString().trim()
+              : null,
         ),
         for (final svcId in activeMultiServiceIds)
           balancer.toUrltestOutbound(

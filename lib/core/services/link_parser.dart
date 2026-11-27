@@ -110,8 +110,119 @@ class LinkParser {
     return const [];
   }
 
-  /// Конвертирует узлы `nodes` и `primary_tags`, разобранные нативным движком `tachyon-core`,
-  /// в список `Profile` с сохранением транзитных цепочек `detour` (`chain_outbounds`).
+  static const List<String> _stubTagMarkers = [
+    'клиент не поддерживается',
+    'не поддерживается',
+    'неподдерживаем',
+    'unsupported client',
+    'client not supported',
+    'client is not supported',
+    'unsupported',
+    'client not allowed',
+    'обновите клиент',
+    'обновите приложение',
+    'update your client',
+    'update client',
+    'update app',
+    'скачать happ',
+    'скачайте happ',
+    'download happ',
+    'используйте happ',
+  ];
+
+  static bool _isUnsupportedStubTag(String tag) {
+    final lower = tag.trim().toLowerCase();
+    if (lower.isEmpty) return false;
+    return _stubTagMarkers.any(lower.contains);
+  }
+
+  static bool _hasMapServerPorts(Map<String, dynamic> map) {
+    for (final key in const ['server_ports', 'listen_ports']) {
+      final v = map[key];
+      if (v is List && v.isNotEmpty) return true;
+      if (v is String && v.trim().isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  static bool _isStubProfile(Profile p) {
+    if (p.type == 'urltest' || p.type == 'tailscale' || p.extra['token'] != null) {
+      return false;
+    }
+    final hasPorts = _hasMapServerPorts(p.extra);
+    if (isDummyOrStubServer(p.server, p.port, hasServerPorts: hasPorts)) {
+      return true;
+    }
+    final lowerHost = p.server.trim().toLowerCase();
+    if ((lowerHost == '127.0.0.1' || lowerHost == 'localhost') &&
+        _isUnsupportedStubTag(p.name)) {
+      return true;
+    }
+    return false;
+  }
+
+  static String _normalizeBase64Static(String value) {
+    var cleaned = value
+        .replaceAll(RegExp(r'[^A-Za-z0-9+/=_-]'), '')
+        .replaceAll('-', '+')
+        .replaceAll('_', '/');
+    final padding = cleaned.length % 4;
+    if (padding == 1) return '';
+    if (padding != 0) {
+      cleaned = cleaned.padRight(cleaned.length + (4 - padding), '=');
+    }
+    return cleaned;
+  }
+
+  /// Проверяет, содержит ли сырой или Base64-кодированный ответ подписки заглушки `.invalid` / `invalid`.
+  static bool bodyHasInvalidStubHost(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return false;
+
+    final uriRe = RegExp(
+      r'@(?:invalid|[^\s/:?#]+\.invalid)\.?(?:[:/?#\s]|$)',
+      caseSensitive: false,
+    );
+    final jsonRe = RegExp(
+      r'"(?:address|server|host)"\s*:\s*"(?:invalid|[^"\s]+\.invalid)\.?"',
+      caseSensitive: false,
+    );
+    final yamlRe = RegExp(
+      r'''(?:^|\n)\s*(?:server|address)\s*:\s*["']?(?:invalid|[^\s,"']+\.invalid)\.?["']?''',
+      caseSensitive: false,
+      multiLine: true,
+    );
+
+    bool checkText(String text) =>
+        uriRe.hasMatch(text) || jsonRe.hasMatch(text) || yamlRe.hasMatch(text);
+
+    if (checkText(trimmed)) return true;
+
+    if (!trimmed.contains('{') && !trimmed.contains('[') && !trimmed.contains('://')) {
+      final norm = _normalizeBase64Static(trimmed);
+      if (norm.isNotEmpty) {
+        try {
+          final decoded = utf8.decode(base64.decode(norm), allowMalformed: true);
+          if (checkText(decoded)) return true;
+        } catch (_) {}
+      }
+    }
+    return false;
+  }
+
+  static String _deduplicateTag(String base, Set<String> used) {
+    final clean = base.trim().isEmpty ? 'node' : base.trim();
+    if (!used.contains(clean)) return clean;
+    var n = 2;
+    while (used.contains('$clean #$n')) {
+      n++;
+    }
+    return '$clean #$n';
+  }
+
+  /// Конвертирует узлы `nodes` и `primary_tags`, разобранные нативным движком `tachyon-core`
+  /// или внутренним JSON-парсером, в список `Profile` с сохранением цепочек `detour`
+  /// (`chain_outbounds`) и групп балансировщиков `urltest` (`urltest_members`).
   List<Profile> parseEngineNodes(
     List<dynamic> rawNodes,
     List<dynamic> rawPrimaryTags, {
@@ -125,30 +236,28 @@ class LinkParser {
       nodes.add(map);
       final tag = (map['tag'] ?? '').toString().trim();
       if (tag.isNotEmpty) {
-        byTag[tag] = map;
+        byTag.putIfAbsent(tag, () => map);
       }
     }
     if (nodes.isEmpty) return const [];
 
-    final primarySet = rawPrimaryTags
-        .map((e) => e.toString().trim())
-        .where((s) => s.isNotEmpty)
-        .toSet();
-
-    final primaryNodes = primarySet.isNotEmpty
-        ? nodes.where((n) => primarySet.contains((n['tag'] ?? '').toString().trim())).toList()
-        : nodes;
-
-    final out = <Profile>[];
-    for (final rawNode in primaryNodes) {
-      final mainNode = Map<String, dynamic>.from(rawNode);
+    Profile? buildSingleNode(Map<String, dynamic> rawNode) {
+      final ty = (rawNode['type'] ?? '').toString().trim().toLowerCase();
+      if (ty == 'urltest') return null;
+      final mainNode = Map<String, dynamic>.from(rawNode)
+        ..remove('__tachyon_hidden')
+        ..remove('__tachyon_allow_group')
+        ..remove('remark');
       final firstHopTag = (mainNode['detour'] ?? '').toString().trim();
       if (firstHopTag.isNotEmpty && byTag.containsKey(firstHopTag)) {
         final chainOutbounds = <Map<String, dynamic>>[];
         final visited = <String>{};
         var currTag = firstHopTag;
         while (currTag.isNotEmpty && byTag.containsKey(currTag) && visited.add(currTag)) {
-          final hop = Map<String, dynamic>.from(byTag[currTag]!);
+          final hop = Map<String, dynamic>.from(byTag[currTag]!)
+            ..remove('__tachyon_hidden')
+            ..remove('__tachyon_allow_group')
+            ..remove('remark');
           chainOutbounds.add(hop);
           final nextTag = (hop['detour'] ?? '').toString().trim();
           if (nextTag.isNotEmpty && byTag.containsKey(nextTag)) {
@@ -160,9 +269,134 @@ class LinkParser {
         }
         if (chainOutbounds.isNotEmpty) {
           mainNode['chain_outbounds'] = chainOutbounds;
+        } else {
+          mainNode.remove('detour');
+        }
+      } else if (firstHopTag.isNotEmpty &&
+          !(mainNode['chain_outbounds'] is List &&
+              (mainNode['chain_outbounds'] as List).isNotEmpty)) {
+        mainNode.remove('detour');
+      }
+      return _outboundMapToProfile(mainNode, subscriptionId: subscriptionId);
+    }
+
+    final primarySet = rawPrimaryTags
+        .map((e) => e.toString().trim())
+        .where((s) => s.isNotEmpty)
+        .toSet();
+
+    final List<Map<String, dynamic>> primaryNodes;
+    if (primarySet.isNotEmpty) {
+      primaryNodes = nodes
+          .where((n) => primarySet.contains((n['tag'] ?? '').toString().trim()))
+          .toList(growable: false);
+    } else {
+      final detourTargets = <String>{
+        for (final n in nodes)
+          if ((n['detour'] ?? '').toString().trim().isNotEmpty)
+            n['detour'].toString().trim(),
+      };
+      final urltestMembers = <String>{
+        for (final n in nodes)
+          if ((n['type'] ?? '').toString().toLowerCase() == 'urltest' && n['outbounds'] is List)
+            for (final m in n['outbounds'] as List)
+              if (m.toString().trim().isNotEmpty) m.toString().trim(),
+      };
+      final computed = nodes.where((n) {
+        if (n['__tachyon_hidden'] == true) return false;
+        final t = (n['tag'] ?? '').toString().trim();
+        return t.isEmpty || (!detourTargets.contains(t) && !urltestMembers.contains(t));
+      }).toList(growable: false);
+      primaryNodes = computed.isNotEmpty ? computed : nodes;
+    }
+
+    void collectGroupMembers(
+      Map<String, dynamic> groupNode,
+      Set<String> visitedTags,
+      List<Profile> membersOut,
+    ) {
+      final rawMembers = groupNode['outbounds'];
+      if (rawMembers is! List) return;
+      for (final rawMember in rawMembers) {
+        final mTag = rawMember.toString().trim();
+        if (mTag.isEmpty || !visitedTags.add(mTag)) continue;
+        final target = byTag[mTag];
+        if (target == null) continue;
+        final targetTy = (target['type'] ?? '').toString().trim().toLowerCase();
+        if (targetTy == 'urltest') {
+          collectGroupMembers(target, visitedTags, membersOut);
+        } else {
+          final prof = buildSingleNode(target);
+          if (prof != null) membersOut.add(prof);
         }
       }
-      final profile = _outboundMapToProfile(mainNode, subscriptionId: subscriptionId);
+    }
+
+    final out = <Profile>[];
+    for (final rawNode in primaryNodes) {
+      final ty = (rawNode['type'] ?? '').toString().trim().toLowerCase();
+      if (ty == 'urltest') {
+        final visitedTags = <String>{
+          if ((rawNode['tag'] ?? '').toString().trim().isNotEmpty)
+            rawNode['tag'].toString().trim(),
+        };
+        final members = <Profile>[];
+        collectGroupMembers(rawNode, visitedTags, members);
+        if (members.isEmpty) continue;
+
+        final groupName = (rawNode['remark'] ?? rawNode['tag'] ?? '').toString().trim();
+        if (members.length == 1) {
+          final only = members.first;
+          if (groupName.isNotEmpty && groupName != only.name) {
+            out.add(Profile(
+              id: only.id,
+              name: groupName,
+              type: only.type,
+              server: only.server,
+              port: only.port,
+              uuid: only.uuid,
+              password: only.password,
+              method: only.method,
+              transport: only.transport,
+              sni: only.sni,
+              alpn: only.alpn,
+              allowInsecure: only.allowInsecure,
+              flow: only.flow,
+              publicKey: only.publicKey,
+              shortId: only.shortId,
+              subscriptionId: only.subscriptionId,
+              extra: only.extra,
+            ));
+          } else {
+            out.add(only);
+          }
+          continue;
+        }
+
+        final effectiveName =
+            groupName.isNotEmpty ? groupName : 'Автовыбор (${members.length})';
+        final url = (rawNode['url'] ?? '').toString().trim();
+        final interval = (rawNode['interval'] ?? '').toString().trim();
+        final memberSeed = members.map((m) => m.id).join(',');
+        out.add(
+          Profile(
+            id: _id('urltest', '$effectiveName:$memberSeed'),
+            name: effectiveName,
+            type: 'urltest',
+            server: 'balancer',
+            port: 0,
+            subscriptionId: subscriptionId,
+            extra: {
+              'urltest_members': members.map((m) => m.toJson()).toList(growable: false),
+              if (url.isNotEmpty) 'urltest_url': url,
+              if (interval.isNotEmpty) 'urltest_interval': interval,
+            },
+          ),
+        );
+        continue;
+      }
+
+      final profile = buildSingleNode(rawNode);
       if (profile != null) {
         out.add(profile);
       }
@@ -172,6 +406,12 @@ class LinkParser {
 
   /// Разбирает одну ссылку или одиночный JSON-объект.
   Profile? parse(String link, {String subscriptionId = ''}) {
+    final p = _parseRaw(link, subscriptionId: subscriptionId);
+    if (p == null || _isStubProfile(p)) return null;
+    return p;
+  }
+
+  Profile? _parseRaw(String link, {String subscriptionId = ''}) {
     final value = link.trim().replaceFirst('\uFEFF', '');
     if (value.isEmpty) return null;
 
@@ -2613,11 +2853,7 @@ class LinkParser {
     try {
       final decoded = jsonDecode(raw);
       final outbounds = _extractOutboundsFromJson(decoded);
-      final profiles = <Profile>[];
-      for (final item in outbounds) {
-        final p = _outboundMapToProfile(item, subscriptionId: subscriptionId);
-        if (p != null) profiles.add(p);
-      }
+      final profiles = parseEngineNodes(outbounds, const [], subscriptionId: subscriptionId);
       if (profiles.isNotEmpty) return profiles;
       if (decoded is Map) {
         const strKeys = [
@@ -2657,10 +2893,12 @@ class LinkParser {
     if (depth > 4) return const [];
     if (val is List) {
       final res = <Map<String, dynamic>>[];
+      final seenTags = <String>{};
       for (var i = 0; i < val.length; i++) {
         final item = val[i];
         if (item is! Map) continue;
         final map = Map<String, dynamic>.from(item);
+        final startIdx = res.length;
         if (map.containsKey('protocol')) {
           res.addAll(_convertXrayOutbound(i, map));
         } else if (map['type'] is String &&
@@ -2671,14 +2909,54 @@ class LinkParser {
           if (converted != null) res.add(converted);
         } else if (map['type'] is String) {
           final ty = (map['type'] as String).toLowerCase();
-          if (!const {'direct', 'block', 'dns', 'selector', 'urltest'}.contains(ty)) {
+          if (!const {'direct', 'block', 'dns', 'selector'}.contains(ty)) {
             res.add(map);
           }
         } else if (map['outbounds'] is List || map['endpoints'] is List) {
-          res.addAll(_extractFromFullConfigObject(i, map));
+          final subNodes = _extractFromFullConfigObject(i, map);
+          if (subNodes.isNotEmpty) {
+            final reserved = <String>{
+              ...seenTags,
+              for (final n in subNodes)
+                if ((n['tag'] ?? '').toString().trim().isNotEmpty)
+                  n['tag'].toString().trim(),
+            };
+            final remap = <String, String>{};
+            for (final n in subNodes) {
+              final t = (n['tag'] ?? '').toString().trim();
+              if (t.isNotEmpty && seenTags.contains(t) && !remap.containsKey(t)) {
+                final cand = _deduplicateTag(t, reserved);
+                reserved.add(cand);
+                remap[t] = cand;
+              }
+            }
+            if (remap.isNotEmpty) {
+              for (final n in subNodes) {
+                final t = (n['tag'] ?? '').toString().trim();
+                if (remap.containsKey(t)) {
+                  n['tag'] = remap[t];
+                }
+                final d = (n['detour'] ?? '').toString().trim();
+                if (remap.containsKey(d)) {
+                  n['detour'] = remap[d];
+                }
+                if ((n['type'] ?? '').toString().toLowerCase() == 'urltest' &&
+                    n['outbounds'] is List) {
+                  n['outbounds'] = (n['outbounds'] as List)
+                      .map((m) => remap[m.toString().trim()] ?? m)
+                      .toList();
+                }
+              }
+            }
+            res.addAll(subNodes);
+          }
         } else {
           final nested = _extractOutboundsFromJson(map, depth: depth + 1);
           if (nested.isNotEmpty) res.addAll(nested);
+        }
+        for (var k = startIdx; k < res.length; k++) {
+          final t = (res[k]['tag'] ?? '').toString().trim();
+          if (t.isNotEmpty) seenTags.add(t);
         }
       }
       return res;
@@ -2767,7 +3045,7 @@ class LinkParser {
         nodes.addAll(_convertXrayOutbound(i, map));
       } else if (map['type'] is String) {
         final ty = (map['type'] as String).toLowerCase();
-        if (!const {'direct', 'block', 'dns', 'selector', 'urltest'}.contains(ty)) {
+        if (!const {'direct', 'block', 'dns', 'selector'}.contains(ty)) {
           nodes.add(map);
         }
       }
@@ -2796,9 +3074,103 @@ class LinkParser {
             .toList()
         : nodes;
 
+    final existingUrltestMembers = <String>{
+      for (final n in entryNodes)
+        if ((n['type'] ?? '').toString().toLowerCase() == 'urltest' && n['outbounds'] is List)
+          for (final m in n['outbounds'] as List)
+            if (m.toString().trim().isNotEmpty) m.toString().trim(),
+    };
+
+    // Разбор Xray routing.balancers (selector + burstObservatory/observatory -> urltest-группа)
+    final routingMap = cfgMap['routing'] is Map ? cfgMap['routing'] as Map : null;
+    final rawBalancers =
+        routingMap?['balancers'] is List ? routingMap!['balancers'] as List : const [];
+    final balancerPlans = <(String, List<String>)>[];
+    if (rawBalancers.isNotEmpty) {
+      for (var bIdx = 0; bIdx < rawBalancers.length; bIdx++) {
+        final bal = rawBalancers[bIdx];
+        if (bal is! Map) continue;
+        final selectors = (bal['selector'] is List ? bal['selector'] as List : const [])
+            .map((e) => e.toString())
+            .where((s) => s.isNotEmpty)
+            .toList(growable: false);
+        if (selectors.isEmpty) continue;
+        final matched = <String>[];
+        for (final n in entryNodes) {
+          if ((n['type'] ?? '').toString().toLowerCase() == 'urltest') continue;
+          final origTag = (n['tag'] ?? '').toString().trim();
+          if (origTag.isEmpty) continue;
+          final matches = selectors.any(
+            (sel) => origTag == sel || origTag.startsWith('$sel-') || origTag.startsWith(sel),
+          );
+          if (matches && !matched.contains(origTag)) {
+            matched.add(origTag);
+          }
+        }
+        if (matched.isNotEmpty) {
+          final bTag = (bal['tag'] ?? '').toString().trim();
+          balancerPlans.add((bTag.isNotEmpty ? bTag : 'balancer-${bIdx + 1}', matched));
+        }
+      }
+    }
+
+    final allBalancerMembers = <String>{
+      for (final plan in balancerPlans) ...plan.$2,
+    };
+
     final result = <Map<String, dynamic>>[];
+    if (balancerPlans.isNotEmpty) {
+      final obs = cfgMap['observatory'] is Map ? cfgMap['observatory'] as Map : null;
+      final burst = (cfgMap['burstObservatory'] ?? cfgMap['burst_observatory']);
+      final burstPing = burst is Map && (burst['pingConfig'] ?? burst['ping_config']) is Map
+          ? (burst['pingConfig'] ?? burst['ping_config']) as Map
+          : null;
+      final probeUrl = (burstPing?['destination'] ??
+              burstPing?['url'] ??
+              obs?['probeURL'] ??
+              obs?['probeUrl'] ??
+              obs?['probe_url'] ??
+              '')
+          .toString()
+          .trim();
+      final probeInterval = (burstPing?['interval'] ??
+              obs?['probeInterval'] ??
+              obs?['probe_interval'] ??
+              '')
+          .toString()
+          .trim();
+
+      for (var pIdx = 0; pIdx < balancerPlans.length; pIdx++) {
+        final (bTag, members) = balancerPlans[pIdx];
+        final groupTag = (balancerPlans.length == 1 && cfgRemarks.isNotEmpty)
+            ? cfgRemarks
+            : (bTag.isNotEmpty
+                ? bTag
+                : (cfgRemarks.isNotEmpty ? '$cfgRemarks-${pIdx + 1}' : 'urltest-${cfgIdx + 1}'));
+        result.add({
+          'type': 'urltest',
+          'tag': groupTag,
+          'outbounds': members,
+          'remark': groupTag,
+          '__tachyon_allow_group': true,
+          if (probeUrl.isNotEmpty) 'url': probeUrl,
+          if (probeInterval.isNotEmpty) 'interval': probeInterval,
+        });
+      }
+    }
+
+    final nonBalancerEntries = entryNodes
+        .where(
+          (n) =>
+              (n['type'] ?? '').toString().toLowerCase() != 'urltest' &&
+              !allBalancerMembers.contains((n['tag'] ?? '').toString().trim()) &&
+              !existingUrltestMembers.contains((n['tag'] ?? '').toString().trim()),
+        )
+        .length;
+
     for (var i = 0; i < entryNodes.length; i++) {
       final mainNode = Map<String, dynamic>.from(entryNodes[i]);
+      final origTag = (mainNode['tag'] ?? '').toString().trim();
       final firstHopTag = (mainNode['detour'] ?? '').toString().trim();
       if (firstHopTag.isNotEmpty && byTag.containsKey(firstHopTag)) {
         final chainOutbounds = <Map<String, dynamic>>[];
@@ -2829,9 +3201,13 @@ class LinkParser {
         mainNode.remove('detour');
       }
 
-      if (cfgRemarks.isNotEmpty) {
-        final origTag = (mainNode['tag'] ?? '').toString().trim();
-        mainNode['tag'] = entryNodes.length == 1
+      if (allBalancerMembers.contains(origTag)) {
+        mainNode['__tachyon_hidden'] = true;
+      } else if (cfgRemarks.isNotEmpty &&
+          !existingUrltestMembers.contains(origTag) &&
+          (balancerPlans.isEmpty ||
+              (mainNode['type'] ?? '').toString().toLowerCase() != 'urltest')) {
+        mainNode['tag'] = nonBalancerEntries <= 1
             ? cfgRemarks
             : (origTag.isEmpty ||
                     origTag == 'proxy' ||
@@ -2890,7 +3266,23 @@ class LinkParser {
 
     switch (proto) {
       case 'vless':
-        final vnext = settings['vnext'] is List ? settings['vnext'] as List : const [];
+        final vnext = settings['vnext'] is List && (settings['vnext'] as List).isNotEmpty
+            ? settings['vnext'] as List
+            : (settings['address'] != null
+                ? [
+                    {
+                      'address': settings['address'],
+                      'port': settings['port'],
+                      'users': [
+                        {
+                          'id': settings['id'],
+                          'flow': settings['flow'],
+                          'encryption': settings['encryption'],
+                        },
+                      ],
+                    },
+                  ]
+                : const []);
         for (final v in vnext) {
           if (v is! Map) continue;
           final addr = (v['address'] ?? '').toString();
@@ -2918,7 +3310,23 @@ class LinkParser {
           }
         }
       case 'vmess':
-        final vnext = settings['vnext'] is List ? settings['vnext'] as List : const [];
+        final vnext = settings['vnext'] is List && (settings['vnext'] as List).isNotEmpty
+            ? settings['vnext'] as List
+            : (settings['address'] != null
+                ? [
+                    {
+                      'address': settings['address'],
+                      'port': settings['port'],
+                      'users': [
+                        {
+                          'id': settings['id'],
+                          'security': settings['security'],
+                          'alterId': settings['alterId'],
+                        },
+                      ],
+                    },
+                  ]
+                : const []);
         for (final v in vnext) {
           if (v is! Map) continue;
           final addr = (v['address'] ?? '').toString();
@@ -2942,7 +3350,9 @@ class LinkParser {
           }
         }
       case 'trojan':
-        final servers = settings['servers'] is List ? settings['servers'] as List : const [];
+        final servers = settings['servers'] is List
+            ? settings['servers'] as List
+            : (settings['address'] != null ? [settings] : const []);
         for (final s in servers) {
           if (s is! Map) continue;
           final addr = (s['address'] ?? '').toString();
@@ -2960,7 +3370,9 @@ class LinkParser {
           out.add(node);
         }
       case 'shadowsocks':
-        final servers = settings['servers'] is List ? settings['servers'] as List : const [];
+        final servers = settings['servers'] is List
+            ? settings['servers'] as List
+            : (settings['address'] != null ? [settings] : const []);
         for (final s in servers) {
           if (s is! Map) continue;
           final addr = (s['address'] ?? '').toString();
@@ -3031,6 +3443,14 @@ class LinkParser {
         }
       case 'hysteria2':
       case 'hy2':
+      case 'hysteria':
+        final hs = stream?['hysteriaSettings'] is Map ? stream!['hysteriaSettings'] as Map : const {};
+        if (proto == 'hysteria' &&
+            (_toInt(settings['version']) ?? _toInt(hs['version']) ?? 0) != 2 &&
+            stream?['hysteriaSettings'] is! Map &&
+            (stream?['network'] ?? '').toString().toLowerCase() != 'hysteria') {
+          break;
+        }
         final servers = settings['servers'] is List
             ? settings['servers'] as List
             : (settings['address'] != null ? [settings] : const []);
@@ -3038,7 +3458,13 @@ class LinkParser {
           if (s is! Map) continue;
           final addr = (s['address'] ?? '').toString();
           final port = _toInt(s['port']) ?? 443;
-          final pass = (s['password'] ?? settings['password'] ?? settings['auth'] ?? '').toString();
+          final pass = (s['password'] ??
+                  settings['password'] ??
+                  settings['auth'] ??
+                  hs['auth'] ??
+                  hs['password'] ??
+                  '')
+              .toString();
           if (addr.isEmpty) continue;
           final node = <String, dynamic>{
             'type': 'hysteria2',
@@ -4002,6 +4428,24 @@ class LinkParser {
     }
     if (server.isEmpty && item['token'] == null && type != 'tailscale') return null;
 
+    final hasServerPorts = _hasMapServerPorts(item) ||
+        (item['peers'] is List &&
+            (item['peers'] as List).isNotEmpty &&
+            (item['peers'] as List).first is Map &&
+            _hasMapServerPorts(Map<String, dynamic>.from((item['peers'] as List).first as Map)));
+    if (type != 'tailscale' &&
+        item['token'] == null &&
+        isDummyOrStubServer(server, port, hasServerPorts: hasServerPorts)) {
+      return null;
+    }
+
+    final tag = (item['tag'] ?? '').toString().trim();
+    final lowerServer = server.trim().toLowerCase();
+    if ((lowerServer == '127.0.0.1' || lowerServer == 'localhost') &&
+        _isUnsupportedStubTag(tag)) {
+      return null;
+    }
+
     final rest = Map<String, dynamic>.from(item)
       ..remove('type')
       ..remove('tag')
@@ -4158,19 +4602,26 @@ class LinkParser {
             '')
         .toString();
     final method = (rest.remove('method') ?? '').toString();
-    final flow = normalizeVlessFlow((rest.remove('flow') ?? '').toString());
+    final rawFlow = (rest.remove('flow') ?? '').toString().trim();
+    if (type == 'vless' && rawFlow.toLowerCase() == 'xtls-rprx-direct') {
+      return null;
+    }
+    final flow = normalizeVlessFlow(rawFlow);
     final pubKey = (reality?['public_key'] ??
             rest['peer_public_key'] ??
             rest['public_key'] ??
             '')
         .toString()
         .trim();
+    if (reality != null && reality['enabled'] != false && pubKey.isEmpty) {
+      return null;
+    }
     final shortId = normalizeRealityShortId((reality?['short_id'] ?? '').toString());
-    final tag = (item['tag'] ?? '').toString().trim();
+    final tagForName = (item['tag'] ?? '').toString().trim();
 
     return Profile(
-      id: _id(type, '$server:$port:$uuid:$password:$tag'),
-      name: tag.isNotEmpty ? tag : '$server:$port',
+      id: _id(type, '$server:$port:$uuid:$password:$tagForName'),
+      name: tagForName.isNotEmpty ? tagForName : '$server:$port',
       type: type,
       server: server,
       port: port,

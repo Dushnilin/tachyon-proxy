@@ -272,6 +272,18 @@ class _ServerRow extends StatelessWidget {
   final String address;
   final VoidCallback onRemove;
 
+  static String _displayAddress(String raw) {
+    final trimmed = raw.trim();
+    if (!trimmed.toLowerCase().startsWith('tdns://')) return raw;
+    final clean = trimmed.split('#').first.trim();
+    final uri = Uri.tryParse(clean);
+    if (uri != null && uri.host.isNotEmpty) {
+      final portPart = uri.hasPort && uri.port > 0 ? ':${uri.port}' : '';
+      return 'tdns://***@${uri.host}$portPart${uri.path}';
+    }
+    return 'tdns://***';
+  }
+
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
@@ -283,7 +295,7 @@ class _ServerRow extends StatelessWidget {
           const SizedBox(width: Space.md),
           Expanded(
             child: Text(
-              address,
+              _displayAddress(address),
               style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
             ),
           ),

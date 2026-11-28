@@ -4023,6 +4023,66 @@ class RuntimeConfig {
   /// `https://host/dns-query` и превращается в `https`-сервер с путём.
   static Map<String, dynamic> _dnsServer(String raw, {String? tag}) {
     final value = raw.trim();
+    if (value.toLowerCase().startsWith('tdns://')) {
+      final clean = value.split('#').first.trim();
+      final uri = Uri.tryParse(clean);
+      if (uri != null && uri.host.isNotEmpty && uri.userInfo.contains(':')) {
+        final parts = uri.userInfo.split(':');
+        final keyId = parts.first.trim();
+        final psk = parts.sublist(1).join(':').trim();
+        final validKid = RegExp(r'^[0-9a-fA-F]{16}$').hasMatch(keyId);
+        final validPsk = RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(psk);
+        if (validKid && validPsk) {
+          final qp = uri.queryParameters;
+          final mode = (qp['mode'] ?? 'h2').trim().toLowerCase();
+          if (mode == 'h2') {
+            final codecRaw = (qp['codec'] ?? 'json').trim().toLowerCase();
+            final codec =
+                (codecRaw == 'bin' || codecRaw == 'binary' || codecRaw == 'raw')
+                    ? 'bin'
+                    : 'json';
+            final sni = (qp['sni'] ?? '').trim().isNotEmpty
+                ? qp['sni']!.trim()
+                : uri.host;
+            final fpRaw = (qp['fp'] ?? qp['fingerprint'] ?? 'chrome').trim();
+            final fp = fpRaw.isEmpty ? 'chrome' : fpRaw;
+            final padRaw =
+                int.tryParse((qp['pad'] ?? qp['padding'] ?? '512').trim()) ?? 512;
+            final padding = padRaw < 0 ? 0 : (padRaw > 4096 ? 4096 : padRaw);
+            final batchRaw =
+                int.tryParse((qp['batch'] ?? qp['batch_ms'] ?? '6').trim()) ?? 6;
+            final batchMs = batchRaw < 0 ? 0 : (batchRaw > 50 ? 50 : batchRaw);
+            final path =
+                uri.path.isEmpty || uri.path == '/'
+                    ? '/api/v2/telemetry/collect'
+                    : uri.path;
+            final resolvedTag =
+                tag ?? 'dns-${uri.host.replaceAll('.', '-').replaceAll(':', '-')}';
+            final isIp = InternetAddress.tryParse(uri.host) != null;
+            return {
+              'type': 'tdns',
+              'tag': resolvedTag,
+              'server': uri.host,
+              'server_port': uri.hasPort && uri.port > 0 ? uri.port : 443,
+              'path': path,
+              'mode': 'h2',
+              'codec': codec,
+              'key_id': keyId,
+              'psk': psk,
+              'padding': padding,
+              'batch_ms': batchMs,
+              'tls': {
+                'enabled': true,
+                'server_name': sni,
+                'utls': {'enabled': true, 'fingerprint': fp},
+              },
+              if (!resolvedTag.startsWith(bootstrapTag) && !isIp)
+                'domain_resolver': bootstrapTag,
+            };
+          }
+        }
+      }
+    }
     if (value.startsWith('https://')) {
       final uri = Uri.parse(value);
       final resolvedTag = tag ?? 'dns-${uri.host.replaceAll('.', '-')}';

@@ -3099,6 +3099,41 @@ tun-mtu 1480
 
       expect(dns['final'], isNot(RuntimeConfig.localDnsTag));
     });
+
+    test('RuntimeConfig разбирает tdns:// в type=tdns с uTLS и маскированием', () {
+      const psk = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+      const kid = '0123456789abcdef';
+      final cfg = RuntimeConfig(
+        profile: _vlessProfile(),
+        routingMode: RoutingMode.rules,
+        dns: const DnsSettings(
+          bootstrap: ['77.88.8.8'],
+          servers: [
+            'tdns://$kid:$psk@dns.example.com:443/api/v2/telemetry/collect?mode=h2&codec=json&sni=cdn.example.com&fp=chrome&pad=512&batch=6#MyTDNS',
+          ],
+        ),
+        ruleSets: const [],
+      );
+
+      final json = cfg.toJson();
+      final dns = json['dns'] as Map<String, dynamic>;
+      final servers = (dns['servers'] as List).cast<Map<String, dynamic>>();
+      final tdns = servers.firstWhere((s) => s['type'] == 'tdns');
+      expect(tdns['server'], 'dns.example.com');
+      expect(tdns['server_port'], 443);
+      expect(tdns['path'], '/api/v2/telemetry/collect');
+      expect(tdns['mode'], 'h2');
+      expect(tdns['codec'], 'json');
+      expect(tdns['key_id'], kid);
+      expect(tdns['psk'], psk);
+      expect(tdns['padding'], 512);
+      expect(tdns['batch_ms'], 6);
+      expect(tdns['domain_resolver'], RuntimeConfig.bootstrapTag);
+      final tls = tdns['tls'] as Map<String, dynamic>;
+      expect(tls['enabled'], isTrue);
+      expect(tls['server_name'], 'cdn.example.com');
+      expect((tls['utls'] as Map)['fingerprint'], 'chrome');
+    });
   });
 }
 
